@@ -277,7 +277,18 @@ bool AppWindow::create(
         clientHeight_ = static_cast<uint32_t>(std::max<LONG>(1, actualClient.bottom - actualClient.top));
     }
 
-    ShowWindow(hwnd_, noActivate ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL);
+    const int cmdShow = noActivate ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
+    ShowWindow(hwnd_, cmdShow);
+    // Win32's very first ShowWindow call in a GUI process honors STARTUPINFO.wShowWindow
+    // (which is SW_HIDE when spawned from a hidden console/task runner) and ignores cmdShow.
+    // Call ShowWindow a second time if the window is still hidden so explicit launches and
+    // SW_SHOWNOACTIVATE test runs always become visible on the desktop and taskbar.
+    if (!IsWindowVisible(hwnd_)) {
+        ShowWindow(hwnd_, cmdShow);
+    }
+    if (!noActivate) {
+        SetForegroundWindow(hwnd_);
+    }
     UpdateWindow(hwnd_);
 
     if (fullscreen) {

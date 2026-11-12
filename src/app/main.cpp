@@ -1310,6 +1310,7 @@ int main(int argc, char** argv) {
         audio.shutdown();
         return 1;
     }
+    (void)window.pumpMessages();
 
     D3D12Context d3d;
     std::string d3dInitErr;
