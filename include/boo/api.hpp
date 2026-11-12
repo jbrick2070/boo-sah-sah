@@ -134,6 +134,8 @@ struct InteractiveView {
     float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
     uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark
     uint32_t aovMode = 0;                // 0 = Final, 1..7 = AOV buffer inspection modes
+    uint32_t soloEngine = 0;             // 0 = All (Full Orchestra), 1 = RT, 2 = Tensor, 3 = NPU, 4 = CUDA, 5 = Codec
+    bool studioDrawerOpen = false;       // Keeps persistent bottom Studio Dock visible across Film/Explore/Wipe
     uint32_t marbleCount = 0;            // 0 = none (canonical), 1..kMaxMarbles = active physics spheres
     float marblePosRad[kMaxMarbles][4]{};  // xyz = world position, w = sphere radius (m)
     float marblePrevPos[kMaxMarbles][4]{}; // xyz = previous frame world position (for 3D motion vectors)

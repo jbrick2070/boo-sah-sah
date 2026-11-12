@@ -57,6 +57,12 @@ enum class TransportCommand : uint8_t {
     ResetAovMode,
     SpawnMarbles,
     ClearMarbles,
+    SoloEngineRT,
+    SoloEngineTensor,
+    SoloEngineNPU,
+    SoloEngineCUDA,
+    SoloEngineCodec,
+    RestoreAllEngines,
     Quit
 };
 

@@ -24,7 +24,7 @@ $StubExe = Join-Path $BuildDir "boo_installer_stub.exe"
 Write-Host "==> Validating asset & cue provenance manifest via unified boo_sah_sah.exe --validate-cues" -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
-    & $AppExe --validate-cues --no-activate
+    & $AppExe --validate-cues --no-activate | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Cue/manifest validation failed before packaging!" }
 } finally {
     Pop-Location

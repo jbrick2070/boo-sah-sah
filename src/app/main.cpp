@@ -200,6 +200,7 @@ struct InteractiveExploreController {
         SplitCurtain,
         SunSlider,
         AzmSlider,
+        TimelineScrub,
         AltSunOrbit,
         ViewportLook
     };
@@ -220,6 +221,9 @@ struct InteractiveExploreController {
     float abSplitRatio = 0.50f;
     uint32_t activePreset = 0;
     uint32_t aovMode = 0;
+    uint32_t soloEngine = 0;
+    bool studioDrawerOpen = false;
+    float pendingScrubRatio = -1.0f;
 
     struct MarbleBody {
         float pos[3]{0.0f, 0.0f, 0.0f};
@@ -739,65 +743,157 @@ struct InteractiveExploreController {
         const float w = static_cast<float>(std::max<uint32_t>(1u, window.clientWidth()));
         const float h = static_cast<float>(std::max<uint32_t>(1u, window.clientHeight()));
         const float u = std::clamp(std::floor(h / 540.0f), 1.0f, 3.0f);
+        const bool barVisible = settings.showOverlay && (hudMode != 3u) &&
+                                (studioDrawerOpen || exploreActive || sunOverride || lampsOff || aovMode != 0u || marbleCount != 0u || soloEngine != 0u) &&
+                                w >= 640.0f && h >= 300.0f;
+        const float barW = 536.0f * u;
+        const float barH = 54.0f * u;
+        const float barMinX = 0.5f * (w - barW);
+        const float barMinY = (hudMode == 1u) ? (h - 60.0f * u) : (h - 104.0f * u);
+        const float tlMinX  = 82.0f * u;
+        const float tlSizeX = std::max(90.0f, w * 0.20f);
+
+        // Right-click on the 5 bottom-right Engine Pills toggles that single engine in place!
+        if (snap.rmbJustPressed && settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
+            const float rightBase = w - 245.0f * u;
+            const float pTop = h - 34.0f * u;
+            if (snap.mouseY >= pTop && snap.mouseY <= pTop + 22.0f * u) {
+                static constexpr boo::TransportCommand kToggleCmds[5] = {
+                    boo::TransportCommand::ToggleRtRuntime,
+                    boo::TransportCommand::ToggleTensorRuntime,
+                    boo::TransportCommand::ToggleNpuRuntime,
+                    boo::TransportCommand::ToggleCudaRuntime,
+                    boo::TransportCommand::ToggleCodecRuntime
+                };
+                for (uint32_t e = 0; e < 5u; ++e) {
+                    const float pMinX = rightBase + static_cast<float>(e) * 47.0f * u;
+                    if (snap.mouseX >= pMinX && snap.mouseX <= pMinX + 42.0f * u) {
+                        window.pushCommandFromWndProc(kToggleCmds[e]);
+                        break;
+                    }
+                }
+            }
+        }
 
         if (snap.lmbJustPressed) {
             bool consumed = false;
 
-            // 1. Bottom HUD bar clickable "F:EXPLOR" / "F:RESUME" pill
-            if (settings.showOverlay && hudMode == 0u && w >= 480.0f && h >= 300.0f) {
+            // 1. Persistent Bottom Transport Bar (Timeline Scrubber + [< PRV] [PLAY/PAUS] [NEXT >] [F:FREE/FILM] + 5 SOLO Engine Pills)
+            if (settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
                 const float rightBase = w - 245.0f * u;
-                const float expMinX = rightBase - 94.0f * u;
-                const float expMinY = h - 34.0f * u;
-                if (snap.mouseX >= expMinX && snap.mouseX <= expMinX + 86.0f * u &&
-                    snap.mouseY >= expMinY && snap.mouseY <= expMinY + 22.0f * u) {
-                    window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
+                const float pTop = h - 34.0f * u;
+                const float pBot = pTop + 22.0f * u;
+                const float statX = tlMinX + tlSizeX + 44.0f * u;
+
+                // 1a. Timeline Scrub Bar
+                if (snap.mouseX >= tlMinX && snap.mouseX <= tlMinX + tlSizeX &&
+                    snap.mouseY >= h - 36.0f * u && snap.mouseY <= h - 10.0f * u) {
+                    dragTarget = DragTarget::TimelineScrub;
+                    pendingScrubRatio = std::clamp((snap.mouseX - tlMinX) / std::max(1.0f, tlSizeX), 0.0f, 0.9995f);
+                    consumed = true;
+                }
+                // 1b. 5 Clickable Hardware SOLO / ISOLATE Pills ([RT] [TNSR] [NPU] [CUDA] [CODC])
+                else if (rightBase > statX + 90.0f * u && snap.mouseY >= pTop && snap.mouseY <= pBot) {
+                    static constexpr boo::TransportCommand kSoloCmds[5] = {
+                        boo::TransportCommand::SoloEngineRT,
+                        boo::TransportCommand::SoloEngineTensor,
+                        boo::TransportCommand::SoloEngineNPU,
+                        boo::TransportCommand::SoloEngineCUDA,
+                        boo::TransportCommand::SoloEngineCodec
+                    };
+                    static constexpr boo::TransportCommand kToggleCmds[5] = {
+                        boo::TransportCommand::ToggleRtRuntime,
+                        boo::TransportCommand::ToggleTensorRuntime,
+                        boo::TransportCommand::ToggleNpuRuntime,
+                        boo::TransportCommand::ToggleCudaRuntime,
+                        boo::TransportCommand::ToggleCodecRuntime
+                    };
+                    for (uint32_t e = 0; e < 5u; ++e) {
+                        const float pMinX = rightBase + static_cast<float>(e) * 47.0f * u;
+                        if (snap.mouseX >= pMinX && snap.mouseX <= pMinX + 42.0f * u) {
+                            window.pushCommandFromWndProc(snap.shiftDown ? kToggleCmds[e] : kSoloCmds[e]);
+                            consumed = true;
+                            break;
+                        }
+                    }
+
+                    // 1c. [F:FREE / F:FILM] pill
+                    if (!consumed && rightBase - 86.0f * u > statX + 90.0f * u &&
+                        snap.mouseX >= rightBase - 86.0f * u && snap.mouseX <= rightBase - 8.0f * u) {
+                        window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
+                        consumed = true;
+                    }
+                    // 1d. [< PRV] [PLAY/PAUS] [NEXT >] pills
+                    if (!consumed && rightBase - 272.0f * u > statX + 82.0f * u) {
+                        if (snap.mouseX >= rightBase - 272.0f * u && snap.mouseX <= rightBase - 220.0f * u) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::PrevAct);
+                            consumed = true;
+                        } else if (snap.mouseX >= rightBase - 214.0f * u && snap.mouseX <= rightBase - 162.0f * u) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::TogglePlayPause);
+                            consumed = true;
+                        } else if (snap.mouseX >= rightBase - 156.0f * u && snap.mouseX <= rightBase - 92.0f * u) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
+                            consumed = true;
+                        }
+                    }
+                }
+            }
+
+            // 1e. Clickable "SOLO: ... [ALL]" Banner (returns to Full 5-Engine Orchestra)
+            if (!consumed && settings.showOverlay && (hudMode != 3u) && (soloEngine != 0u) && w >= 480.0f && h >= 300.0f) {
+                const float soloX = std::max(14.0f * u, w - 245.0f * u);
+                const float soloY = std::max(12.0f * u, barVisible ? (barMinY - 25.0f * u) : (h - 70.0f * u));
+                if (snap.mouseX >= soloX && snap.mouseX <= soloX + 230.0f * u &&
+                    snap.mouseY >= soloY && snap.mouseY <= soloY + 20.0f * u) {
+                    window.pushCommandFromWndProc(boo::TransportCommand::RestoreAllEngines);
                     consumed = true;
                 }
             }
 
-            // 2. Top/Bottom RTX Showcase Studio Bar buttons & sliders
-            const bool barVisible = settings.showOverlay && (hudMode != 3u) &&
-                                    (exploreActive || sunOverride || lampsOff || aovMode != 0u || marbleCount != 0u) &&
-                                    w >= 640.0f && h >= 300.0f;
+            // 2. Persistent Bottom Interactive RTX Studio Dock buttons & sliders
             if (!consumed && barVisible) {
-                const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 216.0f * u, 322.0f * u) : (0.5f * w - 216.0f * u);
-                const float barMinY = (hudMode == 2u) ? (h - 68.0f * u) : (14.0f * u);
-                if (snap.mouseX >= barMinX && snap.mouseX <= barMinX + 432.0f * u &&
-                    snap.mouseY >= barMinY && snap.mouseY <= barMinY + 52.0f * u) {
+                if (snap.mouseX >= barMinX && snap.mouseX <= barMinX + barW &&
+                    snap.mouseY >= barMinY && snap.mouseY <= barMinY + barH) {
                     consumed = true;
                     const float rx = (snap.mouseX - barMinX) / u;
                     const float ry = (snap.mouseY - barMinY) / u;
                     if (ry >= 4.0f && ry <= 24.0f) {
-                        if (rx >= 6.0f && rx <= 64.0f) {
+                        if (rx >= 6.0f && rx <= 56.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
-                        } else if (rx >= 166.0f && rx <= 206.0f) {
+                        } else if (rx >= 156.0f && rx <= 196.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::TogglePracticalLamps);
-                        } else if (rx >= 210.0f && rx <= 250.0f) {
+                        } else if (rx >= 200.0f && rx <= 240.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ToggleRtxSplitWipe);
-                        } else if (rx >= 254.0f && rx <= 294.0f) {
+                        } else if (rx >= 244.0f && rx <= 284.0f) {
                             window.pushCommandFromWndProc(snap.shiftDown ? boo::TransportCommand::ResetAovMode : boo::TransportCommand::CycleAovMode);
-                        } else if (rx >= 298.0f && rx <= 340.0f) {
+                        } else if (rx >= 288.0f && rx <= 330.0f) {
                             window.pushCommandFromWndProc(snap.shiftDown ? boo::TransportCommand::ClearMarbles : boo::TransportCommand::SpawnMarbles);
-                        } else if (rx >= 344.0f && rx <= 429.0f) {
-                            const uint32_t k = std::min<uint32_t>(5u, static_cast<uint32_t>((rx - 344.0f) / 14.2f));
+                        } else if (rx >= 336.0f && rx <= 354.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::PrevAct);
+                        } else if (rx >= 357.0f && rx <= 444.0f) {
+                            const uint32_t k = std::min<uint32_t>(5u, static_cast<uint32_t>((rx - 357.0f) / 14.5f));
                             window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
                                 static_cast<int>(boo::TransportCommand::HeroPreset1) + static_cast<int>(k)));
+                        } else if (rx >= 447.0f && rx <= 530.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
                         }
-                    } else if (ry >= 27.0f && ry <= 48.0f) {
-                        if (rx >= 30.0f && rx <= 185.0f) {
+                    } else if (ry >= 27.0f && ry <= 49.0f) {
+                        if (rx >= 30.0f && rx <= 192.0f) {
                             dragTarget = DragTarget::SunSlider;
                             sunOverride = true;
-                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (148.0f * u), 0.0f, 1.0f);
+                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (156.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 212.0f && rx <= 367.0f) {
+                        } else if (rx >= 222.0f && rx <= 384.0f) {
                             dragTarget = DragTarget::AzmSlider;
                             sunOverride = true;
-                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 216.0f * u)) / (148.0f * u), 0.0f, 1.0f);
+                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 226.0f * u)) / (156.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 370.0f && rx <= 426.0f) {
+                        } else if (rx >= 390.0f && rx <= 436.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ResetInteractiveLighting);
+                        } else if (rx >= 442.0f && rx <= 530.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
                         }
                     }
                 }
@@ -824,14 +920,15 @@ struct InteractiveExploreController {
             }
         }
 
-        // Ongoing slider / split-curtain drag updates
+        // Ongoing slider / timeline / split-curtain drag updates
         if (snap.lmbDown) {
-            const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 216.0f * u, 322.0f * u) : (0.5f * w - 216.0f * u);
-            if (dragTarget == DragTarget::SplitCurtain) {
+            if (dragTarget == DragTarget::TimelineScrub) {
+                pendingScrubRatio = std::clamp((snap.mouseX - tlMinX) / std::max(1.0f, tlSizeX), 0.0f, 0.9995f);
+            } else if (dragTarget == DragTarget::SplitCurtain) {
                 const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
                 abSplitRatio = std::clamp((snap.mouseX - lb.x) / std::max(1.0f, lb.width), 0.05f, 0.95f);
             } else if (dragTarget == DragTarget::SunSlider) {
-                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (148.0f * u), 0.0f, 1.0f);
+                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (156.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextEl - sunElevation01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunElevation01 = nextEl;
@@ -839,7 +936,7 @@ struct InteractiveExploreController {
                     hasPrevState = false;
                 }
             } else if (dragTarget == DragTarget::AzmSlider) {
-                const float nextAz = std::clamp((snap.mouseX - (barMinX + 216.0f * u)) / (148.0f * u), 0.0f, 1.0f);
+                const float nextAz = std::clamp((snap.mouseX - (barMinX + 226.0f * u)) / (156.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextAz - sunAzimuth01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunAzimuth01 = nextAz;
@@ -993,6 +1090,8 @@ struct InteractiveExploreController {
         ioCtx.interactive.abSplitRatio = abSplitRatio;
         ioCtx.interactive.activePreset = activePreset;
         ioCtx.interactive.aovMode = aovMode;
+        ioCtx.interactive.soloEngine = soloEngine;
+        ioCtx.interactive.studioDrawerOpen = studioDrawerOpen;
         ioCtx.interactive.marbleCount = marbleCount;
         for (uint32_t m = 0; m < marbleCount && m < boo::InteractiveView::kMaxMarbles; ++m) {
             ioCtx.interactive.marblePosRad[m][0] = marbles[m].pos[0];
@@ -1049,8 +1148,23 @@ int main(int argc, char** argv) {
     using namespace boo;
 
     std::vector<std::string> rawArgs;
+    bool isCliQuery = false;
     for (int i = 1; i < argc; ++i) {
         rawArgs.emplace_back(argv[i]);
+        const std::string& a = rawArgs.back();
+        if (a == "--help" || a == "-h" || a == "--validate-cues" || a == "--bench" || a == "--headless-probe") {
+            isCliQuery = true;
+        }
+    }
+    if (isCliQuery) {
+        const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        const bool hasPipeOrFile = (hOut != nullptr && hOut != INVALID_HANDLE_VALUE && GetFileType(hOut) != FILE_TYPE_UNKNOWN);
+        if (!hasPipeOrFile && AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* fOut = nullptr;
+            FILE* fErr = nullptr;
+            (void)freopen_s(&fOut, "CONOUT$", "w", stdout);
+            (void)freopen_s(&fErr, "CONOUT$", "w", stderr);
+        }
     }
 
     // Pre-scan for custom --config before loading defaults
@@ -1511,6 +1625,7 @@ int main(int argc, char** argv) {
     uint32_t hudMode = settings.showOverlay ? 0u : 3u;
     AbCompareEngine abCompareEngine = AbCompareEngine::RT;
     InteractiveExploreController interactiveCtrl{};
+    interactiveCtrl.studioDrawerOpen = !settings.noActivateWindow;
     interactiveCtrl.recomputeSunDir();
     if (settings.initialExplorePreset >= 1u && settings.initialExplorePreset <= 6u) {
         interactiveCtrl.applyHeroPreset(
@@ -1519,6 +1634,26 @@ int main(int argc, char** argv) {
         interactiveCtrl.enterExplore(
             resolveShowVisualMode(cueSheet, settings.playbackMode), clock, audio, audioClockReady, window, settings, 0.5f);
     }
+
+    auto applyAllEnginesRestored = [&]() {
+        interactiveCtrl.soloEngine = 0u;
+        settings.disableRT = false;
+        settings.disableCUDA = false;
+        settings.disableTensor = false;
+        settings.disableNPU = false;
+        settings.disableNVENC = false;
+        settings.enableSignalHijack = false;
+        orchestrator.setDisableRt(false);
+        orchestrator.setDisableCuda(false);
+        orchestrator.setDisableTensor(false);
+        orchestrator.setDisableCodec(false);
+        orchestrator.setCodecSignalHijackActive(false);
+        asyncDirector.setDisableNpu(!findQualityPresetSpec(presets, qualityLadder.currentPreset()).allowNpu);
+        settings.playbackMode = PlaybackMode::FullFilm;
+        clock.clearLoopRange();
+        clock.setLoopEnabled(settings.loop);
+        interactiveCtrl.hasPrevState = false;
+    };
 
     // One recovery policy covers loss during resize, fence waits, resource sync,
     // and Present. The 48 kHz transport is deliberately never stopped or rebased.
@@ -1582,6 +1717,30 @@ int main(int argc, char** argv) {
         BooXInputGamepad padState{};
         bool hasGamepad = false;
         interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode, padState, hasGamepad);
+        if (interactiveCtrl.pendingScrubRatio >= 0.0f) {
+            if (interactiveCtrl.exploreActive) {
+                interactiveCtrl.exploreActive = false;
+                interactiveCtrl.activePreset = 0;
+                interactiveCtrl.blendT = 0.0f;
+                interactiveCtrl.hasPrevState = false;
+                window.setExploreKeyCapture(false);
+            }
+            if (settings.playbackMode != PlaybackMode::FullFilm) {
+                settings.playbackMode = PlaybackMode::FullFilm;
+            }
+            clock.clearLoopRange();
+            clock.setLoopEnabled(settings.loop);
+            const int64_t targetSample = std::clamp<int64_t>(
+                static_cast<int64_t>(static_cast<double>(interactiveCtrl.pendingScrubRatio) * static_cast<double>(cueSheet.durationSamples)),
+                0, std::max<int64_t>(0, cueSheet.durationSamples - 1));
+            clock.seekToSample(targetSample);
+            if (audioClockReady) {
+                audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+            }
+            orchestrator.resetTo(clock.currentSeconds());
+            interactiveCtrl.pendingScrubRatio = -1.0f;
+        }
 
         TransportCommand cmd = TransportCommand::None;
         while (window.popCommand(cmd)) {
@@ -1625,10 +1784,22 @@ int main(int argc, char** argv) {
                     running = false;
                     break;
                 case TransportCommand::TogglePlayPause:
-                    clock.togglePause();
-                    audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                    if (interactiveCtrl.exploreActive &&
+                        (clock.state() == TransportState::Paused || clock.state() == TransportState::Ended)) {
+                        interactiveCtrl.exitExplore(clock, audio, audioClockReady, window);
+                    } else {
+                        clock.togglePause();
+                        audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                    }
                     break;
                 case TransportCommand::Restart: {
+                    if (interactiveCtrl.exploreActive) {
+                        interactiveCtrl.exploreActive = false;
+                        interactiveCtrl.activePreset = 0;
+                        interactiveCtrl.blendT = 0.0f;
+                        interactiveCtrl.hasPrevState = false;
+                        window.setExploreKeyCapture(false);
+                    }
                     const int64_t rstSample = (settings.playbackMode != PlaybackMode::FullFilm) ? modeRange.startSample : 0;
                     clock.seekToSample(rstSample);
                     if (audioClockReady) {
@@ -1639,22 +1810,50 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case TransportCommand::NextAct: {
-                    const size_t cur = findSceneIndexAtSample(cueSheet, clock.currentSample());
-                    const size_t nxt = (cur + 1) % cueSheet.scenes.size();
-                    clock.seekToSample(cueSheet.scenes[nxt].startSample);
-                    if (audioClockReady) {
-                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
-                        audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                    if (interactiveCtrl.exploreActive) {
+                        const uint32_t nxtP = (interactiveCtrl.activePreset % 6u) + 1u;
+                        interactiveCtrl.applyHeroPreset(
+                            nxtP, cueSheet, settings, clock, audio, audioClockReady, orchestrator, window);
+                        break;
+                    }
+                    if (!cueSheet.scenes.empty()) {
+                        if (settings.playbackMode != PlaybackMode::FullFilm) {
+                            settings.playbackMode = PlaybackMode::FullFilm;
+                        }
+                        clock.clearLoopRange();
+                        clock.setLoopEnabled(settings.loop);
+                        const size_t cur = findSceneIndexAtSample(cueSheet, clock.currentSample());
+                        const size_t nxt = (cur + 1) % cueSheet.scenes.size();
+                        clock.seekToSample(cueSheet.scenes[nxt].startSample);
+                        if (audioClockReady) {
+                            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                            audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                        }
+                        orchestrator.resetTo(clock.currentSeconds());
                     }
                     break;
                 }
                 case TransportCommand::PrevAct: {
-                    const size_t cur = findSceneIndexAtSample(cueSheet, clock.currentSample());
-                    const size_t prv = (cur > 0) ? (cur - 1) : 0;
-                    clock.seekToSample(cueSheet.scenes[prv].startSample);
-                    if (audioClockReady) {
-                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
-                        audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                    if (interactiveCtrl.exploreActive) {
+                        const uint32_t prvP = (interactiveCtrl.activePreset <= 1u) ? 6u : (interactiveCtrl.activePreset - 1u);
+                        interactiveCtrl.applyHeroPreset(
+                            prvP, cueSheet, settings, clock, audio, audioClockReady, orchestrator, window);
+                        break;
+                    }
+                    if (!cueSheet.scenes.empty()) {
+                        if (settings.playbackMode != PlaybackMode::FullFilm) {
+                            settings.playbackMode = PlaybackMode::FullFilm;
+                        }
+                        clock.clearLoopRange();
+                        clock.setLoopEnabled(settings.loop);
+                        const size_t cur = findSceneIndexAtSample(cueSheet, clock.currentSample());
+                        const size_t prv = (cur > 0) ? (cur - 1) : (cueSheet.scenes.size() - 1);
+                        clock.seekToSample(cueSheet.scenes[prv].startSample);
+                        if (audioClockReady) {
+                            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                            audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
+                        }
+                        orchestrator.resetTo(clock.currentSeconds());
                     }
                     break;
                 }
@@ -1787,7 +1986,9 @@ int main(int argc, char** argv) {
                 case TransportCommand::SelectModeNPU:
                 case TransportCommand::SelectModeCUDA:
                 case TransportCommand::SelectModeFinale: {
-                    if (cmd == TransportCommand::SelectModeFull) settings.playbackMode = PlaybackMode::FullFilm;
+                    if (cmd == TransportCommand::SelectModeFull) {
+                        applyAllEnginesRestored();
+                    }
                     if (cmd == TransportCommand::SelectModeRT) settings.playbackMode = PlaybackMode::SoloRT;
                     if (cmd == TransportCommand::SelectModeTensor) settings.playbackMode = PlaybackMode::SoloTensor;
                     if (cmd == TransportCommand::SelectModeNPU) settings.playbackMode = PlaybackMode::SoloNPU;
@@ -1822,19 +2023,31 @@ int main(int argc, char** argv) {
                                             (interactiveCtrl.lampsOff ? "OFF" : "ON"));
                     break;
                 case TransportCommand::ToggleRtxSplitWipe:
-                    if (hudMode == 2u && abCompareEngine == AbCompareEngine::RT) {
+                    if (hudMode == 2u) {
                         hudMode = 0u;
                         settings.showOverlay = true;
-                        BOO_LOG_INFO("Render", "RTX Split-Screen Wipe [H]: OFF");
+                        BOO_LOG_INFO("Render", "Split-Screen Wipe [H]: OFF");
                     } else {
                         hudMode = 2u;
                         settings.showOverlay = true;
-                        abCompareEngine = AbCompareEngine::RT;
+                        if (interactiveCtrl.soloEngine == 2u) {
+                            abCompareEngine = AbCompareEngine::Tensor;
+                        } else if (interactiveCtrl.soloEngine == 4u) {
+                            abCompareEngine = AbCompareEngine::CUDA;
+                        } else if (interactiveCtrl.soloEngine == 5u) {
+                            abCompareEngine = AbCompareEngine::Codec;
+                        } else {
+                            abCompareEngine = AbCompareEngine::RT;
+                        }
                         orchestrator.setAbCompareEngine(abCompareEngine);
-                        BOO_LOG_INFO("Render", "RTX Split-Screen Wipe [H]: LIVE DXR vs RASTER (drag divider curtain)");
+                        BOO_LOG_INFO("Render", std::string("Split-Screen Wipe [H]: LIVE ") + toString(abCompareEngine) +
+                                               " vs FALLBACK (drag divider curtain)");
                     }
                     break;
                 case TransportCommand::ResetInteractiveLighting:
+                    if (interactiveCtrl.soloEngine != 0u) {
+                        applyAllEnginesRestored();
+                    }
                     interactiveCtrl.sunOverride = false;
                     interactiveCtrl.lampsOff = false;
                     interactiveCtrl.aovMode = 0u;
@@ -1844,8 +2057,149 @@ int main(int argc, char** argv) {
                     interactiveCtrl.recomputeSunDir();
                     interactiveCtrl.abSplitRatio = 0.50f;
                     interactiveCtrl.hasPrevState = false;
-                    BOO_LOG_INFO("Explore", "Reset interactive sun, practical lamps, AOVs, marbles & split curtain [F8]");
+                    BOO_LOG_INFO("Explore", "Reset interactive sun, practical lamps, AOVs, marbles, solo & split curtain [F8]");
                     break;
+                case TransportCommand::RestoreAllEngines:
+                    applyAllEnginesRestored();
+                    if (audioClockReady) {
+                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                    }
+                    orchestrator.resetTo(clock.currentSeconds());
+                    BOO_LOG_INFO("Show", "Hardware Orchestra [ALL]: Restored all 5 live hardware pillars");
+                    break;
+                case TransportCommand::SoloEngineRT:
+                case TransportCommand::SoloEngineTensor:
+                case TransportCommand::SoloEngineNPU:
+                case TransportCommand::SoloEngineCUDA:
+                case TransportCommand::SoloEngineCodec: {
+                    const uint32_t targetSolo =
+                        (cmd == TransportCommand::SoloEngineRT)     ? 1u :
+                        (cmd == TransportCommand::SoloEngineTensor) ? 2u :
+                        (cmd == TransportCommand::SoloEngineNPU)    ? 3u :
+                        (cmd == TransportCommand::SoloEngineCUDA)   ? 4u : 5u;
+
+                    if (interactiveCtrl.soloEngine == targetSolo) {
+                        applyAllEnginesRestored();
+                        if (audioClockReady) {
+                            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                        }
+                        orchestrator.resetTo(clock.currentSeconds());
+                        BOO_LOG_INFO("Show", "Hardware SOLO toggled OFF -> Restored all 5 live hardware pillars");
+                        break;
+                    }
+
+                    // Exit static camera lock so the isolated hardware showcase animates live immediately
+                    if (interactiveCtrl.exploreActive) {
+                        interactiveCtrl.exploreActive = false;
+                        interactiveCtrl.activePreset = 0;
+                        interactiveCtrl.blendT = 0.0f;
+                        interactiveCtrl.aovMode = 0u;
+                        interactiveCtrl.clearMarbles();
+                        interactiveCtrl.hasPrevState = false;
+                        window.setExploreKeyCapture(false);
+                    }
+                    if (clock.state() == TransportState::Paused || clock.state() == TransportState::Ended) {
+                        clock.resume();
+                        if (audioClockReady) audio.setPaused(false);
+                    }
+
+                    interactiveCtrl.soloEngine = targetSolo;
+                    settings.disableRT = false;
+                    settings.disableCUDA = false;
+                    settings.disableTensor = false;
+                    settings.disableNPU = false;
+                    settings.disableNVENC = false;
+                    settings.enableSignalHijack = false;
+
+                    const bool isFullFilm = (cueSheet.durationSamples >= TimelineClock::kFullFilmSamples);
+                    const char* soloDesc = "";
+                    if (targetSolo == 1u) { // RT DXR
+                        settings.disableCUDA = true;
+                        settings.disableTensor = true;
+                        settings.disableNPU = true;
+                        abCompareEngine = AbCompareEngine::RT;
+                        soloDesc = "SOLO 1/5: RT DXR 1.1 Ray Tracing (Mirror Intelligence & Glass Orchid)";
+                        if (isFullFilm) {
+                            settings.playbackMode = PlaybackMode::SoloRT;
+                            if (resolvePlaybackLoopRange(cueSheet, settings.playbackMode, modeRange)) {
+                                clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                                clock.setLoopEnabled(true);
+                                clock.seekToSample(modeRange.startSample);
+                            }
+                        }
+                    } else if (targetSolo == 2u) { // Tensor MMA
+                        settings.disableCUDA = true;
+                        settings.disableNPU = true;
+                        abCompareEngine = AbCompareEngine::Tensor;
+                        soloDesc = "SOLO 2/5: Tensor Core MMA SIREN Caustics (Neural Velvet)";
+                        if (isFullFilm) {
+                            settings.playbackMode = PlaybackMode::SoloTensor;
+                            if (resolvePlaybackLoopRange(cueSheet, settings.playbackMode, modeRange)) {
+                                clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                                clock.setLoopEnabled(true);
+                                clock.seekToSample(modeRange.startSample);
+                            }
+                        }
+                    } else if (targetSolo == 3u) { // NPU 5Hz Director
+                        settings.disableCUDA = true;
+                        settings.disableTensor = true;
+                        abCompareEngine = AbCompareEngine::RT;
+                        soloDesc = "SOLO 3/5: Intel OpenVINO NPU 5 Hz Stage Director (Madame N Botanical Sanctuary)";
+                        if (isFullFilm) {
+                            settings.playbackMode = PlaybackMode::SoloNPU;
+                            if (resolvePlaybackLoopRange(cueSheet, settings.playbackMode, modeRange)) {
+                                clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                                clock.setLoopEnabled(true);
+                                // Start right as Madame N's 5 Hz Sanctuary Bloom Reveal crests (168s..195s inside 150s..195s loop)
+                                clock.seekToSeconds(168.0);
+                            }
+                        }
+                    } else if (targetSolo == 4u) { // CUDA 65.5K Vortex
+                        settings.disableTensor = true;
+                        settings.disableNPU = true;
+                        abCompareEngine = AbCompareEngine::CUDA;
+                        soloDesc = "SOLO 4/5: CUDA 65,536-Particle Curl-Noise Vortex (Particle Mutiny)";
+                        if (isFullFilm) {
+                            settings.playbackMode = PlaybackMode::SoloCUDA;
+                            if (resolvePlaybackLoopRange(cueSheet, settings.playbackMode, modeRange)) {
+                                clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                                clock.setLoopEnabled(true);
+                                clock.seekToSample(modeRange.startSample);
+                            }
+                        }
+                    } else { // Codec NVENC + D3D12 Video Decode
+                        settings.disableCUDA = true;
+                        settings.disableTensor = true;
+                        settings.disableNPU = true;
+                        settings.enableSignalHijack = true;
+                        abCompareEngine = AbCompareEngine::Codec;
+                        soloDesc = "SOLO 5/5: NVENC + D3D12 Video H.264 Hardware Round-Trip (Signal Hijack)";
+                        if (isFullFilm) {
+                            settings.playbackMode = PlaybackMode::FullFilm;
+                            modeRange.startSample = TimelineClock::secondsToSamples(245.0, cueSheet.sampleRate);
+                            modeRange.endSample = TimelineClock::secondsToSamples(275.0, cueSheet.sampleRate);
+                            clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                            clock.setLoopEnabled(true);
+                            clock.seekToSeconds(246.0);
+                        }
+                    }
+
+                    orchestrator.setDisableRt(settings.disableRT);
+                    orchestrator.setDisableCuda(settings.disableCUDA);
+                    orchestrator.setDisableTensor(settings.disableTensor);
+                    orchestrator.setDisableCodec(settings.disableNVENC);
+                    orchestrator.setCodecSignalHijackActive(settings.enableSignalHijack);
+                    orchestrator.setAbCompareEngine(abCompareEngine);
+                    asyncDirector.setDisableNpu(settings.disableNPU || !findQualityPresetSpec(presets, qualityLadder.currentPreset()).allowNpu);
+                    interactiveCtrl.hasPrevState = false;
+                    if (audioClockReady) {
+                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                        audio.setPaused(false);
+                    }
+                    orchestrator.resetTo(clock.currentSeconds());
+                    BOO_LOG_INFO("Show", soloDesc);
+                    break;
+                }
                 case TransportCommand::CycleAovMode: {
                     static constexpr const char* kAovNames[8] = {
                         "0: Final Rendered",

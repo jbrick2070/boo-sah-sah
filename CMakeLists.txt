@@ -433,8 +433,9 @@ add_custom_target(boo_stage_assets ALL
     COMMENT "Staging cue sheets, models, artifact manifest, and config presets"
 )
 
-# 1. Main Milestone M1 Demoscene Application
-add_executable(boo_sah_sah src/app/main.cpp assets/icons/app_icon.rc)
+# 1. Main Milestone M1 Demoscene Application (Native WIN32 GUI subsystem — zero console window)
+add_executable(boo_sah_sah WIN32 src/app/main.cpp assets/icons/app_icon.rc)
+target_link_options(boo_sah_sah PRIVATE "/ENTRY:mainCRTStartup")
 target_include_directories(boo_sah_sah PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_sah_sah PRIVATE boo_core)
 add_dependencies(boo_sah_sah boo_stage_assets)
