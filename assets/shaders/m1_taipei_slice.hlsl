@@ -2995,11 +2995,36 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     }
     else if (isShow3D)
     {
-        if (!isMote && (instId % 6u) != 0u) return vout;
-        if (isMote)
+        if (gFilmTime >= 338.0)
         {
-            if ((instId % 6u) != 0u) return vout;
-            center = float3(0.0, 3.45, 5.35) + (center - float3(0.0, 7.5, 5.5)) * float3(0.56, 0.14, 0.42);
+            // Enclosed Dawn Bathroom Finale: ZERO indoor rain; ultra-subtle warm dust motes in window sunbeams
+            if (!isMote || (instId % 20u) != 0u) return vout;
+            float h1 = frac((float)instId * 0.6180339);
+            float h2 = frac((float)instId * 0.3819660);
+            float h3 = frac((float)instId * 0.7548776);
+            float driftT = gFilmTime * 0.08 + h1 * 6.2831853;
+            center = float3(
+                lerp(-0.32, 1.42, h1) + 0.06 * sin(driftT),
+                lerp(3.62, 5.02, h2) + 0.05 * cos(driftT * 0.85 + h3 * 4.0),
+                lerp(4.55, 6.28, h3) + 0.05 * sin(driftT * 0.72));
+        }
+        else if (gFilmTime >= 245.0 && gFilmTime < 275.0)
+        {
+            // Codec Hijack eVTOL Hovering Downwash Spray
+            if ((instId % 5u) != 0u) return vout;
+            float a = gFilmTime * 3.4 + instId * 0.031;
+            float r = (1.4 + frac(instId * 0.618) * 3.6) * (0.55 + 0.45 * age01);
+            center = float3(sin(a) * r, 3.85 - age01 * 2.1, -2.0 + cos(a) * r) + center * 0.04;
+            vel = float3(cos(a) * 3.8, -1.6, -sin(a) * 3.8) + vel * 0.10;
+        }
+        else
+        {
+            if (!isMote && (instId % 6u) != 0u) return vout;
+            if (isMote)
+            {
+                if ((instId % 6u) != 0u) return vout;
+                center = float3(0.0, 3.45, 5.35) + (center - float3(0.0, 7.5, 5.5)) * float3(0.56, 0.14, 0.42);
+            }
         }
     }
     float3 relCenter = center - gCamEye;
@@ -3050,11 +3075,12 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         axisWide = gCamRight * cs + gCamUp * sn;
         axisLong = -gCamRight * sn + gCamUp * cs;
 
-        float radScale = (isM2 || isShow3D) ? 0.48 : (isMutiny ? 0.54 : 1.0);
+        bool isDawnMote = isShow3D && (gFilmTime >= 338.0);
+        float radScale = isDawnMote ? 0.18 : ((isM2 || isShow3D) ? 0.48 : (isMutiny ? 0.54 : 1.0));
         float desiredRad = (0.0085 + 0.0070 * frac((float)instId * 0.371)) * radScale;
-        halfWid = max(desiredRad, pixelWorldSize * ((isM2 || isShow3D || isMutiny) ? 0.85 : 1.05));
+        halfWid = max(desiredRad, pixelWorldSize * ((isM2 || isShow3D || isMutiny) ? 0.78 : 1.05));
         halfLen = halfWid;
-        energy *= saturate(desiredRad / max(halfWid, 1e-4)) * (((isM2 || isShow3D) ? 0.42 : (isMutiny ? 0.52 : 0.55)) * moteGate);
+        energy *= saturate(desiredRad / max(halfWid, 1e-4)) * ((isDawnMote ? 0.16 : ((isM2 || isShow3D) ? 0.42 : (isMutiny ? 0.52 : 0.55))) * moteGate);
     }
 
     // Smooth lifecycle fade at birth & death so looping/respawning particles never pop

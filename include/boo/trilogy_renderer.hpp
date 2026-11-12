@@ -8,7 +8,9 @@ class TrilogyMeshRenderer {
 public:
     explicit TrilogyMeshRenderer(D3D12Context& context);
     ~TrilogyMeshRenderer();
-    bool initialize(bool injectMeshFailure, std::string* error, ShowVisualMode visualMode = ShowVisualMode::M2Trilogy180s);
+    bool initialize(bool injectMeshFailure, std::string* error,
+                    ShowVisualMode visualMode = ShowVisualMode::M2Trilogy180s,
+                    void* tensorTexture = nullptr);
     // Pass target resources must be in PIXEL_SHADER_RESOURCE state on entry and exit.
     bool record(void* commandList, const FrameContext& frame, const M1CameraState& camera,
                 void* hdr, void* distance, uint64_t tensorSrv, uint32_t width, uint32_t height,

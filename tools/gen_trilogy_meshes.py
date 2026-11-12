@@ -1,75 +1,119 @@
-"""Original procedural trilogy kits. Blender 5.2: --background --python this_file.
-BMESH001 v1: 64-byte header, 24-byte submesh records, 40-byte packed vertices.
-Coordinates exported Y-up; closed individual solids may overlap intentionally.
-No external assets, randomness, network access, or non-Blender dependencies.
+"""Deterministic Blender 5.2 -> BMESH001 v1 Asset Pipeline for BooSahSah.
+Combines precision procedural construction, architectural bevels/FWN normals,
+metric PBR UV projection, MikkTSpace-equivalent float64 UV-derivative tangents,
+and watertight solidified CC0 scanned botanical models.
 """
-import bpy, bmesh, math, struct, zlib, hashlib, json, os
+import bpy, bmesh, math, struct, zlib, hashlib, json, os, sys
+import numpy as np
 from pathlib import Path
-from mathutils import Vector
+from mathutils import Vector, Matrix, Euler
 from collections import defaultdict
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'assets' / 'meshes'
+CC0_MODELS = ROOT / 'third_party' / 'polyhaven_cc0' / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
 TAU = math.tau
 objects = []
 serial = 0
+
+# Real-world metric PBR texture tile repeat sizes (meters per [0..1] UV cycle)
+MAT_TILE_METERS = {
+    0: 1.40, 1: 2.80, 2: 2.20, 3: 0.65, 4: 0.55, 5: 2.00, 6: 0.80, 7: 3.20,
+    8: 0.45, 9: 0.45, 10: 0.50, 11: 0.55, 12: 1.50, 13: 2.00, 14: 2.00, 15: 0.80,
+    16: 0.50, 17: 1.00, 18: 0.80, 19: 18.0, 20: 1.15, 21: 1.20, 22: 0.65, 23: 0.28,
+    24: 1.85, 25: 0.24, 26: 0.68, 27: 0.48, 28: 0.48, 29: 1.00, 30: 1.00, 31: 1.15,
+    32: 1.20, 33: 0.26, 34: 1.20, 35: 0.22, 36: 1.00, 37: 0.24, 38: 0.40, 39: 1.05,
+    40: 1.50, 41: 1.35,
+}
 
 def atomic(path, data):
     tmp = path.with_suffix(path.suffix + '.tmp')
     tmp.write_bytes(data)
     os.replace(tmp, path)
 
-def keep(obj, name, mat, part=0, rough=.3, thick=.03):
+def keep(obj, name, mat, part=0, rough=.3, thick=.03, preserve_uv=False, smooth_angle=52.0, uv_grain='auto', uv_scale=1.0):
     global serial
     serial += 1
     obj.name = '%06d_%s' % (serial, name)
-    obj['mat'], obj['part'], obj['rough'], obj['thick'] = mat, part, rough, thick
+    obj['mat'], obj['part'], obj['rough'], obj['thick'] = int(mat), int(part), float(rough), float(thick)
+    obj['preserve_uv'] = bool(preserve_uv)
+    obj['smooth_angle'] = float(smooth_angle)
+    obj['uv_grain'] = str(uv_grain)
+    obj['uv_scale'] = float(uv_scale)
     objects.append(obj)
     return obj
 
-def box(name, pos, size, mat=0, part=0, bevel=0, rough=.3, rot_z=0.0):
+def box(name, pos, size, mat=0, part=0, bevel=0, rough=.3, rot_z=0.0, rot_euler=None, segments=2, uv_grain='auto', uv_scale=1.0):
     bpy.ops.mesh.primitive_cube_add(size=1, location=pos)
     obj = bpy.context.object
     obj.scale = size
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    if rot_z:
+    if rot_euler is not None:
+        obj.rotation_euler = rot_euler
+    elif rot_z:
         obj.rotation_euler.z = rot_z
     if bevel:
-        mod = obj.modifiers.new('machined_edges', 'BEVEL'); mod.width=bevel; mod.segments=2
-    return keep(obj, name, mat, part, rough=rough)
+        mod = obj.modifiers.new('machined_edges', 'BEVEL')
+        mod.width = bevel
+        mod.segments = segments
+        for f in obj.data.polygons:
+            f.use_smooth = True
+    return keep(obj, name, mat, part, rough=rough, smooth_angle=44.0 if bevel else 15.0, uv_grain=uv_grain, uv_scale=uv_scale)
 
-def sphere(name, pos, scale, mat, part=0, seg=24, rings=12, rough=.25):
+def sphere(name, pos, scale, mat, part=0, seg=24, rings=12, rough=.25, thick=.03):
     bpy.ops.mesh.primitive_uv_sphere_add(segments=seg, ring_count=rings, radius=1, location=pos)
-    obj=bpy.context.object; obj.scale=scale
-    for f in obj.data.polygons: f.use_smooth=True
-    return keep(obj,name,mat,part,rough=rough)
+    obj = bpy.context.object
+    obj.scale = scale
+    for f in obj.data.polygons:
+        f.use_smooth = True
+    return keep(obj, name, mat, part, rough=rough, thick=thick, smooth_angle=180.0)
 
-def rod(name, a, b, radius, mat=0, part=0, verts=12, rough=.3):
-    a,b=Vector(a),Vector(b); d=b-a
-    bpy.ops.mesh.primitive_cylinder_add(vertices=verts, radius=radius, depth=d.length, location=(a+b)*.5)
-    obj=bpy.context.object; obj.rotation_mode='QUATERNION'; obj.rotation_quaternion=d.to_track_quat('Z','Y')
-    return keep(obj,name,mat,part,rough=rough)
+def rod(name, a, b, radius, mat=0, part=0, verts=16, rough=.3, bevel=0.0, preserve_uv=None):
+    a, b = Vector(a), Vector(b)
+    d = b - a
+    if bevel > 0.0 and d.length > 2.5 * bevel:
+        u = d.normalized()
+        bw = min(bevel, 0.35 * radius, 0.25 * d.length)
+        r_in = max(radius - bw, radius * 0.5)
+        pts = [tuple(a + u * (0.15 * bw)), tuple(a + u * bw), tuple(b - u * bw), tuple(b - u * (0.15 * bw))]
+        return closed_tube(name, pts, [r_in, radius, radius, r_in], mat, part, n_ring=verts, rough=rough, thick=min(0.04, radius))
+    bpy.ops.mesh.primitive_cylinder_add(vertices=verts, radius=radius, depth=max(d.length, 1e-4), end_fill_type='TRIFAN', location=(a + b) * .5)
+    obj = bpy.context.object
+    obj.rotation_mode = 'QUATERNION'
+    obj.rotation_quaternion = d.to_track_quat('Z', 'Y')
+    if verts >= 12:
+        for f in obj.data.polygons:
+            f.use_smooth = True
+    keep_cyl_uv = (int(mat) in (8, 23)) if preserve_uv is None else bool(preserve_uv)
+    return keep(obj, name, mat, part, rough=rough, preserve_uv=keep_cyl_uv, smooth_angle=55.0)
 
-def torus(name,pos,radius,tube,mat=0,part=0,seg=64,rough=.25):
-    bpy.ops.mesh.primitive_torus_add(major_segments=seg,minor_segments=8,location=pos,major_radius=radius,minor_radius=tube)
-    return keep(bpy.context.object,name,mat,part,rough=rough)
+def torus(name, pos, radius, tube, mat=0, part=0, seg=64, minor_seg=12, rough=.25):
+    bpy.ops.mesh.primitive_torus_add(major_segments=seg, minor_segments=minor_seg, location=pos, major_radius=radius, minor_radius=tube)
+    obj = bpy.context.object
+    for f in obj.data.polygons:
+        f.use_smooth = True
+    return keep(obj, name, mat, part, rough=rough, smooth_angle=120.0)
 
-def mesh(name,verts,faces,mat,part=0,smooth=False,rough=.3,thick=.03):
-    m=bpy.data.meshes.new(name); m.from_pydata(verts,[],faces); m.update()
-    o=bpy.data.objects.new(name,m); bpy.context.collection.objects.link(o)
-    for f in m.polygons: f.use_smooth=smooth
-    return keep(o,name,mat,part,rough=rough,thick=thick)
+def mesh(name, verts, faces, mat, part=0, smooth=False, rough=.3, thick=.03, preserve_uv=False, smooth_angle=65.0):
+    m = bpy.data.meshes.new(name)
+    m.from_pydata(verts, [], faces)
+    m.update()
+    o = bpy.data.objects.new(name, m)
+    bpy.context.collection.objects.link(o)
+    for f in m.polygons:
+        f.use_smooth = smooth
+    return keep(o, name, mat, part, rough=rough, thick=thick, preserve_uv=preserve_uv, smooth_angle=smooth_angle if smooth else 15.0)
 
-def notched(name,z0,z1,w0,w1,mat=5,part=0,ox=0.0,oy=0.0,rough=.22):
-    # Double-notched corners, rather than a plain square prism.
-    outline=[(-1,-.70),(-.86,-.70),(-.86,-.86),(-.70,-.86),(-.70,-1),(.70,-1),(.70,-.86),(.86,-.86),(.86,-.70),(1,-.70),(1,.70),(.86,.70),(.86,.86),(.70,.86),(.70,1),(-.70,1),(-.70,.86),(-.86,.86),(-.86,.70),(-1,.70)]
-    n=len(outline); v=[(ox+x*w,oy+y*w,z) for z,w in [(z0,w0),(z1,w1)] for x,y in outline]
-    f=[tuple(reversed(range(n))),tuple(range(n,2*n))]+[(i,(i+1)%n,(i+1)%n+n,i+n) for i in range(n)]
-    return mesh(name,v,f,mat,part=part,rough=rough)
+def notched(name, z0, z1, w0, w1, mat=5, part=0, ox=0.0, oy=0.0, rough=.22):
+    outline = [(-1,-.70),(-.86,-.70),(-.86,-.86),(-.70,-.86),(-.70,-1),(.70,-1),(.70,-.86),(.86,-.86),(.86,-.70),(1,-.70),(1,.70),(.86,.70),(.86,.86),(.70,.86),(.70,1),(-.70,1),(-.70,.86),(-.86,.86),(-.86,.70),(-1,.70)]
+    n = len(outline)
+    v = [(ox + x * w, oy + y * w, z) for z, w in [(z0, w0), (z1, w1)] for x, y in outline]
+    f = [tuple(reversed(range(n))), tuple(range(n, 2 * n))] + [(i, (i + 1) % n, (i + 1) % n + n, i + n) for i in range(n)]
+    return mesh(name, v, f, mat, part=part, rough=rough)
 
 def closed_blade(name, nu, nv, eval_surf, mat, part, rough=.07):
-    """Watertight 2-manifold botanical shell with automatic outward normals, intrinsic UVs, and thickness."""
+    """Watertight 2-manifold botanical shell with automatic outward normals, [0..1]^2 UVs, and thickness."""
     verts = []
     thicks = []
     uvs_vert = []
@@ -93,16 +137,16 @@ def closed_blade(name, nu, nv, eval_surf, mat, part, rough=.07):
                 nrm = Vector((0.0, -1.0, 0.0))
             else:
                 nrm.normalize()
-            row.append((Vector(pos), nrm, th, u, v))
+            row.append((Vector(pos), nrm, th, u, 0.5 + 0.5 * v))
         grid.append(row)
     for side in (-1.0, 1.0):
         for i in range(nu + 1):
             for j in range(nv + 1):
-                pos, nrm, th, u, v = grid[i][j]
+                pos, nrm, th, u, v01 = grid[i][j]
                 p = pos + nrm * (side * 0.5 * th)
                 verts.append((p.x, p.y, p.z))
                 thicks.append(th)
-                uvs_vert.append((u, v))
+                uvs_vert.append((u, v01))
     layer = (nu + 1) * (nv + 1)
     faces = []
     for side in range(2):
@@ -133,48 +177,52 @@ def closed_blade(name, nu, nv, eval_surf, mat, part, rough=.07):
         th_attr.data[vi].value = tv
     o = bpy.data.objects.new(name, m)
     bpy.context.collection.objects.link(o)
-    return keep(o, name, mat, part=part, rough=rough, thick=.03)
+    return keep(o, name, mat, part=part, rough=rough, thick=.03, preserve_uv=True, smooth_angle=180.0)
 
-def closed_tube(name, centers, radii, mat, part, n_ring=14, rough=.18, thick=.04, flute_amp=0.0, flute_freq=3):
-    """Watertight 2-manifold swept botanical stem/pedicel/bud with end-cap poles."""
+def closed_tube(name, centers, radii, mat, part, n_ring=16, rough=.18, thick=.04, flute_amp=0.0, flute_freq=3):
+    """Watertight 2-manifold swept botanical/architectural tube with end-cap poles and [0..1]^2 UVs."""
     ns = len(centers)
     verts = []
     uvs_vert = []
     thicks = []
     frames = []
+    # Parallel-transport / continuous Bishop frame avoids 90-deg twist glitches along curved goosenecks!
+    p0 = Vector(centers[0])
+    p1 = Vector(centers[min(ns - 1, 1)])
+    t_init = (p1 - p0)
+    t_init = Vector((0.0, 0.0, 1.0)) if t_init.length < 1e-6 else t_init.normalized()
+    up_ref = Vector((1.0, 0.0, 0.0)) if abs(t_init.x) < 0.85 else Vector((0.0, 1.0, 0.0))
+    cur_n1 = t_init.cross(up_ref).normalized()
     for i in range(ns):
         p_prev = Vector(centers[max(0, i - 1)])
         p_next = Vector(centers[min(ns - 1, i + 1)])
         tang = (p_next - p_prev)
-        if tang.length < 1e-6:
-            tang = Vector((0.0, 0.0, 1.0))
-        tang.normalize()
-        up_ref = Vector((1.0, 0.0, 0.0)) if abs(tang.x) < 0.85 else Vector((0.0, 1.0, 0.0))
-        n1 = tang.cross(up_ref).normalized()
-        n2 = tang.cross(n1).normalized()
-        frames.append((Vector(centers[i]), tang, n1, n2))
-    # Start pole
+        tang = t_init if tang.length < 1e-6 else tang.normalized()
+        proj = cur_n1 - tang * cur_n1.dot(tang)
+        if proj.length > 1e-5:
+            cur_n1 = proj.normalized()
+        cur_n2 = tang.cross(cur_n1).normalized()
+        frames.append((Vector(centers[i]), tang, cur_n1, cur_n2))
     c0, t0, _, _ = frames[0]
-    verts.append(tuple(c0 - t0 * max(0.003, radii[0] * 0.35)))
-    uvs_vert.append((0.0, 0.0))
+    verts.append(tuple(c0 - t0 * max(0.0015, radii[0] * 0.25)))
+    uvs_vert.append((0.0, 0.5))
     thicks.append(thick)
     for i in range(ns):
         u = i / max(1, ns - 1)
         ci, _, n1, n2 = frames[i]
-        r_base = max(0.0025, radii[i])
+        r_base = max(0.0006, radii[i])
         for j in range(n_ring):
             ang = j * TAU / n_ring
             flute = 1.0 + flute_amp * math.cos(flute_freq * ang) * math.sin(math.pi * u)
             r = r_base * flute
             pt = ci + (n1 * math.cos(ang) + n2 * math.sin(ang)) * r
             verts.append(tuple(pt))
-            uvs_vert.append((u, j / n_ring * 2.0 - 1.0))
+            uvs_vert.append((u, j / n_ring))
             thicks.append(thick * (0.7 + 0.3 * flute))
-    # End pole
     cn, tn, _, _ = frames[-1]
     end_idx = 1 + ns * n_ring
-    verts.append(tuple(cn + tn * max(0.003, radii[-1] * 0.45)))
-    uvs_vert.append((1.0, 0.0))
+    verts.append(tuple(cn + tn * max(0.0015, radii[-1] * 0.25)))
+    uvs_vert.append((1.0, 0.5))
     thicks.append(thick * 0.65)
     faces = []
     for j in range(n_ring):
@@ -205,7 +253,166 @@ def closed_tube(name, centers, radii, mat, part, n_ring=14, rough=.18, thick=.04
         th_attr.data[vi].value = tv
     o = bpy.data.objects.new(name, m)
     bpy.context.collection.objects.link(o)
-    return keep(o, name, mat, part=part, rough=rough, thick=thick)
+    return keep(o, name, mat, part=part, rough=rough, thick=thick, preserve_uv=True, smooth_angle=160.0)
+
+def superellipse_vessel(name, center, profile, rx, ry, power, mat, part, seg=128, rough=.05, thick=.014):
+    """Smooth watertight superellipse architectural basin/vessel (|x/rx|^p + |y/ry|^p = r^p) with seamless UVs."""
+    cx, cy, cz = center
+    inv_p = 2.0 / max(power, 0.5)
+    verts = []
+    uvs_loop = []
+    arc_s = [0.0]
+    for k in range(1, len(profile) + 1):
+        r0, h0 = profile[k - 1]
+        r1, h1 = profile[k % len(profile)]
+        arc_s.append(arc_s[-1] + math.hypot((r1 - r0) * 0.5 * (rx + ry), h1 - h0))
+    tot_s = max(arc_s[-1], 1e-4)
+    for r, h in profile:
+        for j in range(seg):
+            ang = j * TAU / seg
+            ca, sa = math.cos(ang), math.sin(ang)
+            sx = (abs(ca) ** inv_p) * (1.0 if ca >= 0 else -1.0)
+            sy = (abs(sa) ** inv_p) * (1.0 if sa >= 0 else -1.0)
+            verts.append((cx + r * rx * sx, cy + r * ry * sy, cz + h))
+    faces = []
+    for k in range(len(profile)):
+        nk = (k + 1) % len(profile)
+        v0 = arc_s[k] / tot_s * 1.6
+        v1 = arc_s[k + 1] / tot_s * 1.6
+        for j in range(seg):
+            nj = (j + 1) % seg
+            u0 = j / seg * 2.0
+            u1 = (j + 1) / seg * 2.0
+            faces.append((k * seg + j, k * seg + nj, nk * seg + nj, nk * seg + j))
+            uvs_loop.extend([(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+    m = bpy.data.meshes.new(name)
+    m.from_pydata(verts, [], faces)
+    m.update()
+    for f in m.polygons:
+        f.use_smooth = True
+    uv_layer = m.uv_layers.new(name='UVMap')
+    for idx, uv in enumerate(uvs_loop):
+        uv_layer.data[idx].uv = uv
+    o = bpy.data.objects.new(name, m)
+    bpy.context.collection.objects.link(o)
+    return keep(o, name, mat, part=part, rough=rough, thick=thick, preserve_uv=True, smooth_angle=85.0)
+
+def stadium_prism(name, center, half_w, half_h, y_front, depth, bevel_w, bevel_d, mat, part, seg_arc=48, rough=.01):
+    """Watertight pill/stadium architectural mirror or backing plate with optically flat front plane (N=(0,-1,0) in Blender -> (0,0,-1) in Engine)."""
+    cx, cy_ref, cz = center
+    straight_h = max(0.0, half_h - half_w)
+    # Build 2D stadium contour in (x, z)
+    contour = []
+    for i in range(seg_arc + 1):
+        a = math.pi * i / seg_arc  # right (+x) over top (+z) to left (-x)
+        contour.append((math.cos(a) * half_w, straight_h + math.sin(a) * half_w))
+    for i in range(1, seg_arc):
+        a = math.pi + math.pi * i / seg_arc  # left (-x) around bottom (-z) to right (+x)
+        contour.append((math.cos(a) * half_w, -straight_h + math.sin(a) * half_w))
+    n = len(contour)
+    # Rings from front center fan? No: use convex/concave ear-clipped cap polygons on front & back so zero central star pole!
+    # Ring 0: inner front flat glass (inset by bevel_w at y = y_front)
+    # Ring 1: outer front edge (at y = y_front + bevel_d)
+    # Ring 2: outer back edge (at y = y_front + depth)
+    verts = []
+    for scale_inset, yy in [
+        (max(0.1, (half_w - bevel_w) / half_w), y_front),
+        (1.0, y_front + bevel_d),
+        (1.0, y_front + depth),
+    ]:
+        for px, pz in contour:
+            # Uniform inset along normal of stadium
+            if pz > straight_h:
+                dx, dz = px, pz - straight_h
+                ln = max(math.hypot(dx, dz), 1e-6)
+                ix, iz = px - dx / ln * bevel_w * (1.0 if scale_inset < 1.0 else 0.0), pz - dz / ln * bevel_w * (1.0 if scale_inset < 1.0 else 0.0)
+            elif pz < -straight_h:
+                dx, dz = px, pz + straight_h
+                ln = max(math.hypot(dx, dz), 1e-6)
+                ix, iz = px - dx / ln * bevel_w * (1.0 if scale_inset < 1.0 else 0.0), pz - dz / ln * bevel_w * (1.0 if scale_inset < 1.0 else 0.0)
+            else:
+                ix = px - (bevel_w if px > 0 else -bevel_w) * (1.0 if scale_inset < 1.0 else 0.0)
+                iz = pz
+            verts.append((cx + ix, yy, cz + iz))
+    faces = []
+    # Front flat mirror face (outward normal -Y in Blender -> winding clockwise when viewed from -Y: reversed(0..n-1))
+    faces.append(tuple(reversed(range(n))))
+    # Front bevel ring (0 -> 1)
+    for i in range(n):
+        ni = (i + 1) % n
+        faces.append((i, ni, n + ni, n + i))
+    # Side rim (1 -> 2)
+    for i in range(n):
+        ni = (i + 1) % n
+        faces.append((n + i, n + ni, 2 * n + ni, 2 * n + i))
+    # Back cap (+Y normal)
+    faces.append(tuple(range(2 * n, 3 * n)))
+    m = bpy.data.meshes.new(name)
+    m.from_pydata(verts, [], faces)
+    m.update()
+    # Smooth side arc & bevel laterally, but keep front mirror polygon 100% flat via smooth_angle=22 deg!
+    for idx, f in enumerate(m.polygons):
+        f.use_smooth = (idx != 0 and idx != len(m.polygons) - 1)
+    o = bpy.data.objects.new(name, m)
+    bpy.context.collection.objects.link(o)
+    return keep(o, name, mat, part=part, rough=rough, smooth_angle=22.0)
+
+def import_cc0_plant(tag, slug, mesh_names, target_pos, scale=1.0, rot_z=0.0, mat=29, part=234, rough=.36, thickness=.00075):
+    """Import real scanned CC0 botanical plant sub-meshes, recenter base to target_pos, and solidify to 0 non-manifold edges."""
+    gltf_path = next((CC0_MODELS / slug).glob('*.gltf'))
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=str(gltf_path))
+    imported = [o for o in bpy.data.objects if o not in before]
+    picked = [o for o in imported if o.type == 'MESH' and (not mesh_names or o.name in mesh_names)]
+    unused = [o for o in imported if o not in picked]
+
+    # Compute combined world bounding box of picked sub-meshes to recenter base cleanly at origin
+    all_pts = []
+    for o in picked:
+        mw = o.matrix_world
+        for v in o.data.vertices:
+            all_pts.append(mw @ v.co)
+    cx_src = 0.5 * (min(p.x for p in all_pts) + max(p.x for p in all_pts))
+    cy_src = 0.5 * (min(p.y for p in all_pts) + max(p.y for p in all_pts))
+    zmin_src = min(p.z for p in all_pts)
+
+    rot_m = Euler((0.0, 0.0, rot_z), 'XYZ').to_matrix().to_4x4()
+    tx, ty, tz = target_pos
+    out_objs = []
+    for idx, o in enumerate(picked):
+        # Bake existing glTF hierarchy transform into mesh vertices first
+        mw = o.matrix_world.copy()
+        o.parent = None
+        o.matrix_world = Matrix.Identity(4)
+        me = o.data
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        for v in bm.verts:
+            p = mw @ v.co
+            local_p = Vector(((p.x - cx_src) * scale, (p.y - cy_src) * scale, (p.z - zmin_src) * scale))
+            rp = rot_m @ local_p
+            v.co = Vector((rp.x + tx, rp.y + ty, rp.z + tz))
+        degen = [f for f in bm.faces if f.calc_area() <= 1e-11]
+        if degen:
+            bmesh.ops.delete(bm, geom=degen, context='FACES')
+        multi = [e for e in bm.edges if len(e.link_faces) > 2]
+        if multi:
+            bmesh.ops.split_edges(bm, edges=multi)
+        bm.to_mesh(me)
+        bm.free()
+        me.materials.clear()
+        for f in me.polygons:
+            f.use_smooth = True
+        mod = o.modifiers.new('botanical_leaf_thickness', 'SOLIDIFY')
+        mod.solidify_mode = 'NON_MANIFOLD'
+        mod.thickness = thickness
+        mod.offset = 0.0
+        mod.use_rim = True
+        out_objs.append(keep(o, '%s_%d' % (tag, idx), mat, part=part, rough=rough, thick=thickness, preserve_uv=True, smooth_angle=75.0))
+
+    for uo in unused:
+        bpy.data.objects.remove(uo, do_unlink=True)
+    return out_objs
 
 def shanghai():
     """Shanghai Huangpu River crossing: Waibaidu-inspired curved-chord riveted railway through-truss (y = -54..+6)
@@ -214,8 +421,9 @@ def shanghai():
     Partitioned across spatial part IDs 0..5 for tight DXR BLAS bounding boxes.
     """
     def sh_foliage(tag, bx, by, bz, rx, ry, rz, part_id):
-        for k, (dx, dy, dz, sc) in enumerate([(-.24*rx, -.12*ry, .0, .74), (.25*rx, .14*ry, .05*rz, .70), (.0, .0, .20*rz, .78)]):
-            sphere('%s_%d' % (tag, k), (bx + dx, by + dy, bz + dz), (rx * sc, ry * sc, rz * sc), 10, part=part_id, seg=10, rings=6, rough=.90)
+        box('%s_curb' % tag, (bx, by, bz - rz * 0.52), (rx * 1.45, ry * 1.45, 0.24), 2, part=part_id, bevel=.04, rough=.52)
+        box('%s_canopy_lo' % tag, (bx, by, bz - rz * 0.08), (rx * 1.32, ry * 1.26, rz * 0.72), 39, part=part_id, bevel=.22, segments=2, rough=.84)
+        box('%s_canopy_hi' % tag, (bx + 0.12 * rx, by - 0.08 * ry, bz + rz * 0.30), (rx * 0.92, ry * 0.88, rz * 0.56), 39, part=part_id, bevel=.18, segments=2, rough=.82, rot_z=0.35)
 
     # Part 0: Huangpu River Basin, River Barges, West Bund Heritage Embankment & Pudong Waterfront Seawall
     box('huangpu_river', (0.0, 42.0, -1.55), (260.0, 230.0, 0.30), 7, part=0, rough=.04)
@@ -454,8 +662,9 @@ def shenzhen():
     Static city partitioned across part 0..5; eVTOL airframe = 100, tilt nacelles = 110..115, 3-blade rotors = 120..125.
     """
     def sz_foliage(tag, bx, by, bz, rx, ry, rz, part_id):
-        for k, (dx, dy, dz, sc) in enumerate([(-.25*rx, -.12*ry, .0, .74), (.26*rx, .14*ry, .05*rz, .70), (.0, .0, .20*rz, .78)]):
-            sphere('%s_%d' % (tag, k), (bx + dx, by + dy, bz + dz), (rx * sc, ry * sc, rz * sc), 10, part=part_id, seg=10, rings=6, rough=.90)
+        box('%s_curb' % tag, (bx, by, bz - rz * 0.52), (rx * 1.48, ry * 1.42, 0.24), 2, part=part_id, bevel=.04, rough=.50)
+        box('%s_hedge_lo' % tag, (bx, by, bz - rz * 0.08), (rx * 1.34, ry * 1.24, rz * 0.72), 39, part=part_id, bevel=.22, segments=2, rough=.84)
+        box('%s_hedge_hi' % tag, (bx - 0.10 * rx, by + 0.08 * ry, bz + rz * 0.28), (rx * 0.90, ry * 0.86, rz * 0.54), 39, part=part_id, bevel=.18, segments=2, rough=.82, rot_z=-0.28)
 
     # Part 0: Shenzhen Bay Tidal Canal, Waterfront Basin & South/North Landmasses
     box('bay_water_channel', (0.0, 26.0, -1.25), (260.0, 125.0, 0.30), 7, part=0, rough=.04)
@@ -642,34 +851,34 @@ def shenzhen():
         prof = (math.sin(math.pi * (tf ** 0.68)) ** 0.56) * (1.0 - 0.42 * (tf ** 2.2))
         fus_pts.append((0.0, fy, fz))
         fus_rad.append(max(0.035, 0.68 * prof))
-    o_fus = closed_tube('evtol_fuselage', fus_pts, fus_rad, 11, 100, n_ring=24, rough=.15, thick=.06)
+    o_fus = closed_tube('evtol_fuselage', fus_pts, fus_rad, 11, 100, n_ring=36, rough=.12, thick=.06)
     o_fus.scale = (1.12, 1.0, 0.72)
     bpy.ops.object.select_all(action='DESELECT')
     o_fus.select_set(True)
     bpy.context.view_layer.objects.active = o_fus
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
-    # Dark carbon lower fuselage chine stripe + wrap-around tinted panoramic canopy + nose landing lights
-    box('evtol_carbon_chine', (0.0, -0.35, -0.22), (1.28, 3.60, 0.16), 0, part=100, bevel=.06, rough=.28)
-    sphere('evtol_canopy_glass', (0.0, -0.92, 0.24), (0.62, 1.58, 0.38), 18, part=100, seg=32, rings=16, rough=.04)
+    # Twill carbon-fiber lower fuselage chine + wrap-around tinted panoramic canopy + nose landing lights
+    box('evtol_carbon_chine', (0.0, -0.35, -0.22), (1.28, 3.60, 0.16), 37, part=100, bevel=.06, rough=.18)
+    sphere('evtol_canopy_glass', (0.0, -0.92, 0.24), (0.62, 1.58, 0.38), 18, part=100, seg=36, rings=18, rough=.035)
     box('evtol_cabin_glow', (0.0, -0.78, 0.16), (0.68, 1.30, 0.18), 15, part=100, bevel=.04, rough=.24)
     for sx_n in [-0.24, 0.24]:
         sphere('evtol_nose_lamp', (sx_n, -2.62, -0.06), (.065, .08, .045), 16, part=100, seg=10, rings=6, rough=.12)
 
-    # High swept main wing + twin longitudinal carbon boom rails + V-tail stabilizers + landing gear skids
+    # High swept main wing + twin longitudinal twill-carbon boom rails + V-tail stabilizers + carbon landing skids
     for sign_w in [-1.0, 1.0]:
-        rod('evtol_main_wing', (0.0, -0.15, 0.24), (sign_w * 4.10, 0.15, 0.36), .11, 11, part=100, verts=12, rough=.18)
-        box('evtol_wing_chord', (sign_w * 2.05, 0.0, 0.30), (3.95, 0.56, 0.07), 11, part=100, bevel=.025, rough=.18, rot_z=sign_w * 0.07)
-        rod('evtol_boom_rail', (sign_w * 3.00, -1.65, 0.36), (sign_w * 2.65, 1.95, 0.46), .075, 0, part=100, verts=12, rough=.26)
-        rod('evtol_boom_brace', (sign_w * 0.62, -0.95, 0.12), (sign_w * 3.00, -1.55, 0.34), .055, 0, part=100, verts=10, rough=.26)
+        rod('evtol_main_wing', (0.0, -0.15, 0.24), (sign_w * 4.10, 0.15, 0.36), .11, 11, part=100, verts=16, rough=.13)
+        box('evtol_wing_chord', (sign_w * 2.05, 0.0, 0.30), (3.95, 0.56, 0.07), 11, part=100, bevel=.025, rough=.13, rot_z=sign_w * 0.07)
+        rod('evtol_boom_rail', (sign_w * 3.00, -1.65, 0.36), (sign_w * 2.65, 1.95, 0.46), .075, 37, part=100, verts=16, rough=.18, preserve_uv=True)
+        rod('evtol_boom_brace', (sign_w * 0.62, -0.95, 0.12), (sign_w * 3.00, -1.55, 0.34), .055, 37, part=100, verts=12, rough=.18, preserve_uv=True)
         # Sculpted V-tail fins (proper chorded aerodynamic surfaces, not thin sticks!)
-        o_vt = box('evtol_vtail_fin', (sign_w * 0.68, 2.92, 0.62), (0.06, 0.72, 1.18), 11, part=100, bevel=.02, rough=.18)
+        o_vt = box('evtol_vtail_fin', (sign_w * 0.68, 2.92, 0.62), (0.06, 0.72, 1.18), 11, part=100, bevel=.02, rough=.13)
         o_vt.rotation_euler = (-0.22, sign_w * 0.62, 0.0)
-        rod('evtol_skid_tube', (sign_w * 0.78, -1.45, -0.66), (sign_w * 0.78, 1.25, -0.66), .044, 0, part=100, verts=10, rough=.30)
+        rod('evtol_skid_tube', (sign_w * 0.78, -1.45, -0.66), (sign_w * 0.78, 1.25, -0.66), .044, 37, part=100, verts=14, rough=.20, preserve_uv=True)
         for sy_s in [-0.88, 0.72]:
-            rod('evtol_skid_strut', (sign_w * 0.48, sy_s, -0.16), (sign_w * 0.78, sy_s, -0.66), .036, 0, part=100, verts=8, rough=.30)
+            rod('evtol_skid_strut', (sign_w * 0.48, sy_s, -0.16), (sign_w * 0.78, sy_s, -0.66), .036, 23, part=100, verts=12, rough=.20)
 
-    # Six articulated tilt-rotor nacelles (110..115) & counter-rotating 5-blade scimitar + motion-blur rotors (120..125)
+    # Six articulated tilt-rotor nacelles (110..115) & counter-rotating carbon-titanium scimitar rotors (120..125)
     rotor_pivots = [
         (-3.05, -1.65, 0.36),
         ( 3.05, -1.65, 0.36),
@@ -679,24 +888,24 @@ def shenzhen():
         ( 2.60,  1.95, 0.46),
     ]
     for i, (bx, by, bz) in enumerate(rotor_pivots):
-        sphere('tilt_nacelle_%d' % i, (bx, by, bz), (.18, .34, .24), 11, part=110 + i, seg=18, rings=10, rough=.18)
-        rod('rotor_mast_%d' % i, (bx, by, bz), (bx, by, bz + 0.32), .058, 0, part=110 + i, verts=10, rough=.24)
-        sphere('rotor_spinner_%d' % i, (bx, by, bz + 0.36), (.10, .10, .13), 0, part=120 + i, seg=14, rings=8, rough=.16)
+        sphere('tilt_nacelle_%d' % i, (bx, by, bz), (.18, .34, .24), 11, part=110 + i, seg=24, rings=12, rough=.13)
+        rod('rotor_mast_%d' % i, (bx, by, bz), (bx, by, bz + 0.32), .058, 23, part=110 + i, verts=16, rough=.19)
+        sphere('rotor_spinner_%d' % i, (bx, by, bz + 0.36), (.10, .10, .13), 37, part=120 + i, seg=18, rings=10, rough=.14)
         lamp_mat = 16 if (i < 2) else 6
-        sphere('nav_strobe_%d' % i, (bx * 1.02, by, bz - 0.12), (.05, .05, .05), lamp_mat, part=110 + i, seg=8, rings=6, rough=.15)
-        # 3 pitched carbon-titanium aerofoil blades + brushed-titanium leading edge + amber tip marker
+        sphere('nav_strobe_%d' % i, (bx * 1.02, by, bz - 0.12), (.05, .05, .05), lamp_mat, part=110 + i, seg=10, rings=6, rough=.15)
+        # 3 pitched twill-carbon aerofoil blades + brushed-titanium leading edge + safety-gold tip cap
         rot_dir = -1.0 if (i % 2 == 1) else 1.0
         for j in range(3):
             ang = j * TAU / 3.0
             cx = bx + 0.49 * math.cos(ang)
             cy = by + 0.49 * math.sin(ang)
-            o_bl = box('scimitar_blade_%d_%d' % (i, j), (cx, cy, bz + 0.32), (.92, .110, .020), 0, part=120 + i, bevel=.006, rough=.18)
+            o_bl = box('scimitar_blade_%d_%d' % (i, j), (cx, cy, bz + 0.32), (.92, .110, .020), 37, part=120 + i, bevel=.006, rough=.16)
             o_bl.rotation_euler = (0.24 * rot_dir, 0.0, ang)
-            # Brushed titanium leading-edge erosion strip
+            # Brushed champagne-nickel/titanium leading-edge erosion strip
             le_off = 0.046 * rot_dir
             lx_b = cx - le_off * math.sin(ang)
             ly_b = cy + le_off * math.cos(ang)
-            o_le = box('blade_le_strip_%d_%d' % (i, j), (lx_b, ly_b, bz + 0.328), (.86, .022, .016), 11, part=120 + i, rough=.14)
+            o_le = box('blade_le_strip_%d_%d' % (i, j), (lx_b, ly_b, bz + 0.328), (.86, .022, .016), 23, part=120 + i, rough=.16)
             o_le.rotation_euler = (0.24 * rot_dir, 0.0, ang)
             # Safety-gold blade tip cap
             tx_b = bx + 0.91 * math.cos(ang)
@@ -712,9 +921,9 @@ def taipei():
     def ws(sx, sy, sz):
         return (sx / .08, sz / .08, sy / .08)
     def foliage_cluster(tag, wx, wy, wz, rx, ry, rz, part_id):
-        offsets = [(-0.26 * rx, 0.0, -0.14 * rz, 0.72), (0.28 * rx, 0.06 * ry, 0.16 * rz, 0.68), (0.02 * rx, 0.18 * ry, -0.04 * rz, 0.76)]
-        for k, (dx, dy, dz, sc) in enumerate(offsets):
-            sphere('%s_%d' % (tag, k), w2b(wx + dx, wy + dy, wz + dz), ws(rx * sc, ry * sc, rz * sc), 10, part=part_id, seg=10, rings=6, rough=.90)
+        box('%s_curb' % tag, w2b(wx, wy - ry * 0.48, wz), ws(rx * 1.45, ry * 0.36, rz * 1.45), 2, part=part_id, bevel=.18, rough=.50)
+        box('%s_canopy_lo' % tag, w2b(wx, wy - ry * 0.05, wz), ws(rx * 1.32, ry * 0.72, rz * 1.28), 39, part=part_id, bevel=1.4, segments=2, rough=.84)
+        box('%s_canopy_hi' % tag, w2b(wx + 0.10 * rx, wy + ry * 0.28, wz - 0.08 * rz), ws(rx * 0.90, ry * 0.56, rz * 0.88), 39, part=part_id, bevel=1.1, segments=2, rough=.82, rot_z=0.32)
 
     # Part 0: Taipei 101 Hero Tower (0..508 m true vertical scale) + Shopping Mall Podium
     notched('battered_podium', 0, 112, 38, 29, 5, part=0)
@@ -777,10 +986,10 @@ def taipei():
     rod('508m_pinnacle', (0, 0, 478), (0, 0, 508), .62, 8, part=0, rough=.18)
     sphere('spire_beacon', (0, 0, 508.2), (.48, .48, .48), 16, part=0, seg=12, rings=6, rough=.15)
 
-    # Part 5: Taipei Basin Rain-Wet Ground, Xinyi Boulevards & Distant Basin Mountain Ridges
-    box('taipei_basin_ground', w2b(12.0, -.45, 62.0), ws(290.0, .90, 280.0), 2, part=5, rough=.68)
+    # Part 6 (Basin Ground, Avenues & Mountain Ridges) + Part 5 (Street-Level Trees & Streetlamps)
+    box('taipei_basin_ground', w2b(12.0, -.45, 62.0), ws(290.0, .90, 280.0), 2, part=6, rough=.68)
     for av_x, av_w in [(-6.0, 2.8), (6.5, 3.2), (29.5, 3.0)]:
-        box('xinyi_avenue_ns', w2b(av_x, .02, 54.0), ws(av_w, .05, 96.0), 1, part=5, rough=.10)
+        box('xinyi_avenue_ns', w2b(av_x, .02, 54.0), ws(av_w, .05, 96.0), 1, part=6, rough=.10)
         for s_i in range(9):
             wz = 16.0 + s_i * 8.6
             for side in [-1, 1]:
@@ -789,7 +998,7 @@ def taipei():
                 box('street_lamp_pole', w2b(lx, .30, wz), ws(.04, .60, .04), 0, part=5, rough=.35)
                 box('street_lamp_glow', w2b(lx - side * .06, .58, wz), ws(.14, .05, .18), 16, part=5, rough=.2)
     for av_z, av_w in [(18.5, 2.8), (36.5, 3.2), (50.5, 2.6), (74.0, 3.2)]:
-        box('xinyi_avenue_ew', w2b(12.0, .02, av_z), ws(110.0, .05, av_w), 1, part=5, rough=.10)
+        box('xinyi_avenue_ew', w2b(12.0, .02, av_z), ws(110.0, .05, av_w), 1, part=6, rough=.10)
 
     # Sculpted dark mountain ridge silhouettes rimming the Taipei Basin far behind the skyline
     ridge_defs = [
@@ -816,7 +1025,7 @@ def taipei():
         for si in range(n_seg):
             b0, b1 = 3 * si, 3 * (si + 1)
             mf.extend([(b0, b1, b1 + 2, b0 + 2), (b0 + 2, b1 + 2, b1 + 1, b0 + 1), (b0 + 1, b1 + 1, b1, b0)])
-        o = mesh('basin_ridge_%d' % r_idx, mv, mf, 19, part=5, smooth=False, rough=.95)
+        o = mesh('basin_ridge_%d' % r_idx, mv, mf, 19, part=6, smooth=False, rough=.95)
         o.rotation_euler.z = rrot
 
     # Part 2: Mid-ground Xinyi Commercial Podiums & Covered Steel-and-Glass Pedestrian Skywalks
@@ -886,11 +1095,16 @@ def taipei():
     box('sanctuary_coping_grazer', w2b(0.0, 2.65, 8.32), ws(10.6, .035, .04), 16, part=1, rough=.2)
     for side in [-1, 1]:
         px = side * 5.6
-        box('sanctuary_planter_box', w2b(px, 2.74, 7.3), ws(2.4, .26, 1.5), 2, part=1, bevel=.05, rough=.45)
-        foliage_cluster('sanctuary_fern_%d' % (1 if side > 0 else 0), px, 2.94, 7.3, .85, .24, .52, 1)
-    box('orchid_altar_base', w2b(0.0, 2.74, 5.86), ws(1.45, .22, 1.45), 0, part=1, bevel=.06, rough=.18)
-    box('orchid_altar_plinth', w2b(0.0, 2.94, 5.86), ws(.78, .26, .78), 2, part=1, bevel=.05, rough=.28)
-    torus('orchid_brass_collar', w2b(0.0, 3.08, 5.86), .24 / .08, .045 / .08, 8, part=1, seg=32, rough=.18)
+        box('sanctuary_planter_box', w2b(px, 2.74, 7.3), ws(2.4, .26, 1.5), 24, part=1, bevel=.45, rough=.52)
+        box('sanctuary_planter_rim', w2b(px, 2.88, 7.3), ws(2.48, .035, 1.58), 31, part=1, bevel=.25, rough=.24)
+        box('sanctuary_planter_soil', w2b(px, 2.85, 7.3), ws(2.22, .04, 1.32), 39, part=1, rough=.84)
+        import_cc0_plant('sanctuary_fern_%d' % (1 if side > 0 else 0), 'fern_02', None,
+                         w2b(px - 0.35 * side, 2.86, 7.28), scale=10.5, rot_z=0.45 * side, mat=36, part=1, rough=.38, thickness=.010)
+        import_cc0_plant('sanctuary_calathea_%d' % (1 if side > 0 else 0), 'calathea_orbifolia_01', ['calathea_orbifolia_01_d'],
+                         w2b(px + 0.42 * side, 2.86, 7.32), scale=11.0, rot_z=-0.85 * side, mat=29, part=1, rough=.36, thickness=.010)
+    box('orchid_altar_base', w2b(0.0, 2.74, 5.86), ws(1.48, .22, 1.48), 38, part=1, bevel=.45, rough=.22)
+    box('orchid_altar_plinth', w2b(0.0, 2.94, 5.86), ws(.82, .26, .82), 31, part=1, bevel=.35, rough=.20)
+    torus('orchid_brass_collar', w2b(0.0, 3.08, 5.86), .24 / .08, .045 / .08, 8, part=1, seg=40, rough=.16)
 
 def orchid():
     """Botanical Phalaenopsis crystal glass sculpture (~34K triangles, 0 nonmanifold edges).
@@ -934,13 +1148,12 @@ def orchid():
             rad = 0.06 + 1.76 * u
             x = ca * rad - sa * lat
             z = sa * rad + ca * lat + 0.05 * math.sin(math.pi * u)
-            # Compound saucer curvature + 3 broad, smooth botanical vein flutes for natural specular ribbons
+            # Smooth hand-blown Liuli crystal compound saucer curvature + dorsal midrib ridge + rolled margin
             saucer = -0.15 * (v * v) * claw_flare * math.sin(math.pi * u * 0.92)
-            vein_flutes = 0.018 * math.cos(v * math.pi * 2.5) * claw_flare * math.sin(math.pi * u)
-            rib_ridge = 0.028 * math.exp(-16.0 * v * v) * (1.0 - 0.45 * u)
-            margin_roll = 0.024 * (abs(v) ** 3.2) * claw_flare * math.sin(math.pi * u)
+            rib_ridge = 0.024 * math.exp(-14.0 * v * v) * (1.0 - 0.45 * u)
+            margin_roll = 0.022 * (abs(v) ** 3.2) * claw_flare * math.sin(math.pi * u)
             forward_arc = -0.02 - 0.22 * math.sin(math.pi * 0.72 * u) + 0.05 * (u ** 2.4)
-            y = forward_arc + saucer + vein_flutes + rib_ridge + margin_roll
+            y = forward_arc + saucer + rib_ridge + margin_roll
             th = 0.013 + 0.046 * math.exp(-10.0 * v * v) * (1.0 - 0.60 * u) + 0.018 * (1.0 - claw_flare)
             return (x, y, z), th
         return closed_blade(name, 40, 30, surf, 3, part_id, rough=.04)
@@ -1096,207 +1309,1011 @@ def vessel(name, center, profile, mat, part, scale_xy=(1., 1.), rough=.24):
     return mesh(name, verts, faces, mat, part, smooth=True, rough=rough, thick=.08)
 
 def enamel_cathedral():
-    """Architectural mineral vault, optical stelae and woven neural canopy; engine parts 200..219."""
-    # A procession of double-curved ribs, each planted in its own mineral/titanium shoe.
-    # World coordinates after export: ground y=2.65, orchid at (0,5.85,5.5).
+    """Architectural mineral vault, bronze-framed obsidian optical stelae & woven neural canopy; engine parts 200..219."""
+    # World coordinates after export: ground y_eng = z_bl = 2.65, orchid at (0, 5.85, 5.5).
     for k, a in enumerate((-2.28, -1.68, -1.08, -.46, .46, 1.08, 1.68, 2.28)):
-        x, y = 4.45*math.sin(a), 5.5+4.45*math.cos(a)
-        part = 200+k
-        box('titanium_foot', (x,y,2.78), (.74,.78,.26), 23, part, bevel=.09, rough=.34)
-        pts = [(x*(1-.29*t), 5.5+(y-5.5)*(1-.29*t), 2.85+5.8*t)
-               for t in [j/24 for j in range(25)]]
-        closed_tube('brushed_vault_rib', pts, [.085+.025*math.sin(j/24*math.pi) for j in range(25)],
-                    23, part, n_ring=10, rough=.34, thick=.12, flute_amp=.08)
-        # Narrow inward-facing optical panel with a physically closed thin shell.
-        def optical(u,v,aa=a,xx=x,yy=y):
-            width=.34*(.88+.12*math.sin(u*math.pi))
-            bend=.16*v*v
-            return (xx+width*v*math.cos(aa)-bend*math.sin(aa),
-                    yy-width*v*math.sin(aa)-bend*math.cos(aa),3.0+4.9*u),.045
-        closed_blade('optical_stela',22,10,optical,12,part,rough=.15)
-        torus('foot_collar',(x,y,2.94),.27,.025,8,part,seg=32,rough=.28)
+        x, y = 4.45 * math.sin(a), 5.5 + 4.45 * math.cos(a)
+        part = 200 + k
+        # Stepped Honed Calacatta Marble & Brushed Champagne-Nickel architectural plinth
+        box('stela_marble_base', (x, y, 2.73), (.88, .92, .16), 31, part, bevel=.018, rough=.22, rot_z=-a)
+        box('titanium_foot', (x, y, 2.89), (.68, .72, .18), 23, part, bevel=.016, rough=.20, rot_z=-a)
+        torus('foot_collar', (x, y, 2.99), .26, .024, 8, part, seg=36, rough=.18)
 
-    for k,a in enumerate((-2.12,-1.30,-.53,.53,1.30,2.12)):
-        part=210+k
-        # Fluted hexagonal hydroxyapatite prisms splay inward to form an open crown.
+        pts = [(x * (1.0 - .29 * t), 5.5 + (y - 5.5) * (1.0 - .29 * t), 2.96 + 5.70 * t)
+               for t in [j / 28.0 for j in range(29)]]
+        closed_tube('brushed_vault_rib', pts, [.082 + .024 * math.sin(j / 28.0 * math.pi) for j in range(29)],
+                    23, part, n_ring=18, rough=.20, thick=.12, flute_amp=.06, flute_freq=6)
+
+        # Bronze-framed concave optical obsidian mirror stela (mat 12 -> thin-glass ray-traced reflections!)
+        def optical(u, v, aa=a, xx=x, yy=y):
+            width = .33 * (.90 + .10 * math.sin(u * math.pi))
+            bend = .075 * v * v
+            return (xx + width * v * math.cos(aa) - bend * math.sin(aa),
+                    yy - width * v * math.sin(aa) - bend * math.cos(aa), 3.04 + 4.82 * u), .038
+        closed_blade('optical_stela', 26, 14, optical, 12, part, rough=.05)
+
+        # Precision anodized dark-bronze perimeter stiles & brass cap transoms framing the mirror stela
+        for sv in (-1.04, 1.04):
+            stile_pts = []
+            for j in range(19):
+                u = j / 18.0
+                w_u = .33 * (.90 + .10 * math.sin(u * math.pi)) * sv
+                b_u = .075
+                stile_pts.append((x + w_u * math.cos(a) - b_u * math.sin(a),
+                                  y - w_u * math.sin(a) - b_u * math.cos(a), 3.02 + 4.86 * u))
+            closed_tube('stela_bronze_stile', stile_pts, [.022] * 19, 38, part, n_ring=12, rough=.24, thick=.04)
+        box('stela_cap_bot', (x - .04 * math.sin(a), y - .04 * math.cos(a), 3.02), (.68, .10, .05), 8, part, bevel=.008, rough=.18, rot_z=-a)
+        box('stela_cap_top', (x - .04 * math.sin(a), y - .04 * math.cos(a), 7.88), (.68, .10, .05), 38, part, bevel=.008, rough=.24, rot_z=-a)
+
+    for k, a in enumerate((-2.12, -1.30, -.53, .53, 1.30, 2.12)):
+        part = 210 + k
+        px_c, py_c = 5.1 * math.sin(a), 5.5 + 5.1 * math.cos(a)
+        # Smooth fluted hydroxyapatite mineral columns (n_ring=18 -> sculpted 6-lobe enamel ridges, zero sharp polygon facets!)
         for j in range(3):
-            aa=a+(j-1)*.092
-            pts=[];rad=[]
-            for n in range(25):
-                t=n/24
-                r=5.1-.95*math.sin(t*math.pi*.74)
-                pts.append((r*math.sin(aa),5.5+r*math.cos(aa),2.68+5.7*t))
-                rad.append(.19*(1-.58*t)+.035*math.sin(t*math.pi))
-            closed_tube('enamel_prism',pts,rad,20,part,n_ring=6,rough=.22,thick=.16,flute_amp=.05)
-        vessel('prism_plinth',(5.1*math.sin(a),5.5+5.1*math.cos(a),2.66),
-               [(.16,0),(.60,0),(.63,.12),(.52,.24),(.16,.24)],24,part,rough=.38)
+            aa = a + (j - 1) * .092
+            pts = []
+            rad = []
+            for n in range(29):
+                t = n / 28.0
+                r = 5.1 - .95 * math.sin(t * math.pi * .74)
+                pts.append((r * math.sin(aa), 5.5 + r * math.cos(aa), 2.86 + 5.54 * t))
+                rad.append(.185 * (1.0 - .56 * t) + .032 * math.sin(t * math.pi))
+            closed_tube('enamel_prism', pts, rad, 20, part, n_ring=18, rough=.16, thick=.16, flute_amp=.048, flute_freq=6)
+        # Stepped bevelled Honed Calacatta Marble plinth + Brushed Champagne-Nickel & Brass collars
+        box('prism_marble_plinth', (px_c, py_c, 2.74), (1.18, 1.18, .18), 31, part, bevel=.022, rough=.22, rot_z=-a)
+        superellipse_vessel('prism_nickel_seat', (px_c, py_c, 2.83),
+                            [(.14, 0.0), (.52, 0.0), (.54, .06), (.46, .13), (.14, .13)], .95, .95, 2.2, 23, part, seg=48, rough=.20)
+        torus('prism_brass_collar', (px_c, py_c, 2.96), .45, .020, 8, part, seg=40, rough=.18)
 
     for k in range(4):
-        # Woven, twisted lamellae; distinct silhouette from the cathedral ribs.
-        def ribbon(u,v,kk=k):
-            return ((u-.5)*9.2,4.0+kk*1.55+v*.32*math.cos(u*math.pi),
-                    3.0+5.4*math.sin(math.pi*u)+.22*math.sin(u*TAU+kk)+v*.34*math.sin(u*math.pi)), .035
-        closed_blade('neural_lamella',32,8,ribbon,21,216+k,rough=.20)
+        # Woven twisted neural lamellae with anodized-bronze edge tendons
+        def ribbon(u, v, kk=k):
+            return ((u - .5) * 9.2, 4.0 + kk * 1.55 + v * .32 * math.cos(u * math.pi),
+                    3.0 + 5.4 * math.sin(math.pi * u) + .22 * math.sin(u * TAU + kk) + v * .34 * math.sin(u * math.pi)), .034
+        closed_blade('neural_lamella', 40, 12, ribbon, 21, 216 + k, rough=.18)
+        for sv in (-1.02, 1.02):
+            tendon = [ribbon(j / 32.0, sv, k)[0] for j in range(33)]
+            closed_tube('lamella_bronze_tendon', tendon, [.014] * 33, 38, 216 + k, n_ring=10, rough=.24, thick=.028)
 
 def microbial_sanctuary():
-    """Terraced celadon vessels and branching bioluminescent garden; no sterilization metaphor."""
-    # Four botanical proscenium branches use local coordinates for bounded iris articulation.
+    """Articulated Brushed-Brass & Champagne-Nickel Optical Aperture Iris + Scanned Botanical Celadon Sanctuary."""
+    # Parts 220..223: 4 articulated optical proscenium iris blades centered around local origin (transformed to (0, 5.75, 5.50))
     for k in range(4):
-        a=.18+k*.91
-        pts=[]
-        for j in range(24):
-            t=j/23
-            r=2.3+.28*math.sin(math.pi*t)
-            pts.append((r*math.cos(a+t*.72),-.10+.08*math.sin(t*math.pi),r*math.sin(a+t*.72)))
-        closed_tube('botanical_iris',pts,[.032]*24,8,220+k,n_ring=8,rough=.28,thick=.04)
-        for j in (5,10,15,20):
-            x,y,z=pts[j]
-            sphere('dew_node',(x,y,z),(.065,.07,.10),22,220+k,seg=12,rings=6,rough=.20)
+        part = 220 + k
+        a0 = 0.16 + k * 0.72
+        arc_span = 0.66
+        # Curved champagne-nickel optical shutter blade
+        def iris_vane(u, v, ang0=a0, span=arc_span):
+            ang = ang0 + u * span
+            r_mid = 2.34 + 0.16 * math.sin(math.pi * u)
+            w_rad = 0.085 * (0.45 + 0.55 * math.sin(math.pi * u))
+            rr = r_mid + w_rad * v
+            yy = -0.10 + 0.05 * math.sin(math.pi * u) + 0.018 * v
+            return (rr * math.cos(ang), yy, rr * math.sin(ang)), 0.020
+        closed_blade('optical_iris_vane', 26, 8, iris_vane, 23, part, rough=.19)
 
-    for k,(x,y) in enumerate(((-2.85,4.65),(2.85,4.65),(-3.75,7.0),(3.75,7.0))):
-        part=224+k
-        for level in range(3):
-            radius=1.02-level*.20
-            h=2.66+level*.24
-            vessel('garden_terrace',(x,y,h),[(.10,0),(radius,0),(radius+.035,.10),
-                   (radius,.18),(radius-.12,.19),(radius-.16,.10),(.10,.10)],24,part,rough=.34)
-        vessel('celadon_vessel',(x,y,3.30),[(.10,0),(.42,0),(.69,.55),(.70,.62),
-               (.61,.64),(.58,.54),(.32,.13),(.10,.13)],25,part,rough=.23)
-        torus('vessel_rim',(x,y,3.91),.65,.022,8,part,seg=40,rough=.32)
-        for b in range(5):
-            a=b*TAU/5+k*.47
-            reach=.48+.11*(b%3)
-            pts=[(x+math.cos(a)*reach*t, y+math.sin(a)*reach*t,
-                  3.64+1.15*t-.22*t*t) for t in [j/12 for j in range(13)]]
-            closed_tube('living_branch',pts,[.027-.015*j/12 for j in range(13)],10,part,n_ring=8,rough=.42)
-            for leaf in (0,1):
-                bx,by,bz=pts[7+leaf*4]
-                def blade(u,v,xx=bx,yy=by,zz=bz,aa=a+leaf*.8):
-                    width=.02+.20*math.sin(math.pi*u)**.75
-                    return (xx+math.cos(aa)*u*.58-math.sin(aa)*width*v,
-                            yy+math.sin(aa)*u*.58+math.cos(aa)*width*v,
-                            zz+.30*math.sin(u*math.pi*.8)+.08*v*v),.024
-                closed_blade('symbiotic_frond',12,6,blade,22,part,rough=.34)
-            sphere('luminous_seed',pts[-1],(.065,.07,.10),22,part,seg=12,rings=8,rough=.25)
+        # Turned brushed-brass outer actuator rail + anodized dark-bronze pivot knuckles + flush jade optical index pips
+        rail_pts = []
+        for j in range(25):
+            t = j / 24.0
+            ang = a0 + t * arc_span
+            rr = 2.45 + 0.16 * math.sin(math.pi * t)
+            yy = -0.11 + 0.05 * math.sin(math.pi * t)
+            rail_pts.append((rr * math.cos(ang), yy, rr * math.sin(ang)))
+        closed_tube('iris_brass_rail', rail_pts, [.022] * 25, 8, part, n_ring=16, rough=.18, thick=.04)
+        for idx_k in (0, 12, 24):
+            kx, ky, kz = rail_pts[idx_k]
+            sphere('iris_bronze_knuckle', (kx, ky, kz), (.042, .048, .042), 38, part, seg=18, rings=10, rough=.24)
+        for idx_p in (6, 18):
+            px_i, py_i, pz_i = rail_pts[idx_p]
+            sphere('iris_jade_index', (px_i, py_i - 0.024, pz_i), (.022, .016, .022), 6, part, seg=14, rings=8, rough=.16)
+
+    # Parts 224..227: 4 Stepped Marble & Mossy Limestone Botanical Alcoves with Crazed Celadon Bowls & Real CC0 Scans
+    alcove_coords = ((-2.85, 4.65), (2.85, 4.65), (-3.75, 7.00), (3.75, 7.00))
+    for k, (x, y) in enumerate(alcove_coords):
+        part = 224 + k
+        # Stepped bevelled architectural sanctuary plinths (Mossy Limestone base -> Brass reveal -> Honed Calacatta top)
+        box('sanctuary_stone_tier0', (x, y, 2.73), (1.76, 1.76, 0.16), 39, part, bevel=.028, rough=.72, rot_z=0.38 * k)
+        box('sanctuary_brass_reveal', (x, y, 2.83), (1.42, 1.42, 0.04), 8, part, bevel=.008, rough=.18, rot_z=0.38 * k)
+        box('sanctuary_marble_tier1', (x, y, 2.95), (1.36, 1.36, 0.20), 31, part, bevel=.024, rough=.22, rot_z=0.38 * k)
+        superellipse_vessel('sanctuary_pedestal_neck', (x, y, 3.05),
+                            [(.12, 0.0), (.48, 0.0), (.50, .08), (.42, .22), (.12, .22)], 1.0, 1.0, 2.2, 24, part, seg=48, rough=.48)
+
+        # High-resolution Crazed Celadon Stoneware Sanctuary Bowl + Brushed-Brass Rim Collar + Moist Humus Bed
+        bowl_prof = [
+            (.10, 0.00), (.38, 0.00), (.62, 0.22), (.70, 0.46), (.68, 0.56),
+            (.63, 0.57), (.59, 0.46), (.42, 0.18), (.10, 0.16),
+        ]
+        superellipse_vessel('celadon_sanctuary_bowl', (x, y, 3.26), bowl_prof, 1.0, 1.0, 2.0, 25, part, seg=64, rough=.14, thick=.024)
+        torus('vessel_brass_rim', (x, y, 3.825), .655, .018, 8, part, seg=48, rough=.18)
+        sphere('sanctuary_humus_bed', (x, y, 3.74), (.58, .58, .08), 39, part, seg=36, rings=14, rough=.84)
+
+        # Watertight solidified CC0 scanned tropical flora rooted naturally inside each celadon sanctuary bowl!
+        if k < 2:
+            import_cc0_plant('sanctuary_calathea_%d' % k, 'calathea_orbifolia_01', ['calathea_orbifolia_01_b'],
+                             (x - 0.08 * (1 if k == 0 else -1), y - 0.05, 3.76),
+                             scale=1.95, rot_z=0.55 + k * 1.4, mat=29, part=part, rough=.34, thickness=.0014)
+            import_cc0_plant('sanctuary_fern_front_%d' % k, 'fern_02', None,
+                             (x + 0.16 * (1 if k == 0 else -1), y + 0.10, 3.75),
+                             scale=1.45, rot_z=-0.75 + k * 1.9, mat=36, part=part, rough=.38, thickness=.0012)
+            import_cc0_plant('sanctuary_succulent_%d' % k, 'potted_plant_04', ['potted_plant_04_plant'],
+                             (x + 0.04, y - 0.22, 3.77),
+                             scale=2.10, rot_z=k * 1.2, mat=30, part=part, rough=.32, thickness=.0015)
+        else:
+            import_cc0_plant('sanctuary_fern_rear_%d' % k, 'fern_02', None,
+                             (x, y - 0.04, 3.76),
+                             scale=1.85, rot_z=0.35 + k * 1.6, mat=36, part=part, rough=.38, thickness=.0014)
+            import_cc0_plant('sanctuary_calathea_rear_%d' % k, 'calathea_orbifolia_01', ['calathea_orbifolia_01_d'],
+                             (x - 0.14 * (1 if k == 2 else -1), y + 0.12, 3.76),
+                             scale=1.80, rot_z=-1.1 + k * 0.9, mat=29, part=part, rough=.35, thickness=.0014)
+
+        # Restrained low-lying symbiotic micro-flora spore buds nestled in the moss bed (responds subtly to Madame N bloom!)
+        for b in range(4):
+            ang_b = b * TAU / 4.0 + k * 0.62
+            bx_s = x + 0.38 * math.cos(ang_b)
+            by_s = y + 0.38 * math.sin(ang_b)
+            def spore_leaf(u, v, ox=bx_s, oy=by_s, aa=ang_b):
+                w_l = 0.048 * (math.sin(math.pi * u) ** 0.72)
+                return (ox + math.cos(aa) * 0.16 * u - math.sin(aa) * w_l * v,
+                        oy + math.sin(aa) * 0.16 * u + math.cos(aa) * w_l * v,
+                        3.77 + 0.09 * math.sin(math.pi * 0.82 * u) + 0.015 * v * v), 0.010
+            closed_blade('symbiotic_spore_leaf', 10, 6, spore_leaf, 22, part, rough=.24)
+
+def folded_linen_towel(name, center, width_x, mat, part, rough=.84):
+    """Continuous 3-layer S-folded spa hand towel with rounded cloth bends and true waffle-linen UVs."""
+    cx, cy, cz = center
+    # Cross-section centerline in (y_local, z_local): bottom layer -> front round fold -> middle layer -> back round fold -> top layer
+    pts_yz = []
+    # Bottom layer: back (+0.072) to front (-0.070) at z = +0.0045
+    for i in range(9):
+        t = i / 8.0
+        pts_yz.append((0.068 - 0.136 * t, 0.0045))
+    # Front U-bend around (y = -0.068, z = 0.0090), r = 0.0045
+    for i in range(1, 8):
+        a = -math.pi * 0.5 - math.pi * (i / 7.0)
+        pts_yz.append((-0.068 + 0.0055 * math.cos(a), 0.0095 + 0.0050 * math.sin(a)))
+    # Middle layer: front (-0.068) to back (+0.066) at z = +0.0145
+    for i in range(1, 9):
+        t = i / 8.0
+        pts_yz.append((-0.068 + 0.134 * t, 0.0145 + 0.0008 * math.sin(math.pi * t)))
+    # Back U-bend around (y = +0.066, z = 0.0195), r = 0.0050
+    for i in range(1, 8):
+        a = -math.pi * 0.5 + math.pi * (i / 7.0)
+        pts_yz.append((0.066 + 0.0055 * math.cos(a), 0.0195 + 0.0050 * math.sin(a)))
+    # Top layer: back (+0.066) to slightly recessed front (-0.056) at z = +0.0245
+    for i in range(1, 10):
+        t = i / 9.0
+        pts_yz.append((0.066 - 0.122 * t, 0.0245 + 0.0012 * math.sin(math.pi * t)))
+
+    half_th = 0.0034
+    nx = 18
+    ns = len(pts_yz)
+    # Build closed 2-manifold ribbon extruded across width_x with gently drooped lateral edges
+    prof_2d = []
+    normals_2d = []
+    s_acc = [0.0]
+    for i in range(ns):
+        y0, z0 = pts_yz[max(0, i - 1)]
+        y1, z1 = pts_yz[min(ns - 1, i + 1)]
+        dy, dz = y1 - y0, z1 - z0
+        ln = max(math.hypot(dy, dz), 1e-6)
+        # Normal (-dz, dy)
+        normals_2d.append((-dz / ln, dy / ln))
+        prof_2d.append(pts_yz[i])
+        if i > 0:
+            s_acc.append(s_acc[-1] + math.hypot(pts_yz[i][0] - pts_yz[i - 1][0], pts_yz[i][1] - pts_yz[i - 1][1]))
+    # Closed cross-section loop: top side forward (0..ns-1) + bottom side backward (ns-1..0)
+    loop_yz = []
+    loop_v = []
+    for i in range(ns):
+        ny, nz = normals_2d[i]
+        loop_yz.append((prof_2d[i][0] + ny * half_th, prof_2d[i][1] + nz * half_th))
+        loop_v.append(s_acc[i] / 0.26)
+    for i in range(ns - 1, -1, -1):
+        ny, nz = normals_2d[i]
+        loop_yz.append((prof_2d[i][0] - ny * half_th, prof_2d[i][1] - nz * half_th))
+        loop_v.append((2.0 * s_acc[-1] - s_acc[i]) / 0.26)
+    nl = len(loop_yz)
+
+    verts = []
+    uvs_loop = []
+    # Left cap pole, nx+1 rings, right cap pole
+    verts.append((cx - width_x * 0.5, cy, cz + 0.013))
+    for ix in range(nx + 1):
+        fx = ix / nx - 0.5
+        xx = cx + fx * width_x
+        droop = -0.0018 * (4.0 * fx * fx)
+        for ly, lz in loop_yz:
+            verts.append((xx, cy + ly, max(cz + 0.0005, cz + lz + droop)))
+    right_pole = 1 + (nx + 1) * nl
+    verts.append((cx + width_x * 0.5, cy, cz + 0.013))
+
+    faces = []
+    # Left cap
+    for j in range(nl):
+        jn = (j + 1) % nl
+        faces.append((0, 1 + jn, 1 + j))
+        uvs_loop.extend([(0.0, 0.5), (0.02, loop_v[jn]), (0.02, loop_v[j])])
+    # Extruded body
+    for ix in range(nx):
+        b0 = 1 + ix * nl
+        b1 = 1 + (ix + 1) * nl
+        u0 = (ix / nx) * (width_x / 0.26)
+        u1 = ((ix + 1) / nx) * (width_x / 0.26)
+        for j in range(nl):
+            jn = (j + 1) % nl
+            faces.append((b0 + j, b0 + jn, b1 + jn, b1 + j))
+            uvs_loop.extend([(u0, loop_v[j]), (u0, loop_v[jn]), (u1, loop_v[jn]), (u1, loop_v[j])])
+    # Right cap
+    last_b = 1 + nx * nl
+    u_end = width_x / 0.26
+    for j in range(nl):
+        jn = (j + 1) % nl
+        faces.append((last_b + j, last_b + jn, right_pole))
+        uvs_loop.extend([(u_end, loop_v[j]), (u_end, loop_v[jn]), (u_end + 0.02, 0.5)])
+
+    m = bpy.data.meshes.new(name)
+    m.from_pydata(verts, [], faces)
+    m.update()
+    for f in m.polygons:
+        f.use_smooth = True
+    uv_layer = m.uv_layers.new(name='UVMap')
+    for idx, uv in enumerate(uvs_loop):
+        uv_layer.data[idx].uv = uv
+    o = bpy.data.objects.new(name, m)
+    bpy.context.collection.objects.link(o)
+    return keep(o, name, mat, part=part, rough=rough, thick=.012, preserve_uv=True, smooth_angle=95.0)
 
 def dawn_alcove():
-    """An ordinary morning, composed as architecture: bevelled mirror, ceramic basin, brush and plant."""
-    # Large quiet left wall for Pass-4 typography, warm indirect architectural edges.
-    box('alcove_back_wall',(0,9.8,6.0),(15,.24,7),24,235,bevel=.10,rough=.68)
-    box('alcove_left_return',(-6.8,6.9,5.4),(.24,6.0,6.0),24,235,bevel=.08,rough=.62)
-    box('warm_reveal',(-6.55,9.58,6.0),(.055,.03,6.4),15,235,rough=.46)
-    box('floating_oak_vanity',(1.4,6.95,3.30),(6.2,2.6,.42),26,231,bevel=.12,rough=.42)
-    box('ceramic_worktop',(1.4,6.95,3.57),(6.32,2.65,.14),24,231,bevel=.08,rough=.28)
-    # Elliptical mirror with a bevelled titanium back and subtle champagne border.
-    back=sphere('mirror_back',(1.55,9.47,6.05),(2.06,.11,2.43),23,230,seg=64,rings=32,rough=.32)
-    sphere('bevelled_mirror',(1.55,9.33,6.05),(1.98,.045,2.35),12,230,seg=64,rings=32,rough=.055)
-    ring=torus('mirror_champagne_edge',(1.55,9.36,6.05),2.0,.035,8,230,seg=80,rough=.28)
-    ring.rotation_euler.x=math.pi/2;ring.scale.y=1.18
-    vessel('ceramic_basin',(1.45,6.65,3.65),[(.11,0),(.58,0),(1.18,.20),(1.48,.56),
-           (1.48,.66),(1.40,.70),(1.31,.59),(1.08,.28),(.40,.11),(.11,.11)],24,232,(1.18,.72),rough=.20)
-    torus('basin_drain',(1.45,6.65,3.78),.115,.028,23,232,seg=24,rough=.30)
-    # Bent faucet tube uses the same closed surface pipeline as botanical stems.
-    pts=[(1.45,8.0,3.65),(1.45,8.0,4.1),(1.45,8.0,4.55),(1.45,7.85,4.74),
-         (1.45,7.60,4.74),(1.45,7.36,4.61)]
-    closed_tube('brushed_faucet',pts,[.065]*len(pts),23,232,n_ring=16,rough=.30,thick=.08)
-    vessel('brush_cup',(3.72,7.15,3.65),[(.06,0),(.25,0),(.29,.67),(.25,.70),
-           (.21,.64),(.19,.10),(.06,.10)],25,233,rough=.27)
-    closed_tube('toothbrush_handle',[(3.73,7.15,3.85),(3.76,7.15,4.55),(3.78,7.15,5.10)],
-                [.055,.065,.08],24,233,n_ring=12,rough=.27)
-    box('brush_head',(3.78,7.10,5.15),(.18,.13,.42),25,233,bevel=.06,rough=.28)
-    for row in range(5):
-        for col in range(3):
-            rod('bristle_tuft',(3.73+col*.05,7.02,5.0+row*.072),(3.73+col*.05,6.88,5.0+row*.072),
-                .014,11,233,verts=6,rough=.5)
-    vessel('morning_planter',(-1.20,7.30,3.65),[(.08,0),(.30,0),(.38,.55),(.33,.60),(.27,.52),(.20,.1),(.08,.1)],25,234)
-    for k in range(5):
-        a=k*TAU/5
-        def leaf(u,v,aa=a):
-            w=.02+.14*math.sin(u*math.pi)
-            return (-1.20+.65*u*math.cos(aa)-w*v*math.sin(aa),
-                    7.30+.65*u*math.sin(aa)+w*v*math.cos(aa),4.13+.72*math.sin(u*math.pi*.75)),.018
-        closed_blade('morning_leaf',14,6,leaf,10,234,rough=.5)
+    """1:1 Metric Taipei Penthouse Dawn Bathroom (1 unit = 1.00 m, floor Z_bl = Y_eng = 2.680 m).
+    Parts 230..238: enclosing lime-plaster & vertical ceramic finger-tile walls, terrazzo floor,
+    recessed oak ceiling cove, wraparound dark-bronze corner window framing misty Taipei 101,
+    opposite oak-wainscot/sconce/shower wall for true flat mirror reflections, mitered white-oak
+    floating vanity + honed marble slab, smooth 11k-tri superellipse porcelain vessel basin with
+    undercut/drain/overflow/droplets, multi-part CNC brushed-nickel mixer faucet, watertight
+    scanned CC0 Calathea orbifolia, 188 mm bristle toothbrush, amber apothecary soap pump,
+    folded waffle-linen towel, and celadon crystal bud vase for the keepsake Glass Orchid.
+    """
+    z_flr = 2.680
+    z_ceil = 5.860
+
+    # -------------------------------------------------------------------------
+    # Part 235: Enclosing Room Floor, Ceiling Cove & Serene Left Venetian Plaster Walls
+    # -------------------------------------------------------------------------
+    # Honed Aggregate Terrazzo Floor + Waffle-Linen Bath Mat
+    box('terrazzo_floor', (-0.48, 4.38, z_flr - 0.06), (4.12, 4.60, 0.12), 32, 235, rough=.32)
+    box('linen_bath_mat', (-0.18, 5.66, z_flr + 0.007), (0.86, 0.54, 0.014), 33, 235, bevel=.005, rough=.86)
+    box('bath_mat_border', (-0.18, 5.66, z_flr + 0.008), (0.82, 0.50, 0.015), 33, 235, bevel=.004, rough=.84, uv_grain='horizontal')
+
+    # Penthouse Ceiling + Recessed White-Oak Perimeter Cove + Indirect Warm Cove Glow
+    box('plaster_ceiling', (-0.48, 4.38, z_ceil + 0.06), (4.12, 4.60, 0.12), 24, 235, rough=.68)
+    box('left_ceiling_soffit', (-2.30, 4.38, z_ceil - 0.055), (0.42, 4.56, 0.11), 24, 235, bevel=.004, rough=.66)
+    box('cove_oak_fascia', (-2.085, 4.38, z_ceil - 0.065), (0.022, 4.52, 0.09), 26, 235, bevel=.002, rough=.38, uv_grain='horizontal')
+    box('cove_warm_strip', (-2.068, 4.38, z_ceil - 0.025), (0.016, 4.44, 0.018), 15, 235, rough=.24)
+
+    # Left Return Wall (X = -2.46) & Serene Left Back Plaster Bay (X = -2.48..-0.96, Y_bl = 6.60)
+    box('left_return_wall', (-2.48, 4.38, 4.27), (0.16, 4.56, 3.22), 24, 235, bevel=.004, rough=.66)
+    box('back_plaster_left_bay', (-1.72, 6.61, 4.27), (1.52, 0.14, 3.22), 24, 235, bevel=.004, rough=.65)
+    # Recessed vertical architectural shadow-reveal & warm linear graze on far left
+    box('left_oak_reveal_stile', (-2.26, 6.535, 4.27), (0.026, 0.024, 3.16), 26, 235, bevel=.002, rough=.38, uv_grain='vertical')
+    box('left_warm_graze', (-2.285, 6.538, 4.27), (0.014, 0.012, 3.10), 15, 235, rough=.28)
+    # Flush White-Oak Baseboards with 6 mm dark shadow-gap reveal
+    box('baseboard_back_left', (-1.71, 6.532, z_flr + 0.046), (1.50, 0.016, 0.092), 26, 235, bevel=.002, rough=.38, uv_grain='horizontal')
+    box('baseboard_shadow_back', (-1.71, 6.536, z_flr + 0.096), (1.50, 0.012, 0.008), 0, 235, rough=.60)
+    box('baseboard_left_return', (-2.392, 4.36, z_flr + 0.046), (0.016, 4.36, 0.092), 26, 235, bevel=.002, rough=.38, uv_grain='horizontal')
+
+    # Left-of-vanity Wall-Mounted Anodized Dark Bronze Towel Bar + Draped Linen Towel
+    for post_x in (-1.38, -1.06):
+        rod('towel_bar_post', (post_x, 6.54, 3.36), (post_x, 6.465, 3.36), 0.009, 38, 235, verts=24, rough=.26, bevel=.001)
+    rod('towel_bar_rail', (-1.40, 6.465, 3.36), (-1.04, 6.465, 3.36), 0.0085, 38, 235, verts=28, rough=.24, bevel=.001)
+    box('hanging_bath_towel_front', (-1.22, 6.453, 3.13), (0.26, 0.012, 0.46), 33, 235, bevel=.005, rough=.85)
+    box('hanging_bath_towel_back', (-1.22, 6.477, 3.15), (0.258, 0.012, 0.42), 33, 235, bevel=.005, rough=.85)
+    box('hanging_bath_towel_top', (-1.22, 6.465, 3.366), (0.26, 0.034, 0.016), 33, 235, bevel=.006, rough=.85)
+
+    # -------------------------------------------------------------------------
+    # Part 236: Center Vanity Feature Wall — Handmade Vertical Ceramic Finger-Tiles & Oak Pilasters
+    # -------------------------------------------------------------------------
+    # uv_grain='horizontal' rotates mat_28 90 deg so the long narrow glazed bricks stand upright as vertical finger-tiles!
+    box('vanity_tile_wall', (-0.23, 6.59, 4.27), (1.46, 0.10, 3.22), 28, 236, rough=.14, uv_grain='horizontal', uv_scale=0.68)
+    box('vanity_pilaster_left', (-0.96, 6.535, 4.27), (0.028, 0.036, 3.18), 26, 236, bevel=.0025, rough=.36, uv_grain='vertical')
+    box('vanity_pilaster_right', (0.50, 6.535, 4.27), (0.028, 0.036, 3.18), 26, 236, bevel=.0025, rough=.36, uv_grain='vertical')
+    box('vanity_under_baseboard', (-0.23, 6.532, z_flr + 0.046), (1.43, 0.016, 0.092), 26, 236, bevel=.002, rough=.38, uv_grain='horizontal')
+
+    # -------------------------------------------------------------------------
+    # Part 237: Wraparound Corner Architectural Window & Penthouse Exterior Stone Balcony
+    # Unobstructed upper low-iron picture glass (X = +0.54..+1.48) frames Taipei 101 cleanly across the entire 10s camera move!
+    # -------------------------------------------------------------------------
+    # Low Knee Wall + Honed Marble Window Sill + Ceiling Header Beam
+    box('win_knee_front', (1.02, 6.60, 2.795), (1.04, 0.14, 0.23), 24, 237, bevel=.003, rough=.65)
+    box('win_sill_front', (1.02, 6.59, 2.926), (1.06, 0.18, 0.032), 31, 237, bevel=.003, rough=.24)
+    box('win_header_front', (1.02, 6.60, 5.795), (1.06, 0.16, 0.13), 24, 237, bevel=.003, rough=.65)
+
+    box('win_knee_right', (1.53, 5.63, 2.795), (0.14, 1.98, 0.23), 24, 237, bevel=.003, rough=.65)
+    box('win_sill_right', (1.52, 5.63, 2.926), (0.18, 1.98, 0.032), 31, 237, bevel=.003, rough=.24)
+    box('win_header_right', (1.53, 5.63, 5.795), (0.16, 1.98, 0.13), 24, 237, bevel=.003, rough=.65)
+    # Solid Venetian lime-plaster return wall enclosing the walk-in shower & rear zone (Y_bl = 2.16 .. 4.66)
+    box('right_shower_return_wall', (1.53, 3.41, 4.27), (0.14, 2.52, 3.22), 24, 237, bevel=.004, rough=.65)
+    box('baseboard_right_return', (1.452, 3.88, z_flr + 0.046), (0.016, 1.52, 0.092), 26, 237, bevel=.002, rough=.38, uv_grain='horizontal')
+
+    # Anodized Dark Bronze Extruded Window Mullions & Tracks (mat 38 -> InstanceMask=1u casts real ray-traced shadows!)
+    z_win_bot = 2.942
+    z_win_top = 5.730
+    z_win_mid = 4.336
+    h_win = z_win_top - z_win_bot
+    z_transom = 3.560  # Dado-height transom leaves 3.58..5.71 m completely clear for Taipei 101 view!
+
+    # Front corner picture window framing (X = +0.52 .. +1.515 at Y_bl = 6.58 — single wide structural picture bay!)
+    box('bz_front_bot_track', (1.02, 6.58, z_win_bot + 0.020), (1.00, 0.068, 0.040), 38, 237, bevel=.002, rough=.25)
+    box('bz_front_top_track', (1.02, 6.58, z_win_top - 0.020), (1.00, 0.068, 0.040), 38, 237, bevel=.002, rough=.25)
+    box('bz_front_transom', (1.02, 6.58, z_transom), (1.00, 0.058, 0.036), 38, 237, bevel=.002, rough=.25)
+    box('bz_jamb_left', (0.525, 6.58, z_win_mid), (0.042, 0.072, h_win), 38, 237, bevel=.0025, rough=.25)
+    box('bz_mullion_front_lo', (1.04, 6.58, 3.25), (0.032, 0.058, 0.58), 38, 237, bevel=.002, rough=.25)
+    box('bz_corner_column', (1.515, 6.58, z_win_mid), (0.076, 0.076, h_win + 0.02), 38, 237, bevel=.003, rough=.24)
+
+    # Right corner return picture bay (X = +1.515, Y_bl = 4.68 .. 6.58 — single clear structural bay: zero reflected vertical stripes!)
+    box('bz_right_bot_track', (1.515, 5.63, z_win_bot + 0.020), (0.068, 1.92, 0.040), 38, 237, bevel=.002, rough=.25)
+    box('bz_right_top_track', (1.515, 5.63, z_win_top - 0.020), (0.068, 1.92, 0.040), 38, 237, bevel=.002, rough=.25)
+    box('bz_right_transom', (1.515, 5.63, z_transom), (0.058, 1.92, 0.036), 38, 237, bevel=.002, rough=.25)
+    box('bz_right_rear_jamb', (1.515, 4.68, z_win_mid), (0.072, 0.042, h_win), 38, 237, bevel=.0025, rough=.25)
+    box('bz_mullion_right_lo', (1.515, 5.63, 3.25), (0.058, 0.032, 0.58), 38, 237, bevel=.002, rough=.25)
+
+    # Optically Flat Low-Iron Architectural Float Glass Panes (mat 40 -> zero droplet/vein distortion!)
+    box('win_glass_front_main', (1.015, 6.58, 4.635), (0.93, 0.008, 2.11), 40, 237, rough=.008)
+    box('win_glass_front_lo_l', (0.785, 6.58, 3.26), (0.47, 0.008, 0.56), 40, 237, rough=.008)
+    box('win_glass_front_lo_r', (1.265, 6.58, 3.26), (0.43, 0.008, 0.56), 40, 237, rough=.008)
+    box('win_glass_right_hi', (1.515, 5.63, 4.635), (0.008, 1.84, 2.11), 40, 237, rough=.008)
+    box('win_glass_right_lo', (1.515, 5.63, 3.26), (0.008, 1.84, 0.56), 40, 237, rough=.008)
+
+    # 1:1 Metric Penthouse Exterior Travertine Balcony, Glass Balustrade & Fern Planter Trough (outside Y_bl = 6.64..8.15 m)
+    box('terrace_paver_deck', (1.42, 7.42, z_flr - 0.06), (2.36, 1.56, 0.12), 41, 237, bevel=.004, rough=.36)
+    box('terrace_side_deck', (2.12, 4.50, z_flr - 0.06), (1.04, 4.32, 0.12), 41, 237, bevel=.004, rough=.36)
+    box('terrace_edge_coping', (1.42, 8.16, z_flr + 0.035), (2.38, 0.12, 0.07), 31, 237, bevel=.003, rough=.28)
+    box('terrace_rail_shoe', (1.42, 8.15, z_flr + 0.090), (2.34, 0.042, 0.045), 38, 237, bevel=.002, rough=.26)
+    box('terrace_balustrade_glass', (1.42, 8.15, z_flr + 0.535), (2.30, 0.012, 0.85), 40, 237, rough=.010)
+    box('terrace_balustrade_rail', (1.42, 8.15, z_flr + 0.970), (2.34, 0.044, 0.028), 38, 237, bevel=.003, rough=.24)
+    # Architectural limestone planter trough + solidified CC0 fern_02 fronds catching golden Taipei dawn outside the window
+    box('terrace_planter_trough', (0.86, 7.56, z_flr + 0.19), (0.72, 0.34, 0.38), 24, 237, bevel=.005, rough=.58)
+    box('terrace_planter_rim', (0.86, 7.56, z_flr + 0.388), (0.75, 0.37, 0.024), 31, 237, bevel=.003, rough=.26)
+    box('terrace_planter_soil', (0.86, 7.56, z_flr + 0.365), (0.66, 0.28, 0.03), 39, 237, rough=.84)
+    import_cc0_plant('terrace_fern_a', 'fern_02', None, (0.72, 7.55, z_flr + 0.36), scale=0.82, rot_z=math.radians(18.0), mat=36, part=237, rough=.38, thickness=.00075)
+    import_cc0_plant('terrace_fern_b', 'fern_02', None, (1.02, 7.57, z_flr + 0.36), scale=0.74, rot_z=math.radians(125.0), mat=36, part=237, rough=.38, thickness=.00075)
+
+    # -------------------------------------------------------------------------
+    # Part 238: Opposite Rear Wall (Y_bl = 2.20) — Directly Reflected in the Flat Bathroom Mirror!
+    # Includes Fluted White-Oak Wainscot, Framed Botanical Relief, Warm Opal Sconce & Glass Rain Shower
+    # -------------------------------------------------------------------------
+    box('rear_enclosure_wall', (-0.48, 2.16, 4.27), (4.12, 0.12, 3.22), 24, 238, rough=.65)
+    # Dark acoustic shadow backing + 28 individual bevelled quarter-sawn white-oak vertical wainscot slats!
+    box('rear_wainscot_backing', (-1.02, 2.226, 3.33), (2.78, 0.012, 1.30), 0, 238, rough=.65)
+    for s_i in range(28):
+        sx = -2.32 + s_i * 0.096
+        box('rear_oak_slat_%d' % s_i, (sx, 2.242, 3.33), (0.058, 0.022, 1.28), 26, 238, bevel=.0025, rough=.36, uv_grain='vertical')
+    box('rear_oak_dado_ledge', (-1.02, 2.252, 3.982), (2.82, 0.042, 0.026), 26, 238, bevel=.0025, rough=.35, uv_grain='horizontal')
+
+    # Framed Botanical Relief Shadow-Box Artwork reflected in mirror at (X = -0.36, Z_bl = 4.48)
+    box('art_bronze_frame_top', (-0.36, 2.252, 4.78), (0.48, 0.036, 0.022), 38, 238, bevel=.002, rough=.24)
+    box('art_bronze_frame_bot', (-0.36, 2.252, 4.18), (0.48, 0.036, 0.022), 38, 238, bevel=.002, rough=.24)
+    box('art_bronze_frame_l', (-0.59, 2.252, 4.48), (0.022, 0.036, 0.62), 38, 238, bevel=.002, rough=.24)
+    box('art_bronze_frame_r', (-0.13, 2.252, 4.48), (0.022, 0.036, 0.62), 38, 238, bevel=.002, rough=.24)
+    box('art_cotton_matboard', (-0.36, 2.235, 4.48), (0.44, 0.014, 0.58), 24, 238, rough=.78)
+    box('art_charcoal_mount', (-0.36, 2.243, 4.48), (0.28, 0.008, 0.40), 0, 238, bevel=.001, rough=.72)
+    # Sculpted celadon porcelain botanical relief leaves & curved brushed-brass stem inside shadow box
+    stem_art = [(-0.378 + 0.036 * (k / 14.0) + 0.012 * math.sin(math.pi * k / 14.0),
+                 2.250, 4.31 + 0.30 * (k / 14.0)) for k in range(15)]
+    closed_tube('art_brass_stem', stem_art, [0.0030 - 0.0010 * (k / 14.0) for k in range(15)], 8, 238, n_ring=14, rough=.18, thick=.006)
+    relief_leaves = [
+        (-0.365, 4.39, -0.58, 0.105, 0.038),
+        (-0.348, 4.47,  0.52, 0.112, 0.041),
+        (-0.352, 4.55, -0.18, 0.096, 0.035),
+    ]
+    for lf_i, (ox_l, oz_l, ang_l, len_l, hw_l) in enumerate(relief_leaves):
+        ca_l, sa_l = math.cos(ang_l), math.sin(ang_l)
+        def relief_leaf_surf(u, v, ox=ox_l, oz=oz_l, ca=ca_l, sa=sa_l, ll=len_l, hw=hw_l):
+            env = (math.sin(math.pi * u) ** 0.72) * (1.0 - 0.18 * (u ** 1.8)) + 0.04 * (1.0 - u)
+            lat = hw * env * v
+            rad = ll * u
+            xx = ox + sa * rad + ca * lat
+            zz = oz + ca * rad - sa * lat
+            yy = 2.252 + 0.004 * math.sin(math.pi * u) - 0.0025 * (v * v)
+            return (xx, yy, zz), 0.0045
+        closed_blade('art_porcelain_leaf_%d' % lf_i, 16, 10, relief_leaf_surf, 25, 238, rough=.14)
+    box('art_gallery_glass', (-0.36, 2.262, 4.48), (0.45, 0.004, 0.59), 40, 238, rough=.010)
+
+    # Warm Opal Cylindrical Architectural Wall Sconce at (X = +0.08, Y_bl = 2.28, Z_bl = 4.44)
+    box('sconce_backplate', (0.08, 2.232, 4.44), (0.055, 0.016, 0.16), 38, 238, bevel=.002, rough=.26)
+    rod('sconce_arm', (0.08, 2.235, 4.44), (0.08, 2.285, 4.44), 0.011, 38, 238, verts=20, rough=.26)
+    rod('sconce_opal_tube', (0.08, 2.285, 4.30), (0.08, 2.285, 4.58), 0.028, 15, 238, verts=28, rough=.22, bevel=.002)
+    rod('sconce_cap_ring', (0.08, 2.285, 4.43), (0.08, 2.285, 4.45), 0.030, 38, 238, verts=28, rough=.24)
+
+    # Walk-in Rain Shower Zone (X = +0.42..+1.48, Y_bl = 2.22..3.32) reflected on right side of mirror
+    box('shower_tile_wall', (0.95, 2.228, 4.27), (1.06, 0.018, 3.18), 28, 238, rough=.14, uv_grain='horizontal', uv_scale=0.68)
+    box('shower_glass_channel_bot', (0.42, 2.82, z_flr + 0.012), (0.022, 1.18, 0.024), 38, 238, bevel=.002, rough=.25)
+    box('shower_glass_channel_wall', (0.42, 2.24, 4.02), (0.022, 0.024, 2.68), 38, 238, bevel=.002, rough=.25)
+    box('shower_glass_screen', (0.42, 2.82, 4.02), (0.010, 1.16, 2.66), 40, 238, rough=.008)
+    rod('rainfall_drop_rod', (0.92, 2.75, 5.80), (0.92, 2.75, 5.42), 0.012, 23, 238, verts=24, rough=.24)
+    rod('rainfall_shower_head', (0.92, 2.75, 5.412), (0.92, 2.75, 5.422), 0.135, 23, 238, verts=40, rough=.22, bevel=.002)
+
+    # -------------------------------------------------------------------------
+    # Part 231: Floating Quarter-Sawn White-Oak Vanity Cabinet & Honed Marble Countertop Slab
+    # Ergonomic 87.0 cm counter height (Z_bl = 3.550 m above 2.680 m floor), 1.38 m wide x 58 cm deep
+    # -------------------------------------------------------------------------
+    # Recessed dark shadow-box carcass so 4 mm drawer reveals read as crisp architectural joinery
+    box('vanity_shadow_carcass', (-0.19, 6.295, 3.312), (1.33, 0.53, 0.375), 0, 231, rough=.65)
+    # Mitered 22 mm White-Oak Perimeter Panels (grain oriented strictly along panel length!)
+    box('vanity_oak_side_l', (-0.869, 6.29, 3.312), (0.022, 0.56, 0.405), 26, 231, bevel=.0025, rough=.35, uv_grain='vertical')
+    box('vanity_oak_side_r', (0.489, 6.29, 3.312), (0.022, 0.56, 0.405), 26, 231, bevel=.0025, rough=.35, uv_grain='vertical')
+    box('vanity_oak_bottom', (-0.19, 6.29, 3.120), (1.336, 0.56, 0.022), 26, 231, bevel=.0025, rough=.35, uv_grain='horizontal')
+    box('vanity_oak_top_rail', (-0.19, 6.022, 3.504), (1.336, 0.024, 0.020), 26, 231, bevel=.002, rough=.35, uv_grain='horizontal')
+
+    # Four Asymmetric Book-Matched Horizontal-Grain White-Oak Drawer Fronts with Chamfered J-Pull Reveals
+    # Left wide bank (X = -0.854 .. -0.022, width = 0.832 m) & Right narrow bank (X = -0.016 .. +0.474, width = 0.490 m)
+    for dx_c, dw in [(-0.438, 0.832), (0.229, 0.490)]:
+        # Upper drawer front
+        box('vanity_drawer_upper', (dx_c, 6.018, 3.404), (dw, 0.022, 0.168), 26, 231, bevel=.0025, rough=.34, uv_grain='horizontal')
+        # Chamfered finger-pull J-lip recess along top of lower drawer
+        box('vanity_drawer_lower', (dx_c, 6.018, 3.218), (dw, 0.022, 0.172), 26, 231, bevel=.0025, rough=.34, uv_grain='horizontal')
+        box('vanity_jpull_lip', (dx_c, 6.028, 3.312), (dw, 0.014, 0.012), 26, 231, bevel=.0015, rough=.38, uv_grain='horizontal')
+
+    # Subtle Warm Under-Cabinet Architectural Toe-Kick Light Strip
+    box('vanity_under_glow', (-0.19, 6.46, 3.105), (1.18, 0.024, 0.008), 15, 231, rough=.28)
+
+    # Honed Calacatta/Carrara Warm Marble Countertop Slab (35 mm thick, 15 mm overhang) + 62 mm Rear Marble Upstand
+    box('marble_counter_slab', (-0.19, 6.285, 3.5325), (1.41, 0.59, 0.035), 31, 231, bevel=.003, segments=3, rough=.22)
+    box('marble_rear_upstand', (-0.19, 6.531, 3.581), (1.41, 0.018, 0.062), 31, 231, bevel=.0025, rough=.22)
+
+    # -------------------------------------------------------------------------
+    # Part 230: True Silvered Flat Stadium Mirror + Anodized Dark Bronze Bezel + Warm LED Halo
+    # Mathematically flat front normal N=(0,-1,0) in Blender -> N=(0,0,-1) in Engine!
+    # -------------------------------------------------------------------------
+    mir_cx, mir_cz = -0.18, 4.39
+    stadium_prism('flat_silvered_mirror', (mir_cx, 6.512, mir_cz), 0.365, 0.555, 6.508, 0.008, 0.007, 0.003, 34, 230, seg_arc=64, rough=.008)
+    stadium_prism('mirror_bronze_bezel', (mir_cx, 6.516, mir_cz), 0.373, 0.563, 6.512, 0.022, 0.0025, 0.002, 38, 230, seg_arc=64, rough=.24)
+    stadium_prism('mirror_led_halo', (mir_cx, 6.536, mir_cz), 0.352, 0.542, 6.535, 0.010, 0.002, 0.002, 15, 230, seg_arc=48, rough=.30)
+
+    # -------------------------------------------------------------------------
+    # Part 232: High-Poly Glazed Porcelain Vessel Basin (50 x 36 x 13.2 cm) + CNC Brushed-Nickel Mixer Faucet
+    # -------------------------------------------------------------------------
+    bx_c, by_c, bz_c = -0.18, 6.245, 3.550
+    # Smooth 22-point anatomical ceramic cross-section: recessed foot undercut -> compound belly -> 11.5 mm rolled rim -> concave bowl -> drain well
+    basin_prof = [
+        (0.14, 0.000), (0.66, 0.000), (0.69, 0.007), (0.76, 0.014),
+        (0.87, 0.036), (0.95, 0.066), (0.992, 0.098), (1.000, 0.121),
+        (0.992, 0.130), (0.974, 0.1325), (0.954, 0.130), (0.942, 0.120),
+        (0.912, 0.092), (0.845, 0.058), (0.720, 0.032), (0.520, 0.020),
+        (0.280, 0.0165), (0.155, 0.0155), (0.140, 0.009),
+    ]
+    superellipse_vessel('porcelain_vessel_basin', (bx_c, by_c, bz_c), basin_prof, 0.252, 0.182, 2.38, 27, 232, seg=128, rough=.042, thick=.014)
+
+    # Recessed Drain Channel + Precision Brushed Champagne-Nickel Pop-Up Drain Cap + Slotted Overflow Bezel
+    rod('basin_drain_recess', (bx_c, by_c, bz_c + 0.013), (bx_c, by_c, bz_c + 0.0175), 0.035, 0, 232, verts=40, rough=.65)
+    rod('basin_drain_flange', (bx_c, by_c, bz_c + 0.015), (bx_c, by_c, bz_c + 0.0185), 0.038, 23, 232, verts=48, rough=.19, bevel=.001)
+    # Softly domed brushed-nickel pop-up stopper cap floating 2.5 mm above drain throat
+    sphere('basin_popup_cap', (bx_c, by_c, bz_c + 0.0195), (0.031, 0.031, 0.0055), 23, 232, seg=48, rings=16, rough=.18)
+    # Rear interior ceramic overflow slot & brushed-nickel trim ring
+    box('basin_overflow_bezel', (bx_c, by_c + 0.156, bz_c + 0.094), (0.034, 0.006, 0.011), 23, 232, bevel=.0015, rough=.20)
+    box('basin_overflow_slot', (bx_c, by_c + 0.154, bz_c + 0.094), (0.026, 0.005, 0.005), 0, 232, rough=.70)
+
+    # 14 Tiny 3D Low-Iron Crystal Water Droplets beaded naturally inside the glazed porcelain bowl!
+    droplet_specs = [
+        (-0.065, -0.045, 0.032, 0.0034), (0.052, -0.038, 0.030, 0.0028), (-0.035, 0.058, 0.034, 0.0038),
+        (0.078, 0.042, 0.036, 0.0031), (-0.115, 0.015, 0.044, 0.0036), (0.108, -0.018, 0.042, 0.0029),
+        (-0.018, 0.088, 0.044, 0.0042), (0.024, 0.095, 0.046, 0.0032), (-0.148, -0.032, 0.062, 0.0030),
+        (0.142, 0.028, 0.060, 0.0035), (0.005, -0.072, 0.035, 0.0027), (-0.082, 0.072, 0.048, 0.0033),
+        (0.048, 0.118, 0.062, 0.0036), (-0.042, 0.168, 0.131, 0.0032),
+    ]
+    for d_i, (ddx, ddy, ddz, drad) in enumerate(droplet_specs):
+        sphere('basin_droplet_%d' % d_i, (bx_c + ddx, by_c + ddy, bz_c + ddz), (drad, drad * 1.08, drad * 0.58), 3, 232, seg=18, rings=10, rough=.015, thick=.008)
+
+    # Multi-Part CNC-Machined Brushed Champagne-Nickel Deck-Mount Tall Vessel Mixer Faucet
+    fx_c, fy_c, fz_c = -0.18, 6.472, 3.550
+    # 1. EPDM dark O-ring shadow seal + machined circular base escutcheon (54 mm diam)
+    rod('faucet_oring_seal', (fx_c, fy_c, fz_c), (fx_c, fy_c, fz_c + 0.0020), 0.0265, 0, 232, verts=48, rough=.75)
+    rod('faucet_escutcheon', (fx_c, fy_c, fz_c + 0.0018), (fx_c, fy_c, fz_c + 0.0085), 0.0275, 23, 232, verts=64, rough=.19, bevel=.0015)
+    # 2. Lower & upper machined body cylinders separated by a 1 mm swivel-collar shadow groove!
+    rod('faucet_body_lower', (fx_c, fy_c, fz_c + 0.0082), (fx_c, fy_c, fz_c + 0.168), 0.0195, 23, 232, verts=64, rough=.19, bevel=.001)
+    rod('faucet_swivel_groove', (fx_c, fy_c, fz_c + 0.1675), (fx_c, fy_c, fz_c + 0.1705), 0.0182, 0, 232, verts=48, rough=.60)
+    rod('faucet_body_upper', (fx_c, fy_c, fz_c + 0.1700), (fx_c, fy_c, fz_c + 0.212), 0.0195, 23, 232, verts=64, rough=.19, bevel=.0012)
+    # 3. Side ceramic-cartridge mixer valve barrel + rotating cap + precision flat-bar pin lever
+    rod('faucet_valve_barrel', (fx_c + 0.014, fy_c, fz_c + 0.095), (fx_c + 0.044, fy_c, fz_c + 0.095), 0.0145, 23, 232, verts=48, rough=.19, bevel=.001)
+    rod('faucet_valve_seam', (fx_c + 0.0435, fy_c, fz_c + 0.095), (fx_c + 0.0455, fy_c, fz_c + 0.095), 0.0135, 0, 232, verts=36, rough=.60)
+    rod('faucet_valve_cap', (fx_c + 0.0450, fy_c, fz_c + 0.095), (fx_c + 0.060, fy_c, fz_c + 0.095), 0.0145, 23, 232, verts=48, rough=.18, bevel=.0012)
+    box('faucet_flat_lever', (fx_c + 0.053, fy_c - 0.026, fz_c + 0.128), (0.008, 0.068, 0.0045), 23, 232,
+        bevel=.0012, rough=.18, rot_euler=(math.radians(-52.0), 0.0, math.radians(8.0)))
+    # 4. Graceful High-Arc Gooseneck Spout (24 mm OD, 42 smooth rings x 36 segments) arching over the porcelain bowl
+    spout_pts = []
+    # Vertical rise from upper body (z = +0.205 .. +0.228) -> 180-deg semi-circular arch (r = 0.086 m) -> angled tip at (y = 6.300, z = 3.776)
+    for i in range(6):
+        spout_pts.append((fx_c, fy_c, fz_c + 0.204 + 0.005 * i))
+    arch_r = 0.086
+    arch_cy = fy_c - arch_r
+    arch_cz = fz_c + 0.229
+    for i in range(1, 33):
+        ang = math.radians(196.0) * (i / 32.0)  # 0 (back +Y) over top (+Z) to 196 deg (forward -Y & slightly inward)
+        spout_pts.append((fx_c, arch_cy + arch_r * math.cos(ang), arch_cz + arch_r * math.sin(ang)))
+    closed_tube('faucet_gooseneck_spout', spout_pts, [0.0122] * len(spout_pts), 23, 232, n_ring=36, rough=.18, thick=.024)
+    # 5. Machined Aerator Tip Collar + Recessed Honeycomb Aerator + Poised Crystal Droplet!
+    tip_p = Vector(spout_pts[-1])
+    tip_dir = (Vector(spout_pts[-1]) - Vector(spout_pts[-2])).normalized()
+    rod('faucet_aerator_collar', tuple(tip_p - tip_dir * 0.004), tuple(tip_p + tip_dir * 0.008), 0.0132, 23, 232, verts=40, rough=.18, bevel=.001)
+    rod('faucet_aerator_screen', tuple(tip_p + tip_dir * 0.005), tuple(tip_p + tip_dir * 0.009), 0.0108, 38, 232, verts=32, rough=.42)
+    sphere('faucet_poised_droplet', tuple(tip_p + tip_dir * 0.0115), (0.0036, 0.0036, 0.0046), 3, 232, seg=20, rings=12, rough=.012, thick=.008)
+
+    # -------------------------------------------------------------------------
+    # Part 233: 1:1 Metric Everyday Care Props + Celadon Crystal Bud Vase + Folded Waffle-Linen Towel
+    # -------------------------------------------------------------------------
+    # 1. Hand-Thrown Crazed Celadon Stoneware Tumbler (7.8 cm diam x 10.2 cm tall) at (X=+0.155, Y=6.315)
+    tumb_x, tumb_y = 0.155, 6.315
+    tumb_prof = [
+        (0.010, 0.000), (0.032, 0.000), (0.035, 0.005), (0.0385, 0.048),
+        (0.0395, 0.098), (0.0380, 0.102), (0.0355, 0.099), (0.0340, 0.050),
+        (0.0300, 0.010), (0.010, 0.009),
+    ]
+    superellipse_vessel('celadon_tumbler', (tumb_x, tumb_y, z_flr + 0.870), tumb_prof, 1.0, 1.0, 2.0, 25, 233, seg=64, rough=.12, thick=.008)
+
+    # 2. Ergonomic 188 mm Toothbrush leaning naturally at 15 deg inside the Celadon Tumbler + 32 Fine Bristle Tufts!
+    tb_base = Vector((tumb_x - 0.010, tumb_y + 0.008, 3.565))
+    tb_dir = Vector((0.24, -0.10, 0.965)).normalized()
+    tb_nrm = Vector((-0.22, -0.96, -0.06)).normalized()  # Bristles face forward-left toward viewer/mirror
+    tb_lat = tb_dir.cross(tb_nrm).normalized()
+    tb_pts = []
+    tb_rads = []
+    for i in range(22):
+        u = i / 21.0
+        # Subtle ergonomic S-curve along the 188 mm handle
+        bow = 0.0035 * math.sin(u * math.pi * 1.35)
+        p = tb_base + tb_dir * (0.188 * u) + tb_nrm * bow
+        tb_pts.append((p.x, p.y, p.z))
+        # Tapered ergonomic profile: rounded base -> thumb grip swell -> slender neck -> rounded head
+        if u < 0.58:
+            r = 0.0046 + 0.0020 * math.sin(u / 0.58 * math.pi)
+        elif u < 0.84:
+            r = 0.0046 - 0.0016 * math.sin((u - 0.58) / 0.26 * math.pi)
+        else:
+            r = 0.0052 * math.sin(min(1.0, (1.02 - u) / 0.18 * 0.5 * math.pi)) + 0.0018
+        tb_rads.append(r)
+    closed_tube('toothbrush_handle', tb_pts, tb_rads, 11, 233, n_ring=20, rough=.26, thick=.010)
+    # Celadon tactile thumb-grip collar inlay mid-handle
+    grip_pts = [tb_pts[i] for i in range(7, 13)]
+    grip_rads = [tb_rads[i] + 0.00045 for i in range(7, 13)]
+    closed_tube('toothbrush_grip_inlay', grip_pts, grip_rads, 25, 233, n_ring=20, rough=.32, thick=.010)
+    # 32 Fine Tapered Nylon Bristle Tufts (8 rows x 4 columns, 1.3 mm diam x 9.2 mm tall!)
+    for r_i in range(8):
+        u_b = 0.865 + r_i * 0.0165
+        row_c = tb_base + tb_dir * (0.188 * u_b) + tb_nrm * 0.0022
+        cols = 2 if (r_i == 0 or r_i == 7) else 4
+        for c_i in range(cols):
+            off_lat = ((c_i - (cols - 1) * 0.5) * 0.0021)
+            b_start = row_c + tb_lat * off_lat
+            b_end = b_start + tb_nrm * (0.0092 + 0.0006 * ((r_i + c_i) % 2))
+            rod('bristle_tuft_%d_%d' % (r_i, c_i), tuple(b_start), tuple(b_end), 0.00068, 11, 233, verts=8, rough=.42)
+
+    # 3. Translucent Amber Apothecary Glass Hand-Wash Bottle + Machined Brushed-Nickel Pump Dispenser
+    amb_x, amb_y = 0.285, 6.365
+    amb_prof = [
+        (0.010, 0.000), (0.033, 0.000), (0.037, 0.008), (0.0375, 0.096),
+        (0.034, 0.114), (0.020, 0.128), (0.0145, 0.136), (0.0145, 0.146),
+        (0.0115, 0.146), (0.0115, 0.126), (0.031, 0.106), (0.032, 0.012), (0.010, 0.010),
+    ]
+    superellipse_vessel('amber_soap_bottle', (amb_x, amb_y, 3.550), amb_prof, 1.0, 1.0, 2.0, 35, 233, seg=64, rough=.038, thick=.09)
+    # Brushed-nickel ribbed pump collar, plunger stem, pump head & curved dispenser nozzle
+    rod('soap_pump_collar', (amb_x, amb_y, 3.692), (amb_x, amb_y, 3.714), 0.0158, 23, 233, verts=40, rough=.20, bevel=.0012)
+    rod('soap_pump_plunger', (amb_x, amb_y, 3.714), (amb_x, amb_y, 3.736), 0.0048, 23, 233, verts=24, rough=.18)
+    rod('soap_pump_head', (amb_x, amb_y, 3.734), (amb_x, amb_y, 3.748), 0.0115, 23, 233, verts=36, rough=.19, bevel=.0015)
+    pump_spout = [
+        (amb_x, amb_y, 3.743),
+        (amb_x - 0.014, amb_y - 0.012, 3.744),
+        (amb_x - 0.028, amb_y - 0.024, 3.741),
+        (amb_x - 0.036, amb_y - 0.031, 3.734),
+    ]
+    closed_tube('soap_pump_nozzle', pump_spout, [0.0042, 0.0038, 0.0033, 0.0028], 23, 233, n_ring=20, rough=.19, thick=.008)
+
+    # 4. Blown Pale-Celadon Crystal Bud Vase at (X=+0.395, Y=6.250, Z=3.550) holding the Miniature Keepsake Glass Orchid!
+    vase_x, vase_y = 0.395, 6.250
+    vase_prof = [
+        (0.008, 0.000), (0.026, 0.000), (0.034, 0.038), (0.033, 0.078),
+        (0.021, 0.118), (0.016, 0.142), (0.020, 0.155), (0.0175, 0.156),
+        (0.0135, 0.140), (0.026, 0.072), (0.022, 0.012), (0.008, 0.010),
+    ]
+    superellipse_vessel('celadon_orchid_vase', (vase_x, vase_y, 3.550), vase_prof, 1.0, 1.0, 2.0, 4, 233, seg=56, rough=.045, thick=.028)
+
+    # 5. Soft 3-Fold Organic Waffle-Linen Spa Hand Towel on Front-Right Marble Slab
+    folded_linen_towel('folded_counter_towel', (0.195, 6.115, 3.550), 0.205, 33, 233, rough=.84)
+
+    # -------------------------------------------------------------------------
+    # Part 234: Artisan Ribbed Celadon Stoneware Planter + Watertight Scanned CC0 Calathea orbifolia!
+    # -------------------------------------------------------------------------
+    pot_x, pot_y = -0.65, 6.265
+    pot_prof = [
+        (0.018, 0.008), (0.072, 0.008), (0.084, 0.028), (0.091, 0.068),
+        (0.093, 0.112), (0.091, 0.150), (0.087, 0.156), (0.081, 0.152),
+        (0.082, 0.125), (0.072, 0.022), (0.018, 0.020),
+    ]
+    superellipse_vessel('artisan_celadon_planter', (pot_x, pot_y, 3.550), pot_prof, 1.0, 1.0, 2.0, 25, 234, seg=64, rough=.14, thick=.012)
+    # Recessed Anodized Dark Bronze Foot Ring under Planter
+    rod('planter_bronze_foot', (pot_x, pot_y, 3.550), (pot_x, pot_y, 3.560), 0.074, 38, 234, verts=56, rough=.24, bevel=.0012)
+    # Moist Dark Potting Humus Mound inside Planter
+    sphere('planter_humus_soil', (pot_x, pot_y, 3.682), (0.081, 0.081, 0.016), 39, 234, seg=36, rings=14, rough=.82)
+    # Real Scanned CC0 Calathea orbifolia (cluster b + juvenile cluster d for rich natural asymmetric fullness, 0 non-manifold edges!)
+    import_cc0_plant('calathea_main', 'calathea_orbifolia_01', ['calathea_orbifolia_01_b'],
+                     (pot_x, pot_y, 3.684), scale=0.98, rot_z=math.radians(24.0), mat=29, part=234, rough=.34, thickness=.00075)
+    import_cc0_plant('calathea_understory', 'calathea_orbifolia_01', ['calathea_orbifolia_01_d'],
+                     (pot_x + 0.015, pot_y - 0.018, 3.686), scale=0.92, rot_z=math.radians(-68.0), mat=29, part=234, rough=.36, thickness=.00075)
+
+
+def assign_metric_uvs_to_mesh(me, mw, mat, grain_mode='auto', uv_scale=1.0):
+    """Assign world-space metric box/planar UVs with grain orientation and float16-safe per-polygon integer centering."""
+    tile = max(MAT_TILE_METERS.get(int(mat), 1.0) * max(float(uv_scale), 1e-3), 0.02)
+    nmat = mw.to_3x3().inverted().transposed()
+    if not me.uv_layers:
+        me.uv_layers.new(name='UVMap')
+    uv_data = me.uv_layers.active.data
+    w_co = [mw @ v.co for v in me.vertices]
+
+    for poly in me.polygons:
+        wn = (nmat @ poly.normal).normalized()
+        ax = max(range(3), key=lambda k: abs(wn[k]))
+        # Blender world axes: 0 = X (Engine X right), 1 = Y (Engine Z depth), 2 = Z (Engine Y vertical up!)
+        if ax == 2:
+            # Horizontal floor/countertop/ceiling face: map (X, Y_depth)
+            raw = [(w_co[me.loops[li].vertex_index].x / tile, w_co[me.loops[li].vertex_index].y / tile) for li in poly.loop_indices]
+        elif ax == 1:
+            # Front/back wall or drawer face: map (X, Z_up)
+            raw = [(w_co[me.loops[li].vertex_index].x / tile, w_co[me.loops[li].vertex_index].z / tile) for li in poly.loop_indices]
+        else:
+            # Left/right side wall or cabinet side: map (Y_depth, Z_up)
+            raw = [(w_co[me.loops[li].vertex_index].y / tile, w_co[me.loops[li].vertex_index].z / tile) for li in poly.loop_indices]
+
+        if grain_mode == 'horizontal':
+            # Rotate UV 90 deg so vertical-grain scans (oak mat 26, tile mat 28) run horizontally along X/Y!
+            raw = [(rv, -ru) for (ru, rv) in raw]
+
+        # Shift by integer floor per polygon so float16 UVs stay near [0..2] with maximum precision!
+        u_off = math.floor(min(r[0] for r in raw))
+        v_off = math.floor(min(r[1] for r in raw))
+        for li, (ru, rv) in zip(poly.loop_indices, raw):
+            uv_data[li].uv = (ru - u_off, rv - v_off)
+
+
+def finalize_scene_uvs():
+    """Ensure every object in `objects` has metric UVs baked onto its base mesh (for both Cycles parity & BMESH export)."""
+    for obj in objects:
+        if not obj.get('preserve_uv', False):
+            assign_metric_uvs_to_mesh(obj.data, obj.matrix_world, int(obj['mat']), obj.get('uv_grain', 'auto'), obj.get('uv_scale', 1.0))
+
 
 def export(name):
-    groups=defaultdict(lambda: ([],[])); bad=0; tris=0
-    deps=bpy.context.evaluated_depsgraph_get()
-    for obj in sorted(objects,key=lambda o:o.name):
-        evaluated=obj.evaluated_get(deps); me=evaluated.to_mesh()
-        bm=bmesh.new();bm.from_mesh(me);bad+=sum(1 for e in bm.edges if not e.is_manifold);bmesh.ops.triangulate(bm,faces=list(bm.faces),quad_method='FIXED',ngon_method='EAR_CLIP');bm.to_mesh(me);bm.free()
-        if not me.uv_layers:
-            me.uv_layers.new(name='UVMap')
-            for poly in me.polygons:
-                axis=max(range(3),key=lambda i:abs(poly.normal[i]));axes=[i for i in range(3) if i!=axis]
-                for li in poly.loop_indices:
-                    v=me.vertices[me.loops[li].vertex_index].co
-                    me.uv_layers.active.data[li].uv=(v[axes[0]],v[axes[1]])
-        me.calc_loop_triangles()
-        has_thick = 'thick' in me.attributes
-        # Accumulate normals in a fixed triangle order using Python float64.
-        # Blender's parallel normal/tangent reductions can differ by one snorm LSB.
-        sums=[[0.,0.,0.] for _ in me.vertices]; face_normals={}
-        for tri in sorted(me.loop_triangles,key=lambda t:tuple(t.vertices)):
-            a,b,c=[tuple(me.vertices[i].co) for i in tri.vertices]
-            e=[b[i]-a[i] for i in range(3)];f=[c[i]-a[i] for i in range(3)]
-            cross=(e[1]*f[2]-e[2]*f[1],e[2]*f[0]-e[0]*f[2],e[0]*f[1]-e[1]*f[0])
-            face_normals[tri.index]=cross
-            for vi in tri.vertices:
-                for k in range(3):sums[vi][k]+=cross[k]
-        normalmat=obj.matrix_world.to_3x3().inverted().transposed()
-        vs,ix=groups[(int(obj['part']),int(obj['mat']))]
-        for tri in me.loop_triangles:
-            if sum(x*x for x in face_normals[tri.index]) < 1e-20: continue
-            for li in tri.loops:
-                loop=me.loops[li];v=obj.matrix_world@me.vertices[loop.vertex_index].co
-                local_n=Vector(sums[loop.vertex_index] if me.polygons[tri.polygon_index].use_smooth else face_normals[tri.index]).normalized()
-                n=(normalmat@local_n).normalized()
-                axis=max(range(3),key=lambda k:abs(me.polygons[tri.polygon_index].normal[k]));axes=[k for k in range(3) if k!=axis]
-                local_u=Vector(tuple(1. if k==axes[0] else 0. for k in range(3)))
-                local_v=Vector(tuple(1. if k==axes[1] else 0. for k in range(3)))
-                local_t=(local_u-local_n*local_n.dot(local_u)).normalized()
-                tangent_sign=1. if local_n.cross(local_t).dot(local_v)>=0 else -1.
-                t=(obj.matrix_world.to_3x3()@local_t).normalized()
-                uv=me.uv_layers.active.data[li].uv
-                v_thick = me.attributes['thick'].data[loop.vertex_index].value if has_thick else float(obj['thick'])
-                # Blender Z-up -> engine Y-up. Reflection of basis reverses winding/sign.
-                def sn(x):return max(-32767,min(32767,round(x*32767)))
-                packed=struct.pack('<3f4h4h4e2H',v.x,v.z,v.y,sn(n.x),sn(n.z),sn(n.y),0,sn(t.x),sn(t.z),sn(t.y),sn(-tangent_sign),uv.x,uv.y,v_thick,obj['rough'],int(obj['mat']),int(obj['part']))
-                ix.append(len(vs));vs.append(packed)
-            # Reject triangles that collapse after world transform / float32 packing.
-            a,b,c=[struct.unpack_from('<3f',q) for q in vs[-3:]]
-            e=[b[k]-a[k] for k in range(3)];f=[c[k]-a[k] for k in range(3)]
-            cross=(e[1]*f[2]-e[2]*f[1],e[2]*f[0]-e[0]*f[2],e[0]*f[1]-e[1]*f[0])
-            if sum(q*q for q in cross)<=1e-24:
-                del ix[-3:];del vs[-3:];continue
-            ix[-3:]=[ix[-3],ix[-1],ix[-2]];tris+=1
-        evaluated.to_mesh_clear()
-    verts=[];indices=[];table=[]
-    for (part,mat),(vs,ix) in sorted(groups.items()):
-        # Canonical triangle order removes allocator-dependent BMesh face ordering.
-        triangles=[]
-        for j in range(0,len(ix),3):
-            tri=[vs[ix[j+k]] for k in range(3)]
-            pivot=min(range(3),key=lambda k:tri[k]);tri=tri[pivot:]+tri[:pivot]
-            triangles.append(tuple(tri))
-        vs=[v for tri in sorted(triangles) for v in tri];ix=list(range(len(vs)))
-        table.append((len(indices),len(ix),mat,part,len(verts),len(vs)))
-        indices.extend(i+len(verts) for i in ix);verts.extend(vs)
-    coords=[struct.unpack_from('<3f',v) for v in verts]
-    lo=[min(v[i] for v in coords) for i in range(3)];hi=[max(v[i] for v in coords) for i in range(3)]
-    payload=b''.join(struct.pack('<6I',*r) for r in table)+b''.join(verts)+struct.pack('<%dI'%len(indices),*indices)
-    header=struct.pack('<8s6I6f2I',b'BMESH001',1,64,40,len(verts),len(indices),len(table),*lo,*hi,zlib.crc32(payload),len(payload))
-    data=header+payload;atomic(OUT/(name+'.bmesh'),data)
-    print(name,len(verts),'vertices',tris,'triangles',len(table),'submeshes',bad,'nonmanifold edges')
-    return dict(name=name,vertices=len(verts),triangles=tris,submeshes=len(table),nonmanifold_edges=bad,aabb=[lo,hi],sha256=hashlib.sha256(data).hexdigest())
+    finalize_scene_uvs()
+    groups = defaultdict(lambda: ([], []))
+    bad = 0
+    tris = 0
+    deps = bpy.context.evaluated_depsgraph_get()
 
-reports=[]
-for name,fn in [('shanghai_trestle',shanghai),('shenzhen_evtol',shenzhen),('taipei_101_hero',taipei),('glass_orchid_hero',orchid),
-                ('enamel_cathedral',enamel_cathedral),('microbial_sanctuary',microbial_sanctuary),('dawn_alcove',dawn_alcove)]:
-    bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False);objects=[];serial=0
-    fn();reports.append(export(name))
-atomic(OUT/'generation_report.json',(json.dumps(dict(blender=bpy.app.version_string,assets=reports),indent=2)+'\n').encode())
-manifest_path=ROOT/'assets/manifest.json';manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
-for r in reports:
-    aid='mesh_'+r['name'];manifest['assets']=[a for a in manifest['assets'] if a['id']!=aid]
-    manifest['assets'].append(dict(id=aid,path='assets/meshes/'+r['name']+'.bmesh',kind='mesh',provenance='Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py',license='CC0-1.0',attribution_required=False,sha256=r['sha256']))
-atomic(manifest_path,(json.dumps(manifest,indent=2,ensure_ascii=False)+'\n').encode('utf-8'))
+    for obj in sorted(objects, key=lambda o: o.name):
+        evaluated = obj.evaluated_get(deps)
+        me = evaluated.to_mesh()
+        mw = obj.matrix_world.copy()
+        if not obj.get('preserve_uv', False):
+            assign_metric_uvs_to_mesh(me, mw, int(obj['mat']), obj.get('uv_grain', 'auto'), obj.get('uv_scale', 1.0))
+
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bad += sum(1 for e in bm.edges if not e.is_manifold)
+        bmesh.ops.triangulate(bm, faces=list(bm.faces), quad_method='FIXED', ngon_method='EAR_CLIP')
+        bm.to_mesh(me)
+        bm.free()
+
+        if not me.uv_layers:
+            assign_metric_uvs_to_mesh(me, mw, int(obj['mat']), 'auto', 1.0)
+
+        me.calc_loop_triangles()
+        n_tris = len(me.loop_triangles)
+        if n_tris == 0:
+            evaluated.to_mesh_clear()
+            continue
+
+        n_verts = len(me.vertices)
+        n_loops = len(me.loops)
+        has_thick = 'thick' in me.attributes
+        default_thick = float(obj['thick'])
+        rough_val = float(obj['rough'])
+        mat_id = int(obj['mat'])
+        part_id = int(obj['part'])
+        smooth_cos = math.cos(math.radians(float(obj.get('smooth_angle', 52.0))))
+
+        # Extract local vertex coords and transform to Blender world space in float64
+        v_local = np.empty(n_verts * 3, dtype=np.float64)
+        me.vertices.foreach_get('co', v_local)
+        v_local = v_local.reshape(n_verts, 3)
+        m3 = np.array(mw.to_3x3(), dtype=np.float64)
+        t3 = np.array(mw.to_translation(), dtype=np.float64)
+        v_world = v_local @ m3.T + t3
+        flip_winding = (np.linalg.det(m3) < 0.0)
+
+        # Map Blender right-handed Z-up (x, y, z) -> Engine left-handed Y-up (x, z, y).
+        # Because det(P) = -1, reversing loop order (0, 2, 1) restores standard Engine winding!
+        v_eng = v_world[:, [0, 2, 1]]
+
+        tri_v = np.empty(n_tris * 3, dtype=np.int32)
+        tri_l = np.empty(n_tris * 3, dtype=np.int32)
+        tri_p = np.empty(n_tris, dtype=np.int32)
+        me.loop_triangles.foreach_get('vertices', tri_v)
+        me.loop_triangles.foreach_get('loops', tri_l)
+        me.loop_triangles.foreach_get('polygon_index', tri_p)
+        tri_v = tri_v.reshape(n_tris, 3)
+        tri_l = tri_l.reshape(n_tris, 3)
+        if flip_winding:
+            tri_v = tri_v[:, [0, 2, 1]]
+            tri_l = tri_l[:, [0, 2, 1]]
+
+        poly_smooth = np.empty(len(me.polygons), dtype=bool)
+        me.polygons.foreach_get('use_smooth', poly_smooth)
+        tri_smooth = poly_smooth[tri_p]
+
+        uv_raw = np.empty(n_loops * 2, dtype=np.float64)
+        me.uv_layers.active.data.foreach_get('uv', uv_raw)
+        uv_raw = uv_raw.reshape(n_loops, 2)
+
+        if has_thick:
+            v_thicks = np.empty(n_verts, dtype=np.float64)
+            me.attributes['thick'].data.foreach_get('value', v_thicks)
+        else:
+            v_thicks = np.full(n_verts, default_thick, dtype=np.float64)
+
+        # Canonical triangle sort order guarantees 100% deterministic float64 reductions
+        order = np.lexsort((tri_v[:, 2], tri_v[:, 1], tri_v[:, 0]))
+        tri_v = tri_v[order]
+        tri_l = tri_l[order]
+        tri_smooth = tri_smooth[order]
+
+        # Compute Engine-space area-weighted face normals: note P(a x_B b) = - (P a) x_E (P b)!
+        p0 = v_eng[tri_v[:, 0]]
+        p1 = v_eng[tri_v[:, 1]]
+        p2 = v_eng[tri_v[:, 2]]
+        e1 = p1 - p0
+        e2 = p2 - p0
+        fn_area = -np.cross(e1, e2)
+        fn_len = np.linalg.norm(fn_area, axis=1)
+        valid = fn_len > 1e-12
+        if not np.any(valid):
+            evaluated.to_mesh_clear()
+            continue
+
+        tri_v = tri_v[valid]
+        tri_l = tri_l[valid]
+        tri_smooth = tri_smooth[valid]
+        p0, p1, p2 = p0[valid], p1[valid], p2[valid]
+        e1, e2 = e1[valid], e2[valid]
+        fn_area = fn_area[valid]
+        fn_len = fn_len[valid]
+        fn_unit = fn_area / fn_len[:, None]
+        m_tris = len(tri_v)
+
+        # Deterministic Face-Weighted Normals (FWN) with crease-angle splitting:
+        # Build per-vertex incident triangle lists in sorted order for exact crease-compatible smoothing.
+        vert_tris = defaultdict(list)
+        for ti in range(m_tris):
+            if tri_smooth[ti]:
+                vert_tris[int(tri_v[ti, 0])].append(ti)
+                vert_tris[int(tri_v[ti, 1])].append(ti)
+                vert_tris[int(tri_v[ti, 2])].append(ti)
+
+        corner_n = np.repeat(fn_unit[:, None, :], 3, axis=1)  # (m_tris, 3, 3)
+        if smooth_cos <= -0.999:
+            # Full smooth organic surface: fast vectorized area-weighted sum per vertex
+            v_nsum = np.zeros((n_verts, 3), dtype=np.float64)
+            for c in range(3):
+                for k in range(3):
+                    np.add.at(v_nsum[:, k], tri_v[:, c], fn_area[:, k])
+            n_norms = np.linalg.norm(v_nsum, axis=1, keepdims=True)
+            v_nunit = np.where(n_norms > 1e-18, v_nsum / np.maximum(n_norms, 1e-18), np.array([0.0, 1.0, 0.0]))
+            for c in range(3):
+                sm = tri_smooth
+                corner_n[sm, c] = v_nunit[tri_v[sm, c]]
+        else:
+            for ti in range(m_tris):
+                if not tri_smooth[ti]:
+                    continue
+                n_ref = fn_unit[ti]
+                for c in range(3):
+                    vi = int(tri_v[ti, c])
+                    inc = vert_tris[vi]
+                    if len(inc) == 1:
+                        corner_n[ti, c] = n_ref
+                    else:
+                        sx = sy = sz = 0.0
+                        for tj in inc:
+                            nt = fn_unit[tj]
+                            if n_ref[0] * nt[0] + n_ref[1] * nt[1] + n_ref[2] * nt[2] >= smooth_cos:
+                                fa = fn_area[tj]
+                                sx += fa[0]
+                                sy += fa[1]
+                                sz += fa[2]
+                        ln = math.sqrt(sx * sx + sy * sy + sz * sz)
+                        if ln > 1e-18:
+                            corner_n[ti, c] = (sx / ln, sy / ln, sz / ln)
+
+        # Compute exact MikkTSpace-equivalent UV-derivative tangents (dP/du, dP/dv_gl) in Engine space
+        uv0 = uv_raw[tri_l[:, 0]]
+        uv1 = uv_raw[tri_l[:, 1]]
+        uv2 = uv_raw[tri_l[:, 2]]
+        du1 = uv1[:, 0] - uv0[:, 0]
+        dv1 = uv1[:, 1] - uv0[:, 1]
+        du2 = uv2[:, 0] - uv0[:, 0]
+        dv2 = uv2[:, 1] - uv0[:, 1]
+        det_uv = du1 * dv2 - du2 * dv1
+        good_uv = np.abs(det_uv) > 1e-11
+        inv_det = np.where(good_uv, 1.0 / np.where(good_uv, det_uv, 1.0), 0.0)
+
+        t_tri = (e1 * dv2[:, None] - e2 * dv1[:, None]) * inv_det[:, None]
+        b_tri = (e2 * du1[:, None] - e1 * du2[:, None]) * inv_det[:, None]
+        t_len = np.linalg.norm(t_tri, axis=1, keepdims=True)
+        b_len = np.linalg.norm(b_tri, axis=1, keepdims=True)
+        t_tri = np.where(t_len > 1e-14, t_tri / np.maximum(t_len, 1e-14) * fn_len[:, None], 0.0)
+        b_tri = np.where(b_len > 1e-14, b_tri / np.maximum(b_len, 1e-14) * fn_len[:, None], 0.0)
+
+        # Accumulate tangents across shared (vertex_index, quantized_uv, quantized_normal) seams
+        tb_acc = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        corner_uvs = np.stack([uv0, uv1, uv2], axis=1)
+        corner_keys = []
+        for ti in range(m_tris):
+            t_v = t_tri[ti]
+            b_v = b_tri[ti]
+            row_keys = []
+            for c in range(3):
+                vi = int(tri_v[ti, c])
+                u_q = int(round(corner_uvs[ti, c, 0] * 8192.0))
+                v_q = int(round(corner_uvs[ti, c, 1] * 8192.0))
+                nx_q = int(round(corner_n[ti, c, 0] * 1024.0))
+                ny_q = int(round(corner_n[ti, c, 1] * 1024.0))
+                nz_q = int(round(corner_n[ti, c, 2] * 1024.0))
+                key = (vi, u_q, v_q, nx_q, ny_q, nz_q)
+                acc = tb_acc[key]
+                acc[0] += t_v[0]; acc[1] += t_v[1]; acc[2] += t_v[2]
+                acc[3] += b_v[0]; acc[4] += b_v[1]; acc[5] += b_v[2]
+                row_keys.append(key)
+            corner_keys.append(row_keys)
+
+        vs, ix = groups[(part_id, mat_id)]
+
+        def sn(x):
+            return max(-32767, min(32767, round(x * 32767.0)))
+
+        for ti in range(m_tris):
+            tri_packed = []
+            for c in range(3):
+                vi = int(tri_v[ti, c])
+                pos = v_eng[vi]
+                n_e = corner_n[ti, c]
+                n_l = math.sqrt(n_e[0] * n_e[0] + n_e[1] * n_e[1] + n_e[2] * n_e[2])
+                nx, ny, nz = (n_e[0] / n_l, n_e[1] / n_l, n_e[2] / n_l) if n_l > 1e-12 else (0.0, 1.0, 0.0)
+
+                acc = tb_acc[corner_keys[ti][c]]
+                tx, ty, tz = acc[0], acc[1], acc[2]
+                bx, by, bz = acc[3], acc[4], acc[5]
+                # Gram-Schmidt orthogonalize T against N in float64
+                ndott = nx * tx + ny * ty + nz * tz
+                tx -= nx * ndott
+                ty -= ny * ndott
+                tz -= nz * ndott
+                tl = math.sqrt(tx * tx + ty * ty + tz * tz)
+                if tl > 1e-10:
+                    tx, ty, tz = tx / tl, ty / tl, tz / tl
+                    # cross(N, T) . B determines exact OpenGL (+u, +v_gl) handedness in Engine space!
+                    cx_nt = ny * tz - nz * ty
+                    cy_nt = nz * tx - nx * tz
+                    cz_nt = nx * ty - ny * tx
+                    tsign = 1.0 if (cx_nt * bx + cy_nt * by + cz_nt * bz) >= 0.0 else -1.0
+                else:
+                    # Orthonormal fallback when UV area is degenerate (e.g., pole cap)
+                    if abs(ny) < 0.94:
+                        # cross((0,1,0), N) = (nz, 0, -nx)
+                        fl = math.hypot(nz, nx)
+                        tx, ty, tz = nz / fl, 0.0, -nx / fl
+                    else:
+                        # cross((1,0,0), N) = (0, -nz, ny)
+                        fl = math.hypot(nz, ny)
+                        tx, ty, tz = 0.0, -nz / fl, ny / fl
+                    tsign = 1.0
+
+                u_gl, v_gl = corner_uvs[ti, c]
+                # Convert Blender bottom-up v_gl -> Direct3D top-down v_d3d = 1.0 - v_gl
+                u_d3d = float(np.clip(u_gl, -64.0, 64.0))
+                v_d3d = float(np.clip(1.0 - v_gl, -64.0, 64.0))
+                th_v = float(v_thicks[vi])
+                packed = struct.pack(
+                    '<3f4h4h4e2H',
+                    float(pos[0]), float(pos[1]), float(pos[2]),
+                    sn(nx), sn(ny), sn(nz), 0,
+                    sn(tx), sn(ty), sn(tz), sn(tsign),
+                    u_d3d, v_d3d, th_v, rough_val,
+                    mat_id, part_id,
+                )
+                tri_packed.append(packed)
+
+            # Reject triangles that collapse after float32 packing
+            a, b, c_pt = [struct.unpack_from('<3f', q) for q in tri_packed]
+            e = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+            f = (c_pt[0] - a[0], c_pt[1] - a[1], c_pt[2] - a[2])
+            cr = (e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0])
+            if cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2] <= 1e-24:
+                continue
+            # Reverse corner order (0, 2, 1) for Engine left-handed triangle winding
+            base_idx = len(vs)
+            vs.extend(tri_packed)
+            ix.extend([base_idx, base_idx + 2, base_idx + 1])
+            tris += 1
+
+        evaluated.to_mesh_clear()
+
+    verts = []
+    indices = []
+    table = []
+    for (part, mat), (vs, ix) in sorted(groups.items()):
+        triangles = []
+        for j in range(0, len(ix), 3):
+            tri = [vs[ix[j + k]] for k in range(3)]
+            pivot = min(range(3), key=lambda k: tri[k])
+            tri = tri[pivot:] + tri[:pivot]
+            triangles.append(tuple(tri))
+        vs = [v for tri in sorted(triangles) for v in tri]
+        ix = list(range(len(vs)))
+        table.append((len(indices), len(ix), mat, part, len(verts), len(vs)))
+        indices.extend(i + len(verts) for i in ix)
+        verts.extend(vs)
+
+    coords = [struct.unpack_from('<3f', v) for v in verts]
+    lo = [min(v[i] for v in coords) for i in range(3)]
+    hi = [max(v[i] for v in coords) for i in range(3)]
+    payload = b''.join(struct.pack('<6I', *r) for r in table) + b''.join(verts) + struct.pack('<%dI' % len(indices), *indices)
+    header = struct.pack('<8s6I6f2I', b'BMESH001', 1, 64, 40, len(verts), len(indices), len(table), *lo, *hi, zlib.crc32(payload), len(payload))
+    data = header + payload
+    atomic(OUT / (name + '.bmesh'), data)
+    print(name, len(verts), 'vertices', tris, 'triangles', len(table), 'submeshes', bad, 'nonmanifold edges')
+    return dict(name=name, vertices=len(verts), triangles=tris, submeshes=len(table), nonmanifold_edges=bad, aabb=[lo, hi], sha256=hashlib.sha256(data).hexdigest())
+
+
+ALL_KITS = [
+    ('shanghai_trestle', shanghai),
+    ('shenzhen_evtol', shenzhen),
+    ('taipei_101_hero', taipei),
+    ('glass_orchid_hero', orchid),
+    ('enamel_cathedral', enamel_cathedral),
+    ('microbial_sanctuary', microbial_sanctuary),
+    ('dawn_alcove', dawn_alcove),
+]
+
+def run_all_exports():
+    global objects, serial
+    reports = []
+    for name, fn in ALL_KITS:
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+        objects = []
+        serial = 0
+        fn()
+        reports.append(export(name))
+    atomic(OUT / 'generation_report.json', (json.dumps(dict(blender=bpy.app.version_string, assets=reports), indent=2) + '\n').encode())
+    manifest_path = ROOT / 'assets/manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    for r in reports:
+        aid = 'mesh_' + r['name']
+        manifest['assets'] = [a for a in manifest['assets'] if a['id'] != aid]
+        prov = (
+            'Procedural Blender geometry + solidified PolyHaven CC0 botanical scans generated by tools/gen_trilogy_meshes.py'
+            if r['name'] in ('dawn_alcove', 'microbial_sanctuary', 'taipei_101_hero')
+            else 'Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py'
+        )
+        manifest['assets'].append(dict(
+            id=aid,
+            path='assets/meshes/' + r['name'] + '.bmesh',
+            kind='mesh',
+            provenance=prov,
+            license='CC0-1.0',
+            attribution_required=False,
+            sha256=r['sha256'],
+        ))
+    atomic(manifest_path, (json.dumps(manifest, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+
+if __name__ == '__main__' and '--skip-batch' not in sys.argv:
+    run_all_exports()
+

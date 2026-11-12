@@ -11,11 +11,37 @@ All C++20 source files (`src/`, `include/`, `tools/`, `tests/`), HLSL shaders (`
 |---|---|---|---|
 | Runtime & Tools C++20 / HLSL | `src/`, `include/`, `tools/`, `assets/shaders/` | Original first-party project code | Proprietary / Project First-Party |
 | Cue Schedules & Presets | `assets/cues/*.json`, `config/*` | Original first-party timeline & quality specifications | Proprietary / Project First-Party |
-| Packed 3D Meshes (`.bmesh`) | `assets/meshes/*.bmesh` | Generated deterministically by `tools/gen_trilogy_meshes.py` | CC0-1.0 |
+| Packed 3D Meshes (`.bmesh`) | `assets/meshes/*.bmesh` | Generated deterministically by `tools/gen_trilogy_meshes.py` (procedural + CC0 scans) | CC0-1.0 |
+| Packed PBR & IBL Textures (`.btex`) | `assets/textures/*.btex` | Generated deterministically by `tools/gen_pbr_textures.py` (authored + CC0 scans) | CC0-1.0 |
 | Presentation Vector Glyphs | `tools/gen_title_glyphs.py`, generated table in `assets/shaders/m1_taipei_slice.hlsl` | 60 original capsule-SDF glyphs: Latin, digits/punctuation, 台北, and 一–七; no third-party font source | Proprietary / Project First-Party |
 | Madame N Stage-Director IR | `assets/models/madame_n_director.{xml,bin,json}` | Generated deterministically by `tools/gen_madame_n_model.py` | Proprietary / Project First-Party |
+| Poly Haven Scanned PBR, Botanical & HDRI Sources | `third_party/polyhaven_cc0/` (`provenance.json`) | Public-domain CC0-1.0 scans & HDRI compiled into `.bmesh` / `.btex` | CC0-1.0 |
 
-The seven distributed mesh assets are `shanghai_trestle`, `shenzhen_evtol`, `taipei_101_hero`, `glass_orchid_hero`, `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove`. The limited Chinese title glyphs do not constitute a general Chinese font.
+The seven distributed mesh assets are `shanghai_trestle`, `shenzhen_evtol`, `taipei_101_hero`, `glass_orchid_hero`, `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove`. The four distributed GPU texture-array assets are `pbr_albedo_alpha.btex` (`BC7_UNORM_SRGB`), `pbr_normal.btex` (`BC5_UNORM`), `pbr_ormt.btex` (`BC7_UNORM`), and `pbr_ibl_env.btex` (`RGBA16F`). The limited Chinese title glyphs do not constitute a general Chinese font.
+
+### Bundled Public-Domain (`CC0-1.0`) Source Assets (`third_party/polyhaven_cc0/provenance.json`)
+
+Every external scan, botanical 3D asset, and HDRI sky incorporated into `assets/meshes/*.bmesh` and `assets/textures/*.btex` is dedicated to the public domain under **Creative Commons Zero v1.0 Universal (`CC0-1.0`, `https://creativecommons.org/publicdomain/zero/1.0/`)** with unrestricted commercial and binary redistribution rights (`attribution_required: false`). Full per-file URLs and SHA-256 checksums are recorded in `third_party/polyhaven_cc0/provenance.json`:
+
+1. **Scanned 1k PBR Material Sets (`CC0-1.0`, Poly Haven):**
+   - `white_oak_veneer` (`https://polyhaven.com/a/white_oak_veneer`, Jenelle van Heerden)
+   - `american_walnut_veneer` (`https://polyhaven.com/a/american_walnut_veneer`, Jenelle van Heerden)
+   - `plastered_wall_02` (`https://polyhaven.com/a/plastered_wall_02`, Charlotte Baglioni)
+   - `clay_plaster` (`https://polyhaven.com/a/clay_plaster`, Amal Kumar)
+   - `long_white_tiles` (`https://polyhaven.com/a/long_white_tiles`, Jenelle van Heerden & Sergej Majboroda)
+   - `terrazzo_tiles` (`https://polyhaven.com/a/terrazzo_tiles`, Amal Kumar)
+   - `marble_01` (`https://polyhaven.com/a/marble_01`, Rob Tuytel)
+   - `rough_linen` (`https://polyhaven.com/a/rough_linen`, Rico Cilliers & colormass)
+   - `granite_tile_02` (`https://polyhaven.com/a/granite_tile_02`, Charlotte Baglioni)
+   - `concrete_pavers_02` (`https://polyhaven.com/a/concrete_pavers_02`, Amal Kumar)
+   - `asphalt_02` (`https://polyhaven.com/a/asphalt_02`, Rob Tuytel)
+   - `concrete_moss` (`https://polyhaven.com/a/concrete_moss`, Rob Tuytel)
+2. **Scanned Botanical glTF 3D Models & Alpha/PBR Leaf Maps (`CC0-1.0`, Poly Haven):**
+   - `calathea_orbifolia_01` (`https://polyhaven.com/a/calathea_orbifolia_01`, Rico Cilliers & Rob Tuytel)
+   - `potted_plant_04` (`https://polyhaven.com/a/potted_plant_04`, James Ray Cock)
+   - `fern_02` (`https://polyhaven.com/a/fern_02`, Rico Cilliers & Rob Tuytel)
+3. **HDRI Dawn Sky Environment (`CC0-1.0`, Poly Haven):**
+   - `qwantani_dawn_puresky` (`https://polyhaven.com/a/qwantani_dawn_puresky`, Greg Zaal & Jarod Guest)
 
 ---
 

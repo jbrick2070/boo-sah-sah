@@ -44,7 +44,7 @@ bool loadBmesh(const std::filesystem::path& path,Bmesh& output,std::string* erro
     for(uint32_t i=0;i<ns;++i) {
         const auto* q=p+64+i*24;
         BmeshSubmesh sub{u32(q),u32(q+4),u32(q+8),u32(q+12),u32(q+16),u32(q+20)};
-        if(sub.firstIndex!=expected||!sub.indexCount||sub.indexCount%3||sub.indexCount>ni-sub.firstIndex||sub.firstVertex>=nv||sub.vertexCount>nv-sub.firstVertex||sub.material>31)return fail("Invalid submesh range");
+        if(sub.firstIndex!=expected||!sub.indexCount||sub.indexCount%3||sub.indexCount>ni-sub.firstIndex||sub.firstVertex>=nv||sub.vertexCount>nv-sub.firstVertex||sub.material>63)return fail("Invalid submesh range");
         expected+=sub.indexCount;mesh.submeshes.push_back(sub);
     }
     if(expected!=ni)return fail("Incomplete submesh coverage");

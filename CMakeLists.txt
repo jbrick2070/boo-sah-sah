@@ -267,11 +267,20 @@ add_custom_command(
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSMain  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSDepthCutout -DBOO_DEPTH_CUTOUT_PS=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain -DBOO_ALPHA_CUTOUT=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSMain -DM2_RT -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSMain -DM2_RT -DBOO_ALPHA_CUTOUT=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
@@ -282,8 +291,11 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
 
 add_custom_target(boo_shaders DEPENDS
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
 
@@ -342,6 +354,7 @@ add_library(boo_core STATIC
     src/render/m0_test_visual.cpp
     src/render/m1_scene.cpp
     src/render/bmesh.cpp
+    src/render/btex.cpp
     src/render/trilogy_renderer.cpp
     src/render/m1_taipei_slice.cpp
     src/media/media_foundation_input.cpp
@@ -381,6 +394,7 @@ target_link_libraries(boo_core PUBLIC
 # Stage runtime data directories into build folder for convenient direct launch
 add_custom_target(boo_stage_assets ALL
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/meshes" "${CMAKE_BINARY_DIR}/assets/meshes"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/textures" "${CMAKE_BINARY_DIR}/assets/textures"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/cues" "${CMAKE_BINARY_DIR}/assets/cues"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/manifest.json" "${CMAKE_BINARY_DIR}/assets/manifest.json"

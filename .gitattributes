@@ -7,3 +7,4 @@
 *.bmp binary
 assets/models/madame_n_director.xml binary
 assets/models/madame_n_metadata.json binary
+*.btex binary

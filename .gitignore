@@ -8,3 +8,6 @@ diagnostics/
 kibitz-runs/
 __pycache__/
 *.pyc
+
+# Raw CC0 source textures (151 MB) - re-fetch with tools/fetch_polyhaven_cc0.py; runtime uses assets/textures/*.btex
+third_party/polyhaven_cc0/textures/

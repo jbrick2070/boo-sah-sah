@@ -2026,13 +2026,14 @@ bool testQuarantinedGpuRetirement() {
 int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
-    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, filmStress = false, lifecycleTests = false;
+    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, filmStress = false, lifecycleTests = false;
     for (int arg = 1; arg < argc; ++arg) {
         const std::string option = argv[arg];
         if (option == "--no-activate") noActivate = true;
         else if (option == "--require-debug-layer") gRequireDebugLayer = true;
         else if (option == "--trilogy-captures") trilogyCaptures = true;
         else if (option == "--film-captures") filmCaptures = true;
+        else if (option == "--hero-video-capture") heroVideoCapture = true;
         else if (option == "--film-stress") filmStress = true;
         else if (option == "--lifecycle-tests") lifecycleTests = true;
         else if (option == "--capture-dir" && arg + 1 < argc) gFilmCaptureDirectory = argv[++arg];
@@ -2045,13 +2046,14 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
-    if (int(trilogyCaptures) + int(filmCaptures) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
-    if ((trilogyCaptures || filmCaptures || filmStress || lifecycleTests) && !noActivate) {
+    if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
+    if ((trilogyCaptures || filmCaptures || heroVideoCapture || filmStress || lifecycleTests) && !noActivate) {
         std::cerr << "Automated integration gates require --no-activate.\n";
         return 2;
     }
     if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
     if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", testHeroVideoCaptureGate); return gTestsFailed ? 1 : 0; }
     if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }
     if (lifecycleTests) {
         runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);

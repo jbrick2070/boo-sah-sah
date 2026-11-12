@@ -285,3 +285,93 @@ bool testFullFilmCaptureGate() {
     std::cout << "Film capture receipt: " << reportPath.string() << '\n';
     return true;
 }
+
+bool writeFastCapturePng(const std::filesystem::path& path, const std::vector<uint8_t>& rgba,
+                         uint32_t width, uint32_t height) {
+    using Microsoft::WRL::ComPtr;
+    BOO_CHECK(width && height && rgba.size() == size_t(width) * height * 4u);
+    ComPtr<IWICImagingFactory> factory;
+    BOO_CHECK(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                         IID_PPV_ARGS(&factory))));
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    BOO_CHECK(SUCCEEDED(factory->CreateStream(&stream)));
+    BOO_CHECK(SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)));
+    BOO_CHECK(SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)));
+    BOO_CHECK(SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)));
+    BOO_CHECK(SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)));
+    BOO_CHECK(SUCCEEDED(frame->Initialize(nullptr)));
+    BOO_CHECK(SUCCEEDED(frame->SetSize(width, height)));
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    BOO_CHECK(SUCCEEDED(frame->SetPixelFormat(&format)) && IsEqualGUID(format, GUID_WICPixelFormat24bppBGR));
+    std::vector<uint8_t> bgr(size_t(width) * height * 3u);
+    for (size_t p = 0; p < rgba.size() / 4u; ++p) {
+        bgr[p * 3u] = rgba[p * 4u + 2u];
+        bgr[p * 3u + 1u] = rgba[p * 4u + 1u];
+        bgr[p * 3u + 2u] = rgba[p * 4u];
+    }
+    BOO_CHECK(SUCCEEDED(frame->WritePixels(height, width * 3u, static_cast<UINT>(bgr.size()), bgr.data())));
+    BOO_CHECK(SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit()));
+    return true;
+}
+
+bool testHeroVideoCaptureGate() {
+    using namespace boo;
+    CaptureComScope com;
+    BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
+    const auto framesDir = gFilmCaptureDirectory / "hero_10s_frames";
+    std::error_code ec;
+    std::filesystem::create_directories(framesDir, ec);
+    BOO_CHECK(!ec);
+
+    D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
+
+    CueSheet cue;
+    ValidationReport validation;
+    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath("assets/cues/film_360s.json"), cue, validation) && validation.valid);
+    const auto mode = resolveShowVisualMode(cue);
+    M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, mode);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+    fx.setDisableRt(false);
+
+    // 300 native 2560x1440 frames @ 30 fps (1600 samples/frame @ 48 kHz) across [342.000s .. 352.000s)
+    constexpr uint32_t kTotalFrames = 300;
+    constexpr int64_t kStartSample = 342LL * 48000LL;
+    constexpr int64_t kStepSamples = 1600LL;
+    fx.resetTo(342.0);
+
+    std::vector<uint8_t> rgba;
+    uint32_t width = 0, height = 0;
+    for (uint32_t f = 0; f < kTotalFrames; ++f) {
+        const int64_t sample = kStartSample + int64_t(f) * kStepSamples;
+        auto ctx = makeFilmGateContext(cue, sample, Edition::Family);
+        ctx.presentationFrame = f;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, width, height, &error, nullptr));
+        BOO_CHECK(width == 2560 && height == 1440);
+        if ((f % 60u) == 0u || f + 1u == kTotalFrames) {
+            uint64_t nonFinite = 0;
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &error) && nonFinite == 0);
+            HardwareResult rt;
+            BOO_CHECK(fx.queryLiveEngineStatus(EngineKind::RT, rt));
+            BOO_CHECK(rt.status == BackendStatus::Accelerated && rt.successfullyExecutedTestWork);
+        }
+        std::ostringstream fname;
+        fname << "frame_" << std::setfill('0') << std::setw(4) << f << ".png";
+        BOO_CHECK(writeFastCapturePng(framesDir / fname.str(), rgba, width, height));
+        if ((f % 60u) == 0u || f + 1u == kTotalFrames) {
+            std::cout << "Captured hero 10s frame " << (f + 1u) << "/" << kTotalFrames
+                      << " (t=" << std::fixed << std::setprecision(2) << (double(sample) / 48000.0) << "s)\n" << std::flush;
+        }
+    }
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    return true;
+}

@@ -2587,7 +2587,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     if (impl_->trilogy && !impl_->trilogyMesh) {
         impl_->trilogyMesh=std::make_unique<TrilogyMeshRenderer>(d3d_);
         std::string error;
-        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode)) throw std::runtime_error(error);
+        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     if (impl_->trilogyMesh && !disableRT_ && activeSpec_.allowDxr && !d3d_.isWarp()) {
@@ -2606,6 +2606,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
                 impl_->sceneHdr.Get(), impl_->sceneDepth.Get(),
                 impl_->srvGpuAt(7u).ptr, impl_->canvasW, impl_->canvasH,
                 kHeadlessSlot, true, true);
+            cmd->SetDescriptorHeaps(1, heaps);
         });
         impl_->trilogyMesh->retire(kHeadlessSlot);
     }
@@ -2679,7 +2680,7 @@ bool M1TaipeiSliceEffect::syncPresetBeforeFrame(const QualityPresetSpec& spec, b
     if (impl_->trilogy && !impl_->trilogyMesh) {
         impl_->trilogyMesh=std::make_unique<TrilogyMeshRenderer>(d3d_);
         std::string error;
-        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode)) throw std::runtime_error(error);
+        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
@@ -3103,6 +3104,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     if(trilogyMesh) {
         trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass);
+        ID3D12DescriptorHeap* m1Heaps[] = {srvUavHeap.Get()};
+        cmd->SetDescriptorHeaps(1, m1Heaps);
     } else {
     const bool canAttemptDxr = dxrPipelineReady && !dxrQuarantined && !d3d.isWarp() && useDxr;
     ComPtr<ID3D12GraphicsCommandList4> cmd4;

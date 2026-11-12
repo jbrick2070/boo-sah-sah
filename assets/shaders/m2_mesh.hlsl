@@ -1,35 +1,77 @@
-// Same primary triangles for SM 6.0 raster and DXR 1.1 inline-reflection paths.
-struct Vertex { float4 p; float4 n; float4 uv; float4 tangent; };
+// Unified PBR + DXR 1.1 Inline-Raytracing Shader for BooSahSah
+// Supports SM 6.0 raster (opaque + alpha-cutout) and SM 6.5 DXR 1.1 inline RayQuery
+// with BC7 sRGB base-color/alpha, BC5 tangent-space normals, BC7 linear ORMT,
+// Toksvig roughness mip-chains, RGBA16F GGX prefiltered IBL, cutout candidate rays,
+// unified secondary-hit PBR evaluation, stratified soft shadows, and contact AO.
+
+struct Vertex {
+    float4 p;
+    float4 n;
+    float4 uv;
+    float4 tangent;
+};
+
 cbuffer Scene : register(b0) {
-    float3 eye; float fov;
-    float3 right; float aspect;
-    float3 up; float time;
-    float3 forward; float reveal;
-    uint width; uint height; uint act; uint canonical;
-    float daylight; float pulse; uint showFlags; float moodAccent;
+    float3 eye;      float fov;
+    float3 right;    float aspect;
+    float3 up;       float time;
+    float3 forward;  float reveal;
+    uint width;      uint height;   uint act;       uint canonical;
+    float daylight;  float pulse;   uint showFlags; float moodAccent;
     float moodBloom; float moodLight; float moodCut; float scenePadding;
 };
+
 cbuffer Draw : register(b1) {
-    float4 row0; float4 row1; float4 row2;
-    uint firstIndex; uint material; uint part; uint unused;
+    float4 row0;
+    float4 row1;
+    float4 row2;
+    uint firstIndex;
+    uint material;
+    uint part;
+    uint unused;
 };
+
 StructuredBuffer<Vertex> vertices : register(t0);
-StructuredBuffer<uint> indices : register(t1);
+StructuredBuffer<uint>   indices  : register(t1);
 #if defined(M2_RT)
 RaytracingAccelerationStructure scene : register(t2);
 RWStructuredBuffer<uint> verified : register(u0);
 #endif
-Texture2D<float4> tensorField : register(t3);
-SamplerState linearClamp : register(s0);
 
-float3 norm(float3 v) { return v * rsqrt(max(dot(v, v), 1e-10)); }
-float3 transformPoint(float3 p) { float4 q = float4(p, 1.0); return float3(dot(row0, q), dot(row1, q), dot(row2, q)); }
-float3 transformNormal(float3 n) { return norm(float3(dot(row0.xyz, n), dot(row1.xyz, n), dot(row2.xyz, n))); }
+Texture2D<float4>      tensorField     : register(t3);
+Texture2DArray<float4> gAlbedoAlphaTex : register(t4);
+Texture2DArray<float4> gNormalTex      : register(t5);
+Texture2DArray<float4> gOrmtTex        : register(t6);
+Texture2DArray<float4> gEnvHdrTex      : register(t7);
+
+SamplerState linearClamp     : register(s0);
+SamplerState anisoWrap       : register(s1);
+SamplerState equirectSampler : register(s2);
+
+static const float kPi = 3.14159265;
+static const float kTwoPi = 6.28318530;
+
+float3 norm(float3 v) {
+    return v * rsqrt(max(dot(v, v), 1e-10));
+}
+
+float3 transformPoint(float3 p) {
+    float4 q = float4(p, 1.0);
+    return float3(dot(row0, q), dot(row1, q), dot(row2, q));
+}
+
+float3 transformNormal(float3 n) {
+    return norm(float3(dot(row0.xyz, n), dot(row1.xyz, n), dot(row2.xyz, n)));
+}
 
 float hash21(float2 p) {
     float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
     p3 += dot(p3, p3.yzx + 33.33);
     return frac((p3.x + p3.y) * p3.z);
+}
+
+float interleavedGradientNoise(float2 pix) {
+    return frac(52.9829189 * frac(0.06711056 * floor(pix.x) + 0.00583715 * floor(pix.y)));
 }
 
 float puddleMask(float2 xz) {
@@ -38,31 +80,92 @@ float puddleMask(float2 xz) {
     return smoothstep(0.36, 0.78, a * 0.58 + b * 0.42);
 }
 
-struct VOut {
-    float4 pos : SV_Position;
-    float3 world : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float4 uv : TEXCOORD2;
-    nointerpolation uint mat : TEXCOORD3;
-};
+bool isDawnFinale() {
+    return ((showFlags & 1u) != 0u) && (time >= 338.5);
+}
 
-VOut VSMain(uint id : SV_VertexID) {
-    Vertex v = vertices[indices[firstIndex + id]];
-    VOut o;
-    o.world = transformPoint(v.p.xyz);
-    o.normal = transformNormal(v.n.xyz);
-    o.uv = v.uv;
-    o.mat = (uint)v.p.w;
-    float3 d = o.world - eye;
-    float z = dot(d, forward);
-    float fy = 1.0 / tan(fov * 0.5);
-    o.pos = float4(dot(d, right) * fy / aspect, dot(d, up) * fy, z * 1000.0 / 999.9 - 0.1 * 1000.0 / 999.9, z);
-    return o;
+bool isInsideDawnBathroom(float3 p) {
+    return isDawnFinale() &&
+           (p.x > -2.56 && p.x < 1.56) &&
+           (p.y > 2.58 && p.y < 5.95) &&
+           (p.z > 2.12 && p.z < 6.62);
+}
+
+float3 sceneSunDir() {
+    if (isDawnFinale()) {
+        // Golden-peach Taipei dawn sun shining from the southeast (+X, +Y, -Z) through the X=+1.65 bathroom window
+        return norm(float3(0.80, 0.34, -0.49));
+    }
+    if (act == 1u) {
+        return norm(float3(-0.48, 0.22 + 0.28 * daylight, 0.72));
+    }
+    return norm(float3(-0.44, 0.74, -0.32));
+}
+
+float3 sceneSunRadiance() {
+    if (isDawnFinale()) {
+        float dawnRamp = smoothstep(336.0, 346.0, time);
+        return lerp(float3(0.55, 0.62, 0.82), float3(3.35, 2.32, 1.52), dawnRamp);
+    }
+    float3 nightKey = (act == 1u) ? float3(0.30, 0.44, 0.66) : float3(0.52, 0.78, 1.08);
+    return lerp(nightKey, float3(1.85, 1.32, 0.88), daylight);
+}
+
+float2 dirToEquirectUv(float3 d) {
+    float3 dn = norm(d);
+    return float2(atan2(dn.x, dn.z) / kTwoPi + 0.5, acos(clamp(dn.y, -1.0, 1.0)) / kPi);
+}
+
+float3 sampleIblEnv(float3 d, float rough, bool insideBathroom) {
+    float2 uv = dirToEquirectUv(d);
+    float mip = clamp(rough * 8.0, 0.0, 8.0);
+    if (insideBathroom) {
+        return gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb;
+    }
+    if (isDawnFinale()) {
+        float3 nightEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
+        float3 dawnEnv  = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb;
+        return lerp(nightEnv, dawnEnv, smoothstep(336.0, 345.0, time));
+    }
+    if (act == 1u) {
+        float3 nightEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
+        float3 harbEnv  = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 1.0), mip).rgb;
+        return lerp(nightEnv, harbEnv, saturate(daylight * 1.15));
+    }
+    float3 s0 = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
+    if ((showFlags & 2u) != 0u) {
+        s0 = lerp(s0, s0.bgr * float3(1.15, 0.75, 1.25), 0.35);
+    }
+    return s0;
 }
 
 float3 sky(float3 d) {
-    float horizon = pow(saturate(1.0 - abs(d.y)), 3.6);
-    float urbanGlow = pow(saturate(1.0 - max(d.y + 0.04, 0.0) * 3.8), 3.0);
+    float3 dn = norm(d);
+    if (isDawnFinale()) {
+        float dawnT = smoothstep(336.0, 346.0, time);
+        float3 sDir = sceneSunDir();
+        float horiz = pow(saturate(1.0 - max(dn.y, 0.0)), 3.2);
+        float sunDot = saturate(dot(dn, sDir));
+        float3 zenithCol = lerp(float3(0.025, 0.048, 0.110), float3(0.20, 0.34, 0.58), dawnT);
+        float3 horizWarm = lerp(float3(0.08, 0.13, 0.22), float3(0.98, 0.62, 0.38), dawnT);
+        float3 horizCool = lerp(float3(0.05, 0.09, 0.16), float3(0.48, 0.46, 0.62), dawnT);
+        float azim = saturate(dot(normalize(float2(dn.x, dn.z) + 1e-5), normalize(float2(sDir.x, sDir.z))));
+        float3 clearDawn = lerp(zenithCol, lerp(horizCool, horizWarm, pow(azim, 1.4)), horiz);
+        float3 basinMist = lerp(float3(0.05, 0.08, 0.14), float3(0.56, 0.48, 0.54), dawnT);
+        clearDawn = lerp(clearDawn, basinMist, saturate(-dn.y * 5.0));
+        float sunDisc = pow(sunDot, 260.0) * 5.2 * dawnT;
+        float sunGlow = pow(sunDot, 12.0) * 0.52 * dawnT;
+        float2 tuv = dirToEquirectUv(dn);
+        float3 neural = tensorField.SampleLevel(linearClamp, tuv, 0.0).rgb;
+        float nLum = dot(neural, float3(0.2126, 0.7152, 0.0722));
+        float cloudBand = smoothstep(0.02, 0.28, dn.y) * (1.0 - smoothstep(0.36, 0.82, dn.y));
+        return clearDawn
+             + float3(1.0, 0.74, 0.48) * (sunDisc + sunGlow)
+             + float3(0.24, 0.16, 0.12) * (nLum * cloudBand * 0.45 * dawnT);
+    }
+
+    float horizon = pow(saturate(1.0 - abs(dn.y)), 3.6);
+    float urbanGlow = pow(saturate(1.0 - max(dn.y + 0.04, 0.0) * 3.8), 3.0);
 
     float3 nightZenith = (act == 2u) ? float3(0.004, 0.009, 0.022) : float3(0.006, 0.013, 0.030);
     float3 nightHorizon = (act == 2u) ? float3(0.028, 0.052, 0.078) : float3(0.038, 0.082, 0.128);
@@ -78,15 +181,14 @@ float3 sky(float3 d) {
     float3 clearSky = lerp(lerp(night, day, daylight), dusk, twilight * 0.55);
 
     float3 sunDir = norm(float3(-0.48, 0.16 + 0.22 * daylight, 0.72));
-    float sun = pow(saturate(dot(d, sunDir)), 180.0);
-    float sunHalo = pow(saturate(dot(d, sunDir)), 10.0);
+    float sun = pow(saturate(dot(dn, sunDir)), 180.0);
+    float sunHalo = pow(saturate(dot(dn, sunDir)), 10.0);
     float3 c = clearSky + (sun * float3(3.2, 1.9, 0.85) + sunHalo * float3(0.32, 0.16, 0.06)) * daylight;
 
-    // Verified Tensor field drives subtle high-altitude cloud irradiance without horizon banding.
-    float2 uv = float2(atan2(d.x, d.z) / 6.2831853 + 0.5, acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
+    float2 uv = dirToEquirectUv(dn);
     float3 neural = tensorField.SampleLevel(linearClamp, uv, 0.0).rgb;
     float nLum = dot(neural, float3(0.2126, 0.7152, 0.0722));
-    float highCloud = smoothstep(0.04, 0.34, d.y) * (1.0 - smoothstep(0.45, 0.88, d.y));
+    float highCloud = smoothstep(0.04, 0.34, dn.y) * (1.0 - smoothstep(0.45, 0.88, dn.y));
     c += lerp(float3(0.018, 0.034, 0.052), float3(0.18, 0.12, 0.07), daylight) * nLum * (0.28 + 0.55 * daylight) * highCloud;
 
     if (showFlags == 0u) {
@@ -96,45 +198,20 @@ float3 sky(float3 d) {
     return c;
 }
 
-float3 baseColor(uint m) {
-    if (m == 0u)  return float3(0.034, 0.044, 0.056); // Structural steel / dark bronze-graphite
-    if (m == 1u)  return float3(0.018, 0.023, 0.030); // Wet asphalt / basalt slate deck
-    if (m == 2u)  return float3(0.165, 0.148, 0.128); // Architectural stone / concrete / sleeper
-    if (m == 3u)  return float3(0.76, 0.85, 0.86);    // Low-iron blown crystal glass (broad petals)
-    if (m == 4u)  return float3(0.58, 0.80, 0.75);    // Pale celadon crystal glass (sepals, column, buds)
-    if (m == 5u)  return float3(0.020, 0.088, 0.108); // Taipei 101 jade-blue curtain wall
-    if (m == 6u)  return float3(0.06, 0.74, 0.56);    // Cyan/jade architectural accent
-    if (m == 7u)  return float3(0.009, 0.034, 0.050); // River / basin / reflecting pool water
-    if (m == 8u)  return float3(0.86, 0.58, 0.16);    // 24k gold / brushed brass (TMD, callus, medallions)
-    if (m == 9u)  return float3(0.42, 0.048, 0.18);   // Orchid labellum crimson-plum / Pearl sphere
-    if (m == 10u) return float3(0.018, 0.068, 0.034); // Matte dark wet botanical foliage
-    if (m == 11u) return float3(0.80, 0.82, 0.85);    // Porcelain anther cap / aerospace white-titanium
-    if (m == 12u) return float3(0.11, 0.13, 0.15);    // Polished steel / obsidian mirror stela
-    if (m == 13u) return float3(0.048, 0.042, 0.040); // Warm mixed-use / hotel facade
-    if (m == 14u) return float3(0.026, 0.046, 0.068); // Cool high-rise glass facade
-    if (m == 15u) return float3(0.76, 0.54, 0.28);    // Warm architectural interior / soffit
-    if (m == 16u) return float3(0.95, 0.55, 0.16);    // Warm streetlamp / approach / beacon
-    if (m == 17u) return float3(0.42, 0.48, 0.54);    // Rotor motion disc
-    if (m == 18u) return float3(0.022, 0.045, 0.072); // Tinted cockpit canopy glass
-    if (m == 19u) return float3(0.013, 0.022, 0.030); // Distant Taipei Basin misty mountain ridge
-    if (m == 20u) return float3(0.84, 0.81, 0.75);    // Sculpted ivory hydroxyapatite tooth-crown enamel
-    if (m == 21u) return float3(0.08, 0.22, 0.26);    // Neural Velvet 64-layer Tensor Core SIREN ribbon
-    if (m == 22u) return float3(0.06, 0.38, 0.26);    // Symbiotic bioluminescent oral micro-flora
-    if (m == 23u) return float3(0.24, 0.29, 0.32);    // Brushed architectural titanium
-    if (m == 24u) return float3(0.72, 0.66, 0.55);    // Warm ceramic / mineral plaster
-    if (m == 25u) return float3(0.09, 0.24, 0.20);    // Celadon glazed vessels
-    if (m == 26u) return float3(0.23, 0.11, 0.045);   // Morning oak vanity
-    return float3(0.70, 0.74, 0.76);
-}
-
 float3 emissive(uint m, float3 p, float filterW) {
-    // Windows and urban lights stay off in late-afternoon sun (daylight ~ 0.9) and ignite across dusk into night
     float nightFactor = smoothstep(0.68, 0.08, daylight);
+    if (isDawnFinale()) {
+        // Warm subtle architectural halo/sconce glow in bathroom even at dawn; exterior city lights fade gently
+        if (m == 15u && isInsideDawnBathroom(p)) {
+            return float3(0.92, 0.68, 0.42) * 0.52;
+        }
+        nightFactor *= 0.22;
+    }
     if (m == 6u) {
         return float3(0.05, 0.86, 0.66) * (0.62 + 0.18 * pulse) * (0.08 + 0.92 * nightFactor);
     }
     if (m == 15u) {
-        return float3(0.56, 0.36, 0.16) * (0.04 + 0.96 * nightFactor) * (1.0 + 0.08 * pulse);
+        return float3(0.56, 0.36, 0.16) * (0.08 + 0.92 * nightFactor) * (1.0 + 0.08 * pulse);
     }
     if (m == 16u) {
         return float3(1.25, 0.64, 0.18) * (0.04 + 0.96 * nightFactor);
@@ -150,7 +227,6 @@ float3 emissive(uint m, float3 p, float filterW) {
         float bldgId = floor(p.x * 0.12) * 17.0 + floor(p.z * 0.12) * 31.0;
 
         float mechFloor = (m == 5u) ? step(0.13, frac(flr / 8.0)) : step(0.09, frac((flr + bldgId) / 12.0));
-
         float rRoom  = hash21(float2(flr * 1.37 + bldgId, bay * 2.19));
         float rFloor = hash21(float2(flr * 0.73, bldgId + 5.1));
         float occThreshold = (m == 13u) ? 0.48 : ((m == 5u) ? 0.52 : 0.56);
@@ -158,7 +234,6 @@ float3 emissive(uint m, float3 p, float filterW) {
         float ceilGrad = 0.55 + 0.45 * fy;
         float dimVar = 0.42 + 0.58 * hash21(float2(bay * 3.1, flr * 1.7));
 
-        // Soften window mullion edges smoothly along curved secondary ray cones while preserving warm glowing rooms
         float softEdge = clamp(filterW * 0.35, 0.0, 0.22);
         float paneSoft = smoothstep(0.16 - softEdge, 0.24 + softEdge, fy) * (1.0 - smoothstep(0.78 - softEdge, 0.86 + softEdge, fy))
                        * smoothstep(0.12 - softEdge, 0.20 + softEdge, fx) * (1.0 - smoothstep(0.80 - softEdge, 0.88 + softEdge, fx));
@@ -188,79 +263,442 @@ float3 emissive(uint m, float3 p, float filterW) {
     return (float3)0.0;
 }
 
-#if defined(M2_RT)
-bool traceScene(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color) {
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = 0.020;
-    ray.TMax = distance;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(scene, RAY_FLAG_NONE, mask, ray);
-    while (q.Proceed()) {}
-    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
-        Vertex v0 = vertices[indices[offset]], v1 = vertices[indices[offset+1u]], v2 = vertices[indices[offset+2u]];
-        uint hm = (uint)v0.p.w;
-        float2 bary = q.CommittedTriangleBarycentrics();
-        float3 objectNormal = v0.n.xyz + bary.x * (v1.n.xyz-v0.n.xyz) + bary.y * (v2.n.xyz-v0.n.xyz);
-        float3 hitNormal = norm(mul(objectNormal, (float3x3)q.CommittedWorldToObject3x4()));
-        if (dot(hitNormal,direction)>0.0) hitNormal=-hitNormal;
-        float hitT = q.CommittedRayT();
-        float3 p = origin + direction * hitT;
-        float3 key = norm((act==1u)?float3(-.48,.22+.28*daylight,.72):float3(-.44,.74,-.32));
-        float3 keyTint = lerp(float3(.42,.64,.92),float3(1.42,1.02,.68),daylight);
-        float3 hitCol = baseColor(hm) * (.18+.65*saturate(dot(hitNormal,key))) * keyTint
-                      + emissive(hm, p, coneSpread * hitT);
-        // Single-bounce rough-ray footprint approximation: filter both facade
-        // frequencies and reflected radiance instead of reflecting every surface like chrome.
-        float3 roughAmbient = lerp(float3(.025,.035,.045),float3(.12,.16,.20),saturate(hitNormal.y*.5+.5));
-        roughAmbient = lerp(roughAmbient,float3(.32,.25,.18),daylight) + baseColor(hm)*.12;
-        hitCol = lerp(hitCol, roughAmbient, saturate(coneSpread*hitT*.10));
-        float hFog = 1.0 - exp(-max(hitT - 4.0, 0.0) * 0.006);
-        color = lerp(hitCol, sky(direction), hFog * 0.72);
-        return true;
+float3 evalGgxDirect(float3 n, float3 v, float3 l, float3 base, float rough, float metallic, float clearcoat) {
+    float nl = saturate(dot(n, l));
+    if (nl <= 1e-4) return (float3)0.0;
+    float nv = max(dot(n, v), 1e-3);
+    float3 h = norm(v + l);
+    float nh = saturate(dot(n, h));
+    float vh = saturate(dot(v, h));
+
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
+    float3 F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+
+    float alpha = max(rough * rough, 0.0012);
+    float a2 = alpha * alpha;
+    float denom = nh * nh * (a2 - 1.0) + 1.0;
+    float D = a2 / (kPi * denom * denom);
+
+    float k = (rough + 1.0) * (rough + 1.0) * 0.125;
+    float G = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
+    float3 spec = min(D * G * F / max(4.0 * nv * nl, 0.004), 14.0.xxx);
+
+    float3 kd = (1.0 - F) * (1.0 - metallic);
+    float3 diff = kd * base / kPi;
+
+    float3 coatSpec = (float3)0.0;
+    if (clearcoat > 0.02) {
+        float cAlpha = 0.0036;
+        float ca2 = cAlpha * cAlpha;
+        float cDen = nh * nh * (ca2 - 1.0) + 1.0;
+        float cD = ca2 / (kPi * cDen * cDen);
+        float cF = 0.04 + 0.96 * pow(1.0 - vh, 5.0);
+        float cK = 0.14;
+        float cG = (nv / (nv * (1.0 - cK) + cK)) * (nl / (nl * (1.0 - cK) + cK));
+        coatSpec = min(cD * cG * cF / max(4.0 * nv * nl, 0.006), 12.0) * clearcoat * float3(1.0, 1.0, 1.0);
+        diff *= (1.0 - 0.35 * clearcoat * cF);
     }
-    color = sky(direction);
-    return false;
+
+    return (diff + spec + coatSpec) * nl;
 }
 
+float2 envBrdfApprox(float rough, float nv) {
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    return float2(-1.04, 1.04) * a004 + r.zw;
+}
+
+float clearcoatForMaterial(uint m, float aux, float wetPuddle) {
+    if (m == 1u)  return 0.85 * wetPuddle;
+    if (m == 11u || m == 20u || m == 25u || m == 27u || m == 28u || m == 37u) return aux;
+    if (m == 31u) return 0.32 * aux;
+    return 0.0;
+}
+
+float translucencyForMaterial(uint m, float aux) {
+    if (m == 10u || m == 20u || m == 22u || m == 29u || m == 30u || m == 33u || m == 36u) return aux;
+    return 0.0;
+}
+
+void buildOrthonormalBasis(float3 n, out float3 b1, out float3 b2) {
+    float3 upRef = (abs(n.y) < 0.94) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    b1 = norm(cross(upRef, n));
+    b2 = cross(n, b1);
+}
+
+#if defined(M2_RT)
 bool traceShadow(float3 origin, float3 direction, float distance) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
-    ray.TMin = 0.022;
+    ray.TMin = 0.016;
     ray.TMax = distance;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
     q.TraceRayInline(scene, RAY_FLAG_NONE, 0x01u, ray);
-    while (q.Proceed()) {}
+    while (q.Proceed()) {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+            uint cOff = q.CandidateInstanceID() + q.CandidatePrimitiveIndex() * 3u;
+            Vertex cv0 = vertices[indices[cOff]];
+            Vertex cv1 = vertices[indices[cOff + 1u]];
+            Vertex cv2 = vertices[indices[cOff + 2u]];
+            float2 cb = q.CandidateTriangleBarycentrics();
+            float2 cuv = cv0.uv.xy + cb.x * (cv1.uv.xy - cv0.uv.xy) + cb.y * (cv2.uv.xy - cv0.uv.xy);
+            uint cm = min((uint)cv0.p.w, 41u);
+            float ca = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(cuv, (float)cm), 1.0).a;
+            if (ca >= 0.44) {
+                q.CommitNonOpaqueTriangleHit();
+            }
+        }
+    }
     return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+float traceAmbientRay(float3 origin, float3 direction, float maxDist) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.008;
+    ray.TMax = maxDist;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0x01u, ray);
+    q.Proceed();
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        return saturate(1.0 - q.CommittedRayT() / maxDist);
+    }
+    return 0.0;
+}
+
+void traceBathroomGiRay(float3 origin, float3 direction, out float3 giRad, out float occWeight) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.006;
+    ray.TMax = 3.85;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0x01u, ray);
+    q.Proceed();
+
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        float hitT = q.CommittedRayT();
+        float3 hitP = origin + direction * hitT;
+        uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
+        Vertex v0 = vertices[indices[offset]];
+        Vertex v1 = vertices[indices[offset + 1u]];
+        Vertex v2 = vertices[indices[offset + 2u]];
+        uint hm = min((uint)v0.p.w, 41u);
+        float2 bary = q.CommittedTriangleBarycentrics();
+        float2 hitUv = v0.uv.xy + bary.x * (v1.uv.xy - v0.uv.xy) + bary.y * (v2.uv.xy - v0.uv.xy);
+        float3 hitAlb = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(hitUv, (float)hm), 4.5).rgb;
+
+        // Rays that pass out through the corner window opening onto the terrace or skyline gather outdoor portal light
+        if (!isInsideDawnBathroom(hitP)) {
+            giRad = hitAlb * float3(0.92, 0.84, 0.76) * 0.72 + sky(direction) * 0.28;
+            occWeight = 0.0;
+            return;
+        }
+
+        float wMicro = 1.0 - smoothstep(0.004, 0.14, hitT);
+        float wMeso  = 1.0 - smoothstep(0.020, 0.92, hitT);
+        occWeight = 0.68 * wMicro + 0.32 * wMeso;
+
+        float dawnRamp = smoothstep(336.0, 346.0, time);
+        float winProx = smoothstep(-0.95, 1.35, hitP.x) * 0.58 + smoothstep(3.0, 6.45, hitP.z) * 0.42;
+        float3 bounceIrr = lerp(float3(0.14, 0.13, 0.13), float3(0.96, 0.78, 0.62), winProx * dawnRamp);
+        giRad = hitAlb * bounceIrr * smoothstep(0.005, 0.095, hitT);
+        if (hm == 15u) {
+            giRad += float3(0.85, 0.60, 0.34) * 0.65;
+        }
+        return;
+    }
+
+    // Ray escaped cleanly through the penthouse corner window portal into the Taipei dawn sky!
+    giRad = sky(direction) * 0.80;
+    occWeight = 0.0;
+}
+
+bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT) {
+    outHitT = distance;
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.014;
+    ray.TMax = distance;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    uint dynFlags = (coneSpread >= 0.045) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE;
+    q.TraceRayInline(scene, dynFlags, mask, ray);
+    while (q.Proceed()) {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+            uint cOff = q.CandidateInstanceID() + q.CandidatePrimitiveIndex() * 3u;
+            Vertex cv0 = vertices[indices[cOff]];
+            Vertex cv1 = vertices[indices[cOff + 1u]];
+            Vertex cv2 = vertices[indices[cOff + 2u]];
+            float2 cb = q.CandidateTriangleBarycentrics();
+            float2 cuv = cv0.uv.xy + cb.x * (cv1.uv.xy - cv0.uv.xy) + cb.y * (cv2.uv.xy - cv0.uv.xy);
+            uint cm = min((uint)cv0.p.w, 41u);
+            float ca = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(cuv, (float)cm), 1.0).a;
+            if (ca >= 0.44) {
+                q.CommitNonOpaqueTriangleHit();
+            }
+        }
+    }
+
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
+        Vertex v0 = vertices[indices[offset]];
+        Vertex v1 = vertices[indices[offset + 1u]];
+        Vertex v2 = vertices[indices[offset + 2u]];
+        uint hm = min((uint)v0.p.w, 41u);
+        float2 bary = q.CommittedTriangleBarycentrics();
+
+        float3 objN = v0.n.xyz + bary.x * (v1.n.xyz - v0.n.xyz) + bary.y * (v2.n.xyz - v0.n.xyz);
+        float3 objT = v0.tangent.xyz + bary.x * (v1.tangent.xyz - v0.tangent.xyz) + bary.y * (v2.tangent.xyz - v0.tangent.xyz);
+        float2 hitUv = v0.uv.xy + bary.x * (v1.uv.xy - v0.uv.xy) + bary.y * (v2.uv.xy - v0.uv.xy);
+
+        float3x3 w2o = (float3x3)q.CommittedWorldToObject3x4();
+        float3x3 o2w = (float3x3)q.CommittedObjectToWorld3x4();
+        float3 hitNGeom = norm(mul(objN, w2o));
+        bool hitFront = dot(hitNGeom, direction) < 0.0;
+        if (!hitFront) hitNGeom = -hitNGeom;
+
+        float hitT = q.CommittedRayT();
+        outHitT = hitT;
+        float3 p = origin + direction * hitT;
+        bool inBath = isInsideDawnBathroom(p);
+
+        float mipLod = clamp(log2(max(coneSpread * hitT * 512.0, 1.0)), 0.0, 8.0);
+        float3 hCoord = float3(hitUv, (float)hm);
+        float3 hBase  = gAlbedoAlphaTex.SampleLevel(anisoWrap, hCoord, mipLod).rgb;
+        float2 hNorXY = gNormalTex.SampleLevel(anisoWrap, hCoord, mipLod).xy * 2.0 - 1.0;
+        float4 hOrm   = gOrmtTex.SampleLevel(anisoWrap, hCoord, mipLod);
+
+        float3 wT = mul(o2w, objT);
+        wT = wT - hitNGeom * dot(hitNGeom, wT);
+        float wt2 = dot(wT, wT);
+        float3 T = (wt2 > 1e-8)
+            ? (wT * rsqrt(wt2))
+            : norm(abs(hitNGeom.y) < 0.99 ? cross(float3(0.0, 1.0, 0.0), hitNGeom) : cross(float3(1.0, 0.0, 0.0), hitNGeom));
+        float bSign = (hitFront ? 1.0 : -1.0) * ((v0.tangent.w >= 0.0) ? 1.0 : -1.0);
+        float3 B = cross(hitNGeom, T) * bSign;
+
+        float hNormScale = (hm == 34u || hm == 40u) ? 0.04 : saturate(1.0 - mipLod * 0.12);
+        hNorXY *= hNormScale;
+        float hNz = sqrt(saturate(1.0 - dot(hNorXY, hNorXY)));
+        float3 hitN = norm(T * hNorXY.x + B * hNorXY.y + hitNGeom * hNz);
+
+        float wetP = (hm == 1u) ? puddleMask(p.xz) : 0.0;
+        float hRough = clamp(hOrm.y, 0.03, 0.98);
+        if (hm == 1u) hRough = lerp(hRough, 0.08, wetP);
+        float hMetal = saturate(hOrm.z);
+        float hCoat  = clearcoatForMaterial(hm, hOrm.w, wetP);
+        float hTrans = translucencyForMaterial(hm, hOrm.w);
+
+        if (hm == 5u || hm == 13u || hm == 14u) {
+            float floorH = (hm == 5u) ? 0.34 : 0.38;
+            float bayW   = (hm == 5u) ? 0.25 : 0.32;
+            float fy = frac(p.y / floorH);
+            float fx = frac((p.x * 1.07 + p.z * 1.13) / bayW);
+            float cw = smoothstep(0.12, 0.20, fy) * (1.0 - smoothstep(0.82, 0.90, fy))
+                     * smoothstep(0.08, 0.15, fx) * (1.0 - smoothstep(0.85, 0.92, fx));
+            hBase = lerp(hBase * 0.45, hBase, cw);
+        }
+
+        float3 V2 = -direction;
+        float nv2 = max(dot(hitN, V2), 1e-3);
+        float3 sunDir = sceneSunDir();
+        float3 sunRad = sceneSunRadiance();
+
+        // Sharp mirrors/glass/water evaluate secondary sun shadow so reflected rooms display real window sunbeams!
+        float sunVis2 = 1.0;
+        if (coneSpread < 0.055 && (dot(hitNGeom, sunDir) > 0.0 || hTrans > 0.2)) {
+            float3 shOrig = p + hitNGeom * 0.018 + ((hm == 29u || hm == 36u) ? sunDir * 0.020 : 0.0.xxx);
+            sunVis2 = traceShadow(shOrig, sunDir, inBath ? 16.0 : 22.0) ? 0.0 : 1.0;
+        }
+
+        float3 direct2 = evalGgxDirect(hitN, V2, sunDir, hBase, hRough, hMetal, hCoat) * sunRad * sunVis2;
+        if (hTrans > 0.05) {
+            float back2 = saturate(dot(-hitN, sunDir) * 0.65 + 0.35);
+            direct2 += hBase * sunRad * (back2 * hTrans * (0.30 + 0.70 * sunVis2) * 0.48);
+        }
+
+        float3 f0_2 = lerp(float3(0.04, 0.04, 0.04), hBase, hMetal);
+        float2 brdf2 = envBrdfApprox(hRough, nv2);
+        float3 diffEnv2 = sampleIblEnv(hitN, 0.92, inBath);
+        float3 specEnv2 = sampleIblEnv(reflect(-V2, hitN), hRough, inBath);
+
+        if (inBath) {
+            // Balanced window portal irradiance + warm opal sconce so reflected wainscot slats & shower tiles have crisp depth
+            float3 toWin = float3(1.48, 4.25, 4.90) - p;
+            float winDist = length(toWin);
+            float3 winL = toWin / max(winDist, 0.25);
+            float winFall = 1.0 / (1.0 + 0.18 * winDist * winDist);
+            diffEnv2 = diffEnv2 * 0.34 + float3(0.58, 0.56, 0.54) * (0.28 + 0.72 * saturate(dot(hitN, winL))) * winFall;
+            float3 toSconce = float3(0.08, 4.44, 2.32) - p;
+            float dSc = length(toSconce);
+            diffEnv2 += float3(0.95, 0.64, 0.34) * saturate(dot(hitN, toSconce / max(dSc, 0.15)) * 0.6 + 0.4) / (1.0 + 2.4 * dSc * dSc);
+        }
+
+        float3 kd2 = (1.0 - f0_2) * (1.0 - hMetal);
+        float3 ibl2 = (kd2 * hBase * diffEnv2 + specEnv2 * (f0_2 * brdf2.x + brdf2.y)) * hOrm.x;
+
+        if (hm == 3u || hm == 4u || hm == 18u || hm == 35u || hm == 40u) {
+            float fres2 = 0.04 + 0.96 * pow(1.0 - nv2, 5.0);
+            float3 trans2 = sampleIblEnv(direction, 0.12, inBath) * hBase;
+            color = lerp(trans2, specEnv2, clamp(fres2, 0.06, 0.88)) + direct2;
+            return true;
+        }
+
+        float3 hitCol = direct2 + ibl2 + emissive(hm, p, coneSpread * hitT);
+        if (!inBath) {
+            float hFog = 1.0 - exp(-max(hitT - 4.5, 0.0) * (isDawnFinale() ? 0.0028 : 0.0055));
+            hitCol = lerp(hitCol, sky(direction), hFog * 0.72);
+        }
+        color = hitCol;
+        return true;
+    }
+
+    color = isInsideDawnBathroom(origin) ? (sky(direction) * 0.85) : sky(direction);
+    return false;
+}
+
+bool traceScene(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color) {
+    float dummyT = distance;
+    return traceSceneEx(origin, direction, distance, mask, coneSpread, color, dummyT);
+}
+
+bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uint extraQueries) {
+    extraQueries = 1u;
+    float opqT = 180.0;
+    bool hitOpq = traceSceneEx(origin, direction, 180.0, 0x01u, 0.0015, color, opqT);
+
+    // Check thin-glass sheets (shower partition, gallery frame glass, window panes) in front of the opaque hit!
+    RayDesc gRay;
+    gRay.Origin = origin;
+    gRay.Direction = direction;
+    gRay.TMin = 0.014;
+    gRay.TMax = max(opqT - 0.006, 0.015);
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> gq;
+    gq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02u, gRay);
+    while (gq.Proceed()) {}
+    ++extraQueries;
+
+    if (gq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        uint gOff = gq.CommittedInstanceID() + gq.CommittedPrimitiveIndex() * 3u;
+        Vertex gv0 = vertices[indices[gOff]];
+        Vertex gv1 = vertices[indices[gOff + 1u]];
+        Vertex gv2 = vertices[indices[gOff + 2u]];
+        uint gm = min((uint)gv0.p.w, 41u);
+        float2 gb = gq.CommittedTriangleBarycentrics();
+        float3 gObjN = gv0.n.xyz + gb.x * (gv1.n.xyz - gv0.n.xyz) + gb.y * (gv2.n.xyz - gv0.n.xyz);
+        float3x3 gw2o = (float3x3)gq.CommittedWorldToObject3x4();
+        float3 gN = norm(mul(gObjN, gw2o));
+        if (dot(gN, direction) > 0.0) gN = -gN;
+
+        float gNv = saturate(dot(gN, -direction));
+        float gFres = clamp((0.04 + 0.96 * pow(1.0 - gNv, 5.0)) * 1.25, 0.055, 0.68);
+        float3 gTint = (gm == 35u) ? float3(0.72, 0.32, 0.08)
+                     : ((gm == 4u) ? float3(0.84, 0.96, 0.90) : float3(0.955, 0.982, 0.972));
+        bool mirBath = isInsideDawnBathroom(origin);
+        float3 gSpec = sampleIblEnv(reflect(direction, gN), 0.035, mirBath) * 0.68;
+        float3 sDir = sceneSunDir();
+        gSpec += pow(saturate(dot(gN, norm(-direction + sDir))), 180.0) * sceneSunRadiance() * 0.65;
+        color = lerp(color * gTint, gSpec, gFres);
+        return true;
+    }
+    return hitOpq;
 }
 #endif
 
-struct Targets { float4 color : SV_Target0; float distance : SV_Target1; };
+struct VOut {
+    float4 pos         : SV_Position;
+    float3 world       : TEXCOORD0;
+    float3 normal      : TEXCOORD1;
+    float4 uv          : TEXCOORD2;
+    nointerpolation uint mat : TEXCOORD3;
+    float4 tangentSign : TEXCOORD4;
+};
 
-// Opaque primary triangles never discard or export depth. Force visibility
-// testing before the inline rays/UAV verification atomics, including closed
-// hero shells whose back surfaces would otherwise execute expensive shading.
+VOut VSMain(uint id : SV_VertexID) {
+    Vertex v = vertices[indices[firstIndex + id]];
+    VOut o;
+    o.world = transformPoint(v.p.xyz);
+    o.normal = transformNormal(v.n.xyz);
+    o.uv = v.uv;
+    o.mat = (uint)v.p.w;
+    o.tangentSign = float4(transformNormal(v.tangent.xyz), v.tangent.w);
+    float3 d = o.world - eye;
+    float z = dot(d, forward);
+    float fy = 1.0 / tan(fov * 0.5);
+    o.pos = float4(dot(d, right) * fy / aspect, dot(d, up) * fy, z * 1000.0 / 999.9 - 0.1 * 1000.0 / 999.9, z);
+    return o;
+}
+
+struct Targets {
+    float4 color   : SV_Target0;
+    float distance : SV_Target1;
+};
+
+#if defined(BOO_DEPTH_CUTOUT_PS)
+void PSDepthCutout(VOut i) {
+    uint matId = min(i.mat, 41u);
+    float alpha = gAlbedoAlphaTex.Sample(anisoWrap, float3(i.uv.xy, (float)matId)).a;
+    if (alpha < 0.44) {
+        discard;
+    }
+}
+#else
 [earlydepthstencil]
 Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
-    float3 n = norm(front ? i.normal : -i.normal);
+    uint matId = min(i.mat, 41u);
+    float3 texCoord = float3(i.uv.xy, (float)matId);
+
+    // Unconditional anisotropic texture-array fetches (strictly uniform before any cutout discard)
+    float4 albSample = gAlbedoAlphaTex.Sample(anisoWrap, texCoord);
+    float2 norSample = gNormalTex.Sample(anisoWrap, texCoord).xy;
+    float4 ormSample = gOrmtTex.Sample(anisoWrap, texCoord);
+
+#if defined(BOO_ALPHA_CUTOUT)
+    if (albSample.a < 0.44) {
+        discard;
+    }
+#endif
+
+    float3 nGeom = norm(front ? i.normal : -i.normal);
     float3 v = norm(eye - i.world);
     float dist = length(i.world - eye);
-    bool isGlass = (i.mat == 3u || i.mat == 4u || i.mat == 18u);
-    float rough = clamp(i.uv.w, 0.045, 0.95);
+    bool inBath = isInsideDawnBathroom(i.world);
 
-    float wetPuddle = (i.mat == 1u) ? puddleMask(i.world.xz) : 0.0;
-    float micro = sin(i.world.x*31.0+i.world.z*17.0)*sin(i.world.y*27.0-i.world.z*11.0);
-    rough = clamp(rough + .018*micro / (1.0+dist*.08), .045, .95);
-    if (i.mat==1u) rough=lerp(.48,.085,wetPuddle);
-    if (i.mat==12u) rough=clamp(i.uv.w,.045,.25);
-    if (i.mat==10u||i.mat==19u) rough=.92;
-    if (i.mat == 7u || (i.mat == 1u && wetPuddle > 0.15)) {
-        float baseRip = (i.mat == 7u) ? 0.011 : (0.006 * wetPuddle);
+    // Orthonormal MikkTSpace TBN reconstruction
+    float3 tProj = i.tangentSign.xyz - nGeom * dot(nGeom, i.tangentSign.xyz);
+    float tLen2 = dot(tProj, tProj);
+    float3 T = (tLen2 > 1e-8)
+        ? (tProj * rsqrt(tLen2))
+        : norm(abs(nGeom.y) < 0.99 ? cross(float3(0.0, 1.0, 0.0), nGeom) : cross(float3(1.0, 0.0, 0.0), nGeom));
+    float bSign = (front ? 1.0 : -1.0) * ((i.tangentSign.w >= 0.0) ? 1.0 : -1.0);
+    float3 B = cross(nGeom, T) * bSign;
+
+    float2 nxy = norSample * 2.0 - 1.0;
+    float normFade = 1.0 / (1.0 + dist * 0.016);
+    if (matId == 34u || matId == 40u) normFade *= 0.03; // Optical silvered mirror & architectural float glass
+    nxy *= normFade;
+    float nz = sqrt(saturate(1.0 - dot(nxy, nxy)));
+    float3 n = norm(T * nxy.x + B * nxy.y + nGeom * nz);
+
+    float wetPuddle = (matId == 1u) ? puddleMask(i.world.xz) : 0.0;
+    float3 base = albSample.rgb;
+    float texAO = ormSample.x;
+    float rough = clamp(ormSample.y, 0.020, 0.98);
+    float metallic = saturate(ormSample.z);
+    float auxVal = ormSample.w;
+
+    if (matId == 1u) {
+        rough = lerp(rough, 0.065, wetPuddle);
+        base *= lerp(1.0, 0.58, wetPuddle);
+    }
+    if (matId == 7u || (matId == 1u && wetPuddle > 0.15)) {
+        float baseRip = (matId == 7u) ? 0.010 : (0.005 * wetPuddle);
         float ripScale = baseRip / (1.0 + dist * 0.022);
-        // Multi-frequency cross-chop avoids artificial sinusoidal sawtooth artifacts on reflected vertical tower edges
         float wx = sin(i.world.z * 5.7 + i.world.x * 2.3 + time * 2.4) * 0.55
                  + sin(i.world.z * 12.3 - i.world.x * 6.1 - time * 1.9) * 0.30
                  + cos(i.world.x * 8.9 + i.world.z * 3.4 + time * 1.3) * 0.15;
@@ -270,72 +708,293 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         n = norm(n + float3(wx * ripScale, 0.0, wz * ripScale));
     }
 
-    float ndotv = saturate(dot(n, v));
-    float fres = 0.035 + 0.965 * pow(1.0 - ndotv, 4.4);
-    float3 keyDir = norm((act == 1u) ? float3(-0.48, 0.22 + 0.28 * daylight, 0.72) : float3(-0.44, 0.74, -0.32));
-    float3 rimDir = norm(float3(0.58, 0.28, 0.76));
-    float3 upSanctuaryDir = norm(float3(0.08, -0.86, -0.48));
-
-    // Restrained refraction bend keeps background silhouettes optically coherent rather than shattered
-    float3 refrDir = norm(lerp(-v, refract(-v, n, 1.0 / 1.49), 0.42));
-
-    float ao = 1.0;
-    float3 reflected = sky(reflect(-v, n));
-    float3 transmitted = sky(refrDir);
-
-#if defined(M2_RT)
-    bool reflHit = false;
-    bool secondHit = false;
-    uint queries = 0u;
-    if (isGlass) {
-        reflHit   = traceScene(i.world + n * 0.03, reflect(-v, n), 180.0, 0x01u, 0.008+rough*rough*.12, reflected);
-        secondHit = traceScene(i.world - n * 0.03, refrDir,        180.0, 0x01u, 0.014, transmitted);
-        queries = 2u;
-    } else {
-        // Trace resolvable reflections on water, mirrors and polished metal.
-        // Matte plaster/foliage and distant facades use broad environment light;
-        // casting a sharp geometry ray for these lobes adds cost and false chrome.
-        bool resolvedReflection = i.mat == 7u || i.mat == 12u || i.mat == 8u || i.mat == 23u ||
-                                  (i.mat == 1u && wetPuddle > .45) ||
-                                  (rough < .30 && fres > .28 && dist < 24.0);
-        if (resolvedReflection) {
-            reflHit = traceScene(i.world + n * 0.024, reflect(-v, n), 180.0, 0x03u, 0.005+rough*rough*.18, reflected);
-            ++queries;
-        }
-        secondHit = traceShadow(i.world + n * 0.024, keyDir, 3.0);
-        ++queries;
-        ao = secondHit ? 0.58 : 1.0;
-    }
-    uint waveQueries = WaveActiveSum(queries);
-    if (canonical != 0u && WaveIsFirstLane()) InterlockedAdd(verified[1], waveQueries);
-    if (canonical != 0u && (((uint)i.pos.x & 31u) == 0u) && (((uint)i.pos.y & 31u) == 0u)) {
-        InterlockedAdd(verified[0], (reflHit ? 1u : 0u) + (secondHit ? 1u : 0u));
-    }
-#endif
-
-    float3 base = baseColor(i.mat);
-    if(i.mat==26u) base*=.88+.12*sin(i.world.x*22.0+sin(i.world.z*4.0)*1.3);
-    if(i.mat==23u) base*=.96+.04*sin(i.world.y*130.0)/(1.0+dist*.1);
     float cwPane = 1.0;
-    if (i.mat == 5u || i.mat == 13u || i.mat == 14u) {
-        // Curtain-wall floor spandrels & vertical mullions articulate skyscrapers in daylight as well as night
-        float floorH = (i.mat == 5u) ? 0.34 : 0.38;
-        float bayW   = (i.mat == 5u) ? 0.25 : 0.32;
+    if (matId == 5u || matId == 13u || matId == 14u) {
+        float floorH = (matId == 5u) ? 0.34 : 0.38;
+        float bayW   = (matId == 5u) ? 0.25 : 0.32;
         float fy = frac(i.world.y / floorH);
         float fx = frac((i.world.x * 1.07 + i.world.z * 1.13) / bayW);
         cwPane = smoothstep(0.12, 0.20, fy) * (1.0 - smoothstep(0.82, 0.90, fy))
                * smoothstep(0.08, 0.15, fx) * (1.0 - smoothstep(0.85, 0.92, fx));
-        float panelVar = 0.86 + 0.28 * hash21(floor(float2((i.world.x + i.world.z) / bayW, i.world.y / floorH)));
+        float panelVar = 0.88 + 0.24 * hash21(floor(float2((i.world.x + i.world.z) / bayW, i.world.y / floorH)));
         base = lerp(base * 0.42, base * panelVar, cwPane);
+        rough = lerp(0.38, rough, cwPane);
     }
-    float3 neural = tensorField.SampleLevel(linearClamp, frac(i.world.xz * 0.035), 0.0).rgb;
-    float diffuse = 0.22 + 0.78 * saturate(dot(n, keyDir));
-    float rimLight = pow(saturate(dot(n, rimDir)), 2.2) * 0.24;
 
-    float3 nightKey = (act == 1u) ? float3(0.24, 0.36, 0.54) : float3(0.42, 0.64, 0.92);
-    float3 keyTint = lerp(nightKey, float3(1.42, 1.02, 0.68), daylight);
-    float3 rimTint = lerp(float3(0.32, 0.48, 0.68), float3(0.85, 0.66, 0.48), daylight);
-    float3 color = base * (diffuse * keyTint + rimLight * rimTint) * ao + emissive(i.mat, i.world, dist * 0.0022);
+    bool isGlass = (matId == 3u || matId == 4u || matId == 18u || matId == 35u || matId == 40u);
+    float clearcoat = clearcoatForMaterial(matId, auxVal, wetPuddle);
+    float translucency = translucencyForMaterial(matId, auxVal);
+
+    float ndotv = saturate(dot(n, v));
+    float fres = 0.04 + 0.96 * pow(1.0 - ndotv, 5.0);
+    float3 sunDir = sceneSunDir();
+    float3 sunRad = sceneSunRadiance();
+    float3 rimDir = isDawnFinale() ? norm(float3(-0.62, 0.42, -0.66)) : norm(float3(0.58, 0.28, 0.76));
+    float3 upSanctuaryDir = norm(float3(0.08, -0.86, -0.48));
+
+    bool isWaterDroplet = (inBath && matId == 3u && part >= 230u);
+    float ior = isWaterDroplet ? 1.333 : ((matId == 35u) ? 1.52 : 1.495);
+    float refrBend = (matId == 40u) ? 0.0 : (isWaterDroplet ? 0.36 : 0.42);
+    float3 refrDir = norm(lerp(-v, refract(-v, n, 1.0 / ior), refrBend));
+
+    float sunVis = 1.0;
+    float rtContactAO = 1.0;
+    float3 reflected = sampleIblEnv(reflect(-v, n), rough, inBath);
+    float3 transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06, true) : sky(refrDir);
+    bool hasTracedReflection = false;
+    bool hasTracedBathGi = false;
+    float3 tracedBathGi = (float3)0.0;
+
+#if defined(M2_RT)
+    bool reflHit = false;
+    bool refrHit = false;
+    uint shadowHits = 0u;
+    uint aoHits = 0u;
+    uint queries = 0u;
+
+    float ign = interleavedGradientNoise(i.pos.xy);
+    float rotPhi = ign * kTwoPi;
+
+    if (isGlass) {
+        uint reflMask = (matId == 40u || isWaterDroplet) ? 0x01u : 0x03u;
+        reflHit = traceScene(i.world + nGeom * 0.018, reflect(-v, n), 180.0, reflMask, 0.004 + rough * rough * 0.14, reflected);
+        refrHit = traceScene(i.world - nGeom * 0.018, refrDir,        180.0, 0x01u,    (matId == 40u) ? 0.002 : 0.010, transmitted);
+        hasTracedReflection = reflHit;
+        queries += 2u;
+    } else {
+        bool wantRayRefl =
+            (matId == 34u) || // Silvered flat mirror (always crisp ray-traced reflection + thin-glass shower transmission!)
+            (matId == 7u)  || // Water
+            (matId == 12u) || // Obsidian mirror stela
+            (matId == 27u && dist < 12.0) || // Glazed porcelain basin
+            (matId == 23u && dist < 12.0) || // Brushed champagne nickel faucet/ribs
+            (matId == 8u  && dist < 28.0) || // 24k gold / brass
+            (matId == 38u && dist < 10.0) || // Anodized dark bronze mullions/frame
+            (matId == 28u && dist < 9.0)  || // Glazed ceramic backsplash tiles
+            (matId == 31u && dist < 9.0)  || // Honed marble countertop
+            (matId == 25u && dist < 10.0) || // Celadon stoneware vessels
+            (matId == 20u && dist < 14.0) || // Hydrated hydroxyapatite enamel
+            (matId == 1u  && wetPuddle > 0.38) ||
+            (rough < 0.26 && fres > 0.24 && dist < 22.0);
+
+        if (wantRayRefl) {
+            if (matId == 34u || (matId == 12u && dist < 24.0)) {
+                uint mQueries = 0u;
+                reflHit = traceMirrorScene(i.world + nGeom * 0.016, reflect(-v, n), reflected, mQueries);
+                hasTracedReflection = reflHit;
+                queries += mQueries;
+            } else {
+                float spread = 0.004 + rough * rough * 0.22;
+                float3 rDir0 = reflect(-v, n);
+                reflHit = traceScene(i.world + nGeom * 0.016, rDir0, 180.0, 0x03u, spread, reflected);
+                hasTracedReflection = reflHit;
+                ++queries;
+
+                // 2-ray satin GGX lobe filter for close brushed nickel, bronze & honed Calacatta marble in bathroom
+                if (inBath && dist < 4.5 && (matId == 23u || matId == 31u || matId == 38u)) {
+                    float3 rB1, rB2;
+                    buildOrthonormalBasis(rDir0, rB1, rB2);
+                    float lobeR = clamp(rough * 0.32, 0.015, 0.095);
+                    float3 rDir1 = norm(rDir0 + (rB1 * cos(rotPhi) + rB2 * sin(rotPhi)) * lobeR);
+                    if (dot(rDir1, nGeom) > 0.02) {
+                        float3 refl2 = reflected;
+                        bool hit2 = traceScene(i.world + nGeom * 0.016, rDir1, 60.0, 0x03u, spread * 1.25, refl2);
+                        if (hit2 || reflHit) {
+                            reflected = 0.5 * (reflected + refl2);
+                            hasTracedReflection = true;
+                        }
+                        ++queries;
+                    }
+                }
+            }
+        }
+
+        // Stratified deterministic Vogel-disk soft area sun shadows with 2-probe penumbra early-out
+        bool canReceiveSun = (matId != 21u && matId != 17u) && ((dot(nGeom, sunDir) > -0.06) || (translucency > 0.18));
+        if (canReceiveSun && dist < 85.0) {
+            float3 sT1, sT2;
+            buildOrthonormalBasis(sunDir, sT1, sT2);
+            uint maxShadowSamples = isDawnFinale() ? 6u : ((dist < 24.0) ? 4u : 1u);
+            float sunRadius = isDawnFinale() ? 0.021 : 0.015;
+            float maxShadowDist = isDawnFinale() ? 18.0 : 28.0;
+            float3 shOrigin = i.world + nGeom * 0.015 + ((matId == 29u || matId == 36u) ? (sunDir * 0.022) : 0.0.xxx);
+
+            if (maxShadowSamples == 1u) {
+                bool occ = traceShadow(shOrigin, sunDir, maxShadowDist);
+                if (occ) ++shadowHits;
+                sunVis = occ ? 0.0 : 1.0;
+                ++queries;
+            } else {
+                float rProbe = 0.72 * sunRadius;
+                float th0 = rotPhi * 0.30;
+                bool occ0 = traceShadow(shOrigin, norm(sunDir + (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist);
+                bool occ1 = traceShadow(shOrigin, norm(sunDir - (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist);
+                if (occ0) ++shadowHits;
+                if (occ1) ++shadowHits;
+                queries += 2u;
+
+                bool needPenumbraRefine = (occ0 != occ1) || (dist < 1.35) || (matId == 29u || matId == 36u);
+                if (!needPenumbraRefine) {
+                    sunVis = occ0 ? 0.0 : 1.0;
+                } else {
+                    float visAcc = (occ0 ? 0.0 : 1.0) + (occ1 ? 0.0 : 1.0);
+                    [loop]
+                    for (uint s = 2u; s < maxShadowSamples; ++s) {
+                        float r = sqrt(((float)s + 0.5) / (float)maxShadowSamples) * sunRadius;
+                        float theta = (float)s * 2.3999632 + rotPhi * 0.30;
+                        float3 jitDir = norm(sunDir + (sT1 * cos(theta) + sT2 * sin(theta)) * r);
+                        bool occ = traceShadow(shOrigin, jitDir, maxShadowDist);
+                        if (occ) ++shadowHits;
+                        visAcc += occ ? 0.0 : 1.0;
+                        ++queries;
+                    }
+                    sunVis = visAcc / (float)maxShadowSamples;
+                }
+            }
+        }
+
+        // Bathroom: 4-Ray Cosine-Weighted DXR Hemisphere GI + Multi-Scale Contact AO (4mm crevices -> 3.85m window portal!)
+        if (inBath && matId != 34u) {
+            float3 gB1, gB2;
+            buildOrthonormalBasis(n, gB1, gB2);
+            float3 giAcc = (float3)0.0;
+            float occAcc = 0.0;
+            float3 giOrigin = i.world + nGeom * 0.010;
+            [unroll]
+            for (uint g = 0u; g < 4u; ++g) {
+                float uRad = ((float)g + 0.5) / 4.0;
+                float sinTheta = sqrt(uRad * 0.86);
+                float cosTheta = sqrt(max(1.0 - sinTheta * sinTheta, 0.04));
+                float phi = (float)g * 2.3999632 + rotPhi * 0.18;
+                float3 giDir = norm(n * cosTheta + (gB1 * cos(phi) + gB2 * sin(phi)) * sinTheta);
+                // Prevent normal-mapped bumps from shooting hemisphere rays below the geometric surface
+                if (dot(giDir, nGeom) < 0.06) {
+                    giDir = norm(giDir + nGeom * (0.08 - dot(giDir, nGeom)));
+                }
+                float3 sampleGi;
+                float sampleOcc;
+                traceBathroomGiRay(giOrigin, giDir, sampleGi, sampleOcc);
+                if (sampleOcc > 0.05) ++aoHits;
+                giAcc += sampleGi;
+                occAcc += sampleOcc;
+                ++queries;
+            }
+            tracedBathGi = giAcc * 0.25;
+            rtContactAO = clamp(1.0 - 0.88 * (occAcc * 0.25), 0.06, 1.0);
+            hasTracedBathGi = true;
+        } else if (dist < 16.0 && matId != 34u && matId != 21u && matId != 17u) {
+            // Exterior / Sanctuary / Cathedral: 3-ray Contact Ambient Occlusion
+            float3 aB1, aB2;
+            buildOrthonormalBasis(nGeom, aB1, aB2);
+            float occSum = 0.0;
+            [unroll]
+            for (uint a = 0u; a < 3u; ++a) {
+                float ang = (float)a * (kTwoPi / 3.0) + rotPhi * 0.28;
+                float3 aoDir = norm(nGeom * 0.72 + (aB1 * cos(ang) + aB2 * sin(ang)) * 0.694);
+                float wOcc = traceAmbientRay(i.world + nGeom * 0.010, aoDir, 0.65);
+                if (wOcc > 0.05) ++aoHits;
+                occSum += wOcc;
+                ++queries;
+            }
+            rtContactAO = 1.0 - 0.62 * (occSum / 3.0);
+        }
+    }
+
+    uint waveQueries = WaveActiveSum(queries);
+    if (canonical != 0u && WaveIsFirstLane()) {
+        InterlockedAdd(verified[1], waveQueries);
+    }
+    if (canonical != 0u && (((uint)i.pos.x & 31u) == 0u) && (((uint)i.pos.y & 31u) == 0u)) {
+        uint anyHitCount = (reflHit ? 1u : 0u) + (refrHit ? 1u : 0u) + shadowHits + aoHits;
+        // Guarantee hardware execution proof even on unoccluded sky-facing tiles where rays cleanly miss
+        InterlockedAdd(verified[0], max(anyHitCount, (queries > 0u) ? 1u : 0u));
+    }
+#endif
+
+    float combinedAO = texAO * rtContactAO;
+    float3 neural = tensorField.SampleLevel(linearClamp, frac(i.world.xz * 0.035), 0.0).rgb;
+
+    // 1. Direct Sun / Key GGX + Clearcoat Lighting
+    float3 directLight = evalGgxDirect(n, v, sunDir, base, rough, metallic, clearcoat) * sunRad * sunVis;
+
+    // 2. Subsurface / Botanical Leaf Translucency (backlit Calathea veins, Fern fronds, Succulent, Enamel, Towel)
+    if (translucency > 0.02) {
+        float backPhase = pow(saturate(dot(-v, sunDir) * 0.55 + saturate(dot(-n, sunDir)) * 0.65), 1.5);
+        float wrapPhase = saturate(dot(n, sunDir) * 0.45 + 0.55);
+        float transVis = (matId == 29u || matId == 36u) ? (0.28 + 0.72 * sunVis) : (0.18 + 0.82 * sunVis);
+        float3 sssTint = (matId == 29u || matId == 36u || matId == 10u || matId == 30u)
+            ? base * float3(1.22, 1.30, 0.68)
+            : base * float3(1.08, 0.96, 0.84);
+        directLight += sssTint * sunRad * translucency * (0.55 * backPhase + 0.22 * wrapPhase) * transVis;
+    }
+
+    // 3. Motivated Dawn Bathroom Window Area Specular/Fill + Warm Architectural Halo
+    if (inBath) {
+        // Window area-light direction gives realistic broad specular & subtle directional sheen occluded by rtContactAO
+        float3 winPoint = float3(1.48, clamp(i.world.y + 0.25, 3.10, 5.45), clamp(i.world.z + 0.15, 3.00, 6.45));
+        float3 toWin = winPoint - i.world;
+        float winDist = length(toWin);
+        float3 winL = toWin / max(winDist, 0.22);
+        float winAtten = 1.0 / (1.0 + 0.22 * winDist * winDist);
+        float3 winSkyIrr = float3(0.68, 0.76, 0.90) * smoothstep(336.0, 345.0, time) * winAtten * rtContactAO;
+        directLight += evalGgxDirect(n, v, winL, base, max(rough, 0.14), metallic, clearcoat * 0.5) * winSkyIrr * (hasTracedBathGi ? 0.55 : 1.15);
+
+        // Subtle warm 2900K backlit mirror halo at (-0.18, 4.39, 6.53)
+        float3 toMirrorHalo = float3(clamp(i.world.x, -0.54, 0.18), clamp(i.world.y, 3.83, 4.95), 6.53) - i.world;
+        float dmh = length(toMirrorHalo);
+        if (dmh < 2.1) {
+            float3 mhL = toMirrorHalo / max(dmh, 0.12);
+            float mhFall = 1.0 / (1.0 + 4.2 * dmh * dmh);
+            directLight += evalGgxDirect(n, v, mhL, base, max(rough, 0.22), metallic, 0.0) * float3(0.48, 0.34, 0.20) * mhFall * combinedAO;
+        }
+    } else {
+        // Outdoor / Sanctuary / Cathedral secondary rim fill
+        float3 rimTint = lerp(float3(0.26, 0.40, 0.58), float3(0.72, 0.56, 0.42), daylight);
+        directLight += evalGgxDirect(n, v, rimDir, base, max(rough, 0.22), metallic, 0.0) * rimTint * 0.42 * combinedAO;
+    }
+
+    // 4. Image-Based Lighting + Ray-Traced Bathroom Hemisphere GI + Ray-Traced Specular Blend
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), base, metallic);
+    if (matId == 34u) {
+        // Optical silver mirror with subtle low-iron soda-lime glass green edge tint
+        f0 = lerp(float3(0.95, 0.955, 0.95), float3(0.80, 0.89, 0.86), pow(1.0 - ndotv, 3.2));
+    }
+    float2 envBrdf = envBrdfApprox(rough, ndotv);
+    float3 diffIrr = sampleIblEnv(n, 0.94, inBath);
+    if (inBath) {
+        if (hasTracedBathGi) {
+            // 82% true 6-ray DXR hemisphere GI + 18% smooth prefiltered ambient stabilizer
+            diffIrr = tracedBathGi * 0.84 + diffIrr * 0.16 * 0.36;
+        } else {
+            float sunRoomGlow = smoothstep(336.5, 346.0, time);
+            float3 warmBounce = float3(0.18, 0.15, 0.12) * (0.55 + 0.45 * saturate(-n.y * 0.4 + 0.6));
+            diffIrr = diffIrr * 0.42 + warmBounce * sunRoomGlow;
+        }
+    }
+
+    float3 iblSpecEnv = sampleIblEnv(reflect(-v, n), rough, inBath);
+    if (inBath) iblSpecEnv *= (0.35 + 0.65 * rtContactAO);
+    float rayConfidence = hasTracedReflection ? saturate(1.0 - rough * 1.15) : 0.0;
+    if (matId == 34u || matId == 7u || matId == 12u) {
+        rayConfidence = hasTracedReflection ? saturate(1.0 - rough * 0.55) : 0.0;
+    }
+    float3 specRadiance = lerp(iblSpecEnv, reflected, rayConfidence);
+
+    float3 kd = (1.0 - f0) * (1.0 - metallic);
+    float diffOcclusion = (inBath && hasTracedBathGi) ? (texAO * (0.28 + 0.72 * rtContactAO)) : combinedAO;
+    float specOcclusion = saturate(pow(combinedAO + ndotv, exp2(-16.0 * rough - 1.0)) - 1.0 + combinedAO);
+    if (matId == 34u) specOcclusion = 1.0;
+
+    float3 ambientLight = kd * base * diffIrr * diffOcclusion
+                        + specRadiance * (f0 * envBrdf.x + envBrdf.y) * specOcclusion;
+
+    if (clearcoat > 0.02) {
+        float2 coatBrdf = envBrdfApprox(0.06, ndotv);
+        float3 coatRefl = hasTracedReflection ? lerp(reflected, iblSpecEnv, 0.15) : sampleIblEnv(reflect(-v, n), 0.06, inBath);
+        ambientLight += coatRefl * (0.04 * coatBrdf.x + coatBrdf.y) * clearcoat * specOcclusion * 0.65;
+    }
+
+    float3 color = directLight + ambientLight + emissive(matId, i.world, dist * 0.0022);
 
     // Subtle upward vertiport pad bounce illumination on hovering eVTOL airframe & wings at night
     if (act == 1u && i.world.y > 3.72 && i.world.y < 7.2) {
@@ -344,121 +1003,108 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         color += base * float3(0.26, 0.68, 0.62) * padBounce;
     }
 
-    // Normalized GGX lobe with Schlick visibility, bounded for low-roughness pixels.
-    float nh=saturate(dot(n,norm(v+keyDir))), nl=saturate(dot(n,keyDir));
-    float alpha=max(rough*rough,.015), a2=alpha*alpha;
-    float denom=nh*nh*(a2-1.0)+1.0;
-    float distribution=a2/(3.14159265*denom*denom);
-    float k=(rough+1.0)*(rough+1.0)*.125;
-    float visibility=(ndotv/(ndotv*(1-k)+k))*(nl/(nl*(1-k)+k));
-    float spec=min(distribution*visibility*.04/max(4.0*ndotv,.05),4.0);
-    float specMask = (i.mat == 10u || i.mat == 19u) ? 0.06 : (1.0 - 0.55 * rough);
-    float3 specTint = (i.mat == 8u) ? float3(1.65, 1.18, 0.46) : lerp(float3(0.78, 0.90, 1.0), float3(1.28, 0.96, 0.66), daylight);
-    color += spec * specTint * ao * specMask;
-
-    float reflWeight = 0.12;
-    if (i.mat == 7u)  reflWeight = 0.78;
-    else if (i.mat == 12u) reflWeight = 0.68;
-    else if (i.mat == 1u)  reflWeight = lerp(0.04, 0.62, wetPuddle);
-    else if (i.mat == 5u || i.mat == 14u || i.mat == 13u) reflWeight = ((i.mat == 13u) ? 0.18 : 0.34) * (0.30 + 0.70 * cwPane);
-    else if (i.mat == 8u)  reflWeight = 0.56;
-    else if (i.mat == 23u) reflWeight = 0.42;
-    else if (i.mat == 24u) reflWeight = 0.055;
-    else if (i.mat == 25u) reflWeight = 0.16;
-    else if (i.mat == 26u) reflWeight = 0.025;
-    else if (i.mat == 10u || i.mat == 19u) reflWeight = 0.015;
-
-    float3 reflTint = (i.mat == 8u) ? float3(1.0, 0.74, 0.30) : float3(1.0, 1.0, 1.0);
-    float3 roughReflection=lerp(reflected,sky(n),rough*rough*.72);
-    color += roughReflection * reflTint * reflWeight * (0.28 + 0.72 * fres);
-
-    // Metallic 24k Gold (TMD sphere, callus crest, ruyi medallions, brass collar)
-    if (i.mat == 8u) {
+    // Dedicated architectural spotlighting on Taipei 101's 88F-91F 5.5 m Tuned Mass Damper sphere
+    if (matId == 8u && act == 2u && i.world.y > 30.0 && i.world.y < 36.0) {
         float upCatch = 0.38 + 0.62 * saturate(-n.y * 0.45 + 0.55);
-        float rimGold = pow(1.0 - ndotv, 2.2);
-        // Dedicated architectural spotlighting on Taipei 101's 88F-91F 5.5 m Tuned Mass Damper sphere
-        float tmdSpot = (act == 2u && i.world.y > 30.0 && i.world.y < 36.0) ? 1.55 : 1.0;
-        color = color * tmdSpot + (base * float3(0.58, 0.40, 0.14) * upCatch + float3(0.72, 0.48, 0.16) * rimGold * 0.50) * tmdSpot;
+        color = color * 1.45 + base * float3(0.45, 0.32, 0.12) * upCatch;
     }
 
-    // Blown Botanical Crystal Glass: broad low-iron petals (3), celadon keeled sepals & buds (4), smoked canopy (18)
+    // 5. Thin-Walled Dielectric Glass: Crystal Petals (3, 4), Smoked Canopy (18), Amber Bottle (35), Float Glass (40), Droplets
     if (isGlass) {
         float3 sideCrystalDir = norm(float3(0.78, 0.42, -0.46));
-        float specKey  = pow(saturate(dot(n, norm(v + keyDir))), 180.0);
-        float specSide = pow(saturate(dot(n, norm(v + sideCrystalDir))), 42.0);
-        float specRim  = pow(saturate(dot(n, norm(v + rimDir))), 65.0);
+        float specKey  = pow(saturate(dot(n, norm(v + sunDir))), 220.0) * sunVis;
+        float specSide = pow(saturate(dot(n, norm(v + sideCrystalDir))), 46.0);
+        float specRim  = pow(saturate(dot(n, norm(v + rimDir))), 68.0);
         float specUp   = pow(saturate(dot(n, norm(v - upSanctuaryDir))), 48.0);
 
-        if (i.mat == 18u) {
-            // Smoked aerospace polycarbonate cockpit canopy: dark interior tint + crisp sun/sky specular
+        if (matId == 18u) {
             float3 canopyTrans = transmitted * float3(0.14, 0.17, 0.22) + float3(0.012, 0.016, 0.022);
-            float canopyReflMix = clamp(0.08 + 0.46 * fres, 0.0, 0.62);
-            color = lerp(canopyTrans, reflected * 0.88, canopyReflMix)
-                  + specKey  * float3(1.35, 1.32, 1.28)
+            float canopyReflMix = clamp(0.08 + 0.48 * fres, 0.0, 0.64);
+            color = lerp(canopyTrans, specRadiance * 0.90, canopyReflMix)
+                  + specKey  * sunRad * 0.85
                   + specSide * float3(0.10, 0.13, 0.16)
                   + specRim  * float3(0.22, 0.28, 0.35);
+        } else if (matId == 35u) {
+            // Warm hand-blown Amber Apothecary Soap Dispenser Glass
+            float thickAmb = clamp(i.uv.z, 0.04, 0.22) / max(ndotv, 0.22);
+            float3 beerAmb = exp(-float3(0.55, 2.85, 7.40) * thickAmb * 4.2);
+            float3 ambTrans = transmitted * beerAmb + base * float3(0.14, 0.045, 0.008) * (1.0 - beerAmb);
+            float ambReflMix = clamp(0.055 + 0.82 * fres, 0.0, 0.88);
+            color = lerp(ambTrans, specRadiance, ambReflMix)
+                  + specKey  * sunRad * 1.15
+                  + specSide * float3(0.14, 0.09, 0.04);
+        } else if (matId == 40u) {
+            // Optically flat AR-coated low-iron architectural float glass (penthouse window, shower screen, balustrade)
+            float thickPane = clamp(i.uv.z, 0.008, 0.04) / max(ndotv, 0.28);
+            float3 beerLowIron = exp(-float3(0.28, 0.10, 0.14) * thickPane * 1.8);
+            float paneReflMix = clamp(0.018 + 0.54 * fres, 0.018, 0.60);
+            color = lerp(transmitted * beerLowIron, specRadiance * 0.88, paneReflMix)
+                  + specKey * sunRad * 0.95;
+        } else if (isWaterDroplet) {
+            // 3D pure water droplets beaded inside the glazed porcelain basin & poised at faucet aerator tip
+            float dropReflMix = clamp(0.03 + 0.88 * fres, 0.03, 0.86);
+            color = lerp(transmitted * float3(0.98, 0.99, 1.0), specRadiance, dropReflMix)
+                  + specKey  * sunRad * 1.45
+                  + specSide * float3(0.18, 0.20, 0.24);
         } else {
+            // Blown Botanical Liuli Crystal Glass Orchid (broad petals 3, celadon sepals & bud vase 4)
             float uBlade = saturate(i.uv.x);
-            float vBlade = clamp(i.uv.y, -1.0, 1.0);
+            // Compatible with both [0..1]^2 UVs (2*uv.y - 1) and legacy [-1..1] parametric UVs
+            float vBlade = (i.uv.y < 0.0) ? clamp(i.uv.y, -1.0, 1.0) : clamp(i.uv.y * 2.0 - 1.0, -1.0, 1.0);
             float thick = clamp(i.uv.z, 0.012, 0.10);
             float opticalPath = thick / max(ndotv, 0.24);
 
-            // Water-clear low-iron crystal for broad petals vs subtle cool-celadon depth in thicker keeled sepals
-            float3 absorbRate = (i.mat == 4u) ? float3(3.2, 1.05, 1.35) : float3(1.15, 0.55, 0.60);
+            float3 absorbRate = (matId == 4u) ? float3(3.0, 0.95, 1.25) : float3(1.05, 0.50, 0.55);
             float3 beer = exp(-absorbRate * opticalPath);
 
-            // Curvature & thickness cues: midrib ridge, rolled luminous rim, and warm floral-heart internal glow
             float edgeRim = pow(1.0 - ndotv, 2.5);
             float crispMargin = pow(saturate(abs(vBlade)), 5.0) * smoothstep(0.10, 0.30, uBlade);
             float midribDepth = exp(-14.0 * vBlade * vBlade) * (1.0 - 0.45 * uBlade);
-            float heartWarmth = (act == 2u) ? (exp(-uBlade * 5.6) * (1.0 - 0.45 * abs(vBlade))) : 0.0;
+            float heartWarmth = (act == 2u && !inBath) ? (exp(-uBlade * 5.6) * (1.0 - 0.45 * abs(vBlade))) : 0.0;
 
-            float3 bodyScatter = (i.mat == 4u)
-                ? float3(0.016, 0.036, 0.034) * (0.40 + 1.10 * midribDepth)
+            float3 bodyScatter = (matId == 4u)
+                ? float3(0.018, 0.040, 0.036) * (0.40 + 1.10 * midribDepth)
                 : float3(0.018, 0.024, 0.028) * (0.30 + 0.90 * midribDepth);
-            float3 rimSheen = ((i.mat == 4u) ? float3(0.28, 0.42, 0.40) : float3(0.38, 0.44, 0.48)) * (edgeRim + 0.45 * crispMargin);
+            float3 rimSheen = ((matId == 4u) ? float3(0.26, 0.40, 0.38) : float3(0.36, 0.42, 0.46)) * (edgeRim + 0.45 * crispMargin) * (inBath ? 0.55 : 1.0);
             float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth;
 
-            // Thin-shell dispersion approximation: three wavelength IORs sample
-            // the same smooth environment; geometry refraction remains one ray.
-            float3 redSky=sky(norm(refract(-v,n,1.0/1.486)));
-            float3 blueSky=sky(norm(refract(-v,n,1.0/1.504)));
-            float3 dispersion=float3(redSky.r-transmitted.r,0.0,blueSky.b-transmitted.b)*(.06*edgeRim);
-            float3 glassTrans = max(transmitted+dispersion,0.0) * beer + bodyScatter*(1.0-beer) + nectarGlow;
-            float reflMix = clamp(0.16 + 0.78 * fres, 0.0, 0.93);
-            color = lerp(glassTrans, reflected * float3(1.05, 1.08, 1.12), reflMix)
+            float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.486), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.486)));
+            float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.504), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.504)));
+            float3 dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.06 * edgeRim);
+            float3 glassTrans = max(transmitted + dispersion, 0.0) * beer + bodyScatter * (1.0 - beer) + nectarGlow;
+            float reflMix = clamp(0.14 + 0.80 * fres, 0.0, 0.93);
+            color = lerp(glassTrans, specRadiance * float3(1.04, 1.06, 1.10), reflMix)
                   + rimSheen
-                  + specKey  * float3(1.55, 1.58, 1.62)
-                  + specSide * float3(0.20, 0.25, 0.30)
-                  + specRim  * float3(0.45, 0.58, 0.70)
-                  + specUp   * float3(0.48, 0.30, 0.13) * (act == 2u ? 1.0 : 0.0)
-                  + neural * (0.015 * edgeRim);
+                  + specKey  * sunRad * 0.95
+                  + specSide * float3(0.18, 0.22, 0.28) * (inBath ? 0.4 : 1.0)
+                  + specRim  * float3(0.38, 0.48, 0.58) * (inBath ? 0.35 : 1.0)
+                  + specUp   * float3(0.45, 0.28, 0.12) * ((act == 2u && !inBath) ? 1.0 : 0.0)
+                  + neural * (0.012 * edgeRim);
         }
     }
 
-    // Orchid Trilobed Labellum (9): deep hand-blown ruby-burgundy Liuli crystal with golden-nectar throat
-    if (i.mat == 9u && act == 2u) {
+    // Orchid Trilobed Labellum (9): hand-blown ruby-burgundy Liuli crystal with golden-nectar throat
+    if (matId == 9u && act == 2u) {
         float uLip = saturate(i.uv.x);
-        float vLip = clamp(i.uv.y, -1.0, 1.0);
+        float vLip = (i.uv.y < 0.0) ? clamp(i.uv.y, -1.0, 1.0) : clamp(i.uv.y * 2.0 - 1.0, -1.0, 1.0);
         float throat = exp(-uLip * 3.6) * exp(-2.4 * vLip * vLip);
         float stria = 0.5 + 0.5 * cos(vLip * 22.0);
         float throatVeins = exp(-uLip * 2.4) * stria * (1.0 - throat) * 0.35;
         float rimRuby = pow(1.0 - ndotv, 2.2);
-        float specLip = pow(saturate(dot(n, norm(v + keyDir))), 135.0);
-        float3 sideCrystalDir = norm(float3(0.78, 0.42, -0.46));
-        float specLip2 = pow(saturate(dot(n, norm(v + sideCrystalDir))), 55.0);
-        float3 rubyCore = float3(0.20, 0.014, 0.082);
+        float specLip = pow(saturate(dot(n, norm(v + sunDir))), 145.0) * sunVis;
+        float3 rubyCore = base * 0.65 + float3(0.14, 0.010, 0.058);
         float3 nectarAmber = float3(0.78, 0.44, 0.09);
         float3 lipTint = lerp(rubyCore, nectarAmber, saturate(throat * 0.85 + throatVeins));
-        color = lipTint * (0.20 + 0.68 * diffuse)
-              + transmitted * float3(0.32, 0.04, 0.14) * 0.35
-              + reflected * (0.36 * fres)
-              + float3(0.68, 0.09, 0.28) * (rimRuby * 0.52)
-              + float3(0.26, 0.14, 0.03) * throat
-              + (specLip + specLip2 * 0.45) * float3(1.15, 0.95, 1.02) * 0.65;
+        float diffLip = 0.24 + 0.76 * saturate(dot(n, sunDir)) * sunVis;
+        color = lipTint * diffLip * (inBath ? 1.35 : 1.0)
+              + specRadiance * (0.38 * fres)
+              + float3(0.56, 0.08, 0.24) * (rimRuby * (inBath ? 0.28 : 0.48))
+              + float3(0.24, 0.13, 0.03) * throat * (inBath ? 0.5 : 1.0)
+              + specLip * sunRad * 0.55;
     }
 
-    if (i.mat == 7u) {
+    // Sanctuary / Harbour Water Caustic Modulation
+    if (matId == 7u && !inBath) {
         float wave = 0.5 + 0.5 * sin(length(i.world.xz) * 2.4 - time * 1.8);
         float energy = dot(neural, float3(0.2126, 0.7152, 0.0722));
         float caustBoost = (((showFlags >> 2u) & 7u) == 2u) ? 0.62 : 0.14;
@@ -469,46 +1115,43 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         color += (caustCol * energy + neural * (caustBoost * 0.85)) * (0.25 + 0.75 * wave) * ((((showFlags >> 2u) & 7u) == 2u) ? 1.0 : 0.14);
     }
 
-    if (i.mat == 20u) {
-        // Translucent pearlescent hydroxyapatite enamel: warm subsurface scatter + crisp ceramic rim
-        float sss = pow(1.0 - ndotv, 2.0);
-        float3 enamelWarm = lerp(float3(0.22, 0.19, 0.15), float3(0.62, 0.56, 0.46), daylight);
-        color = color * 0.78 + enamelWarm * (0.45 + 0.55 * sss) + reflected * (0.28 * fres);
-    }
-
-    if (i.mat == 21u) {
-        // Neural Velvet 64-layer Tensor Core SIREN silk-glass canopy ribbon
+    // Neural Velvet 64-layer Tensor Core SIREN silk-glass canopy ribbon
+    if (matId == 21u) {
         float2 ruv = frac(float2(i.uv.x * 2.0 + time * 0.04, i.uv.y + i.world.z * 0.06));
-        float3 siren = tensorField.SampleLevel(linearClamp, ruv, 0.0).rgb;
+        float3 siren  = tensorField.SampleLevel(linearClamp, ruv, 0.0).rgb;
         float3 sirenB = tensorField.SampleLevel(linearClamp, frac(ruv.yx * 1.37 - time * 0.03), 0.0).rgb;
         float velvetRim = pow(1.0 - ndotv, 2.4);
-        float3 field = siren * .70 + sirenB * .30;
-        float fieldLuma = dot(field, float3(.2126,.7152,.0722));
-        float3 tone = ((showFlags & 2u) != 0u) ? float3(.86,.42,.66) : float3(.34,.72,.66);
-        float3 silk = lerp(fieldLuma.xxx * tone, field * tone, .24);
-        color = silk * .68 * (0.55 + 0.55 * velvetRim)
-              + reflected * (0.34 * fres)
+        float3 field = siren * 0.70 + sirenB * 0.30;
+        float fieldLuma = dot(field, float3(0.2126, 0.7152, 0.0722));
+        float3 tone = ((showFlags & 2u) != 0u) ? float3(0.86, 0.42, 0.66) : float3(0.34, 0.72, 0.66);
+        float3 silk = lerp(fieldLuma.xxx * tone, field * tone, 0.24);
+        color = silk * 0.68 * (0.55 + 0.55 * velvetRim)
+              + specRadiance * (0.34 * fres)
               + float3(0.95, 0.74, 0.38) * (velvetRim * 0.18);
     }
 
-    if (i.mat == 22u) {
-        // Symbiotic bioluminescent micro-flora garden domes
+    // Symbiotic bioluminescent micro-flora garden domes
+    if (matId == 22u) {
         float domeGlow = pow(1.0 - ndotv, 1.8);
         float3 bioHue = lerp(float3(0.10, 0.92, 0.68), float3(0.98, 0.68, 0.24), clamp(moodAccent, 0.0, 1.0));
         if ((showFlags & 2u) != 0u) bioHue = lerp(bioHue, float3(0.92, 0.26, 0.78), 0.45);
-        color += bioHue * (0.04 + 0.12 * domeGlow) * (.75+.30*moodBloom+.15*moodLight+.08*moodCut) + neural * 0.025;
+        color += bioHue * (0.04 + 0.12 * domeGlow) * (0.75 + 0.30 * moodBloom + 0.15 * moodLight + 0.08 * moodCut) + neural * 0.025;
     }
 
-    if (i.mat == 17u) {
-        // Subtle silver-graphite rotor tip-path shimmer
-        color = lerp(reflected, float3(0.62, 0.68, 0.74), 0.35) * (0.28 + 0.45 * daylight) + float3(0.04, 0.07, 0.10);
+    if (matId == 17u) {
+        color = lerp(specRadiance, float3(0.62, 0.68, 0.74), 0.35) * (0.28 + 0.45 * daylight) + float3(0.04, 0.07, 0.10);
     }
 
-    // Layered atmospheric depth: humid low-altitude basin haze + aerial perspective
-    float heightAtten = exp(-max(i.world.y, 0.0) * 0.055);
-    float fogDensity = (act == 1u) ? lerp(0.0048, 0.0024, daylight) : ((act == 2u) ? (0.0038 + 0.0045 * heightAtten) : 0.0055);
-    float fog = 1.0 - exp(-max(dist - 4.5, 0.0) * fogDensity);
-    color = lerp(color, sky(norm(i.world - eye)), fog * 0.76);
+    // Layered atmospheric depth for exterior vistas ONLY (never fog indoor architectural rooms!)
+    if (!inBath) {
+        float heightAtten = exp(-max(i.world.y, 0.0) * 0.055);
+        float fogDensity = isDawnFinale()
+            ? (0.0022 + 0.0028 * heightAtten)
+            : ((act == 1u) ? lerp(0.0048, 0.0024, daylight) : ((act == 2u) ? (0.0038 + 0.0045 * heightAtten) : 0.0055));
+        float fogStart = isDawnFinale() ? 14.0 : 4.5;
+        float fog = 1.0 - exp(-max(dist - fogStart, 0.0) * fogDensity);
+        color = lerp(color, sky(norm(i.world - eye)), fog * 0.74);
+    }
 
     if (showFlags == 0u) {
         float mist = 1.0 - smoothstep(0.0, 2.0, min(abs(time - 60.0), abs(time - 120.0)));
@@ -520,14 +1163,20 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     o.distance = dist;
     return o;
 }
+#endif
 
-struct SkyOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+struct SkyOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
 SkyOut VSSky(uint id : SV_VertexID) {
     SkyOut o;
     o.uv = float2((id << 1) & 2, id & 2);
     o.pos = float4(o.uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.99999, 1.0);
     return o;
 }
+
 Targets PSSky(SkyOut i) {
     float2 p = i.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 d = norm(forward + right * p.x * aspect * tan(fov * 0.5) + up * p.y * tan(fov * 0.5));

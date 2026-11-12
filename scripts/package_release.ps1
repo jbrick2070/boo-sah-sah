@@ -51,6 +51,7 @@ foreach ($old in @(
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\shaders") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\meshes") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\textures") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\models") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\cues") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "config") | Out-Null
@@ -63,8 +64,9 @@ Copy-Item -Force $AppExe (Join-Path $StageDir "boo_sah_sah.exe")
 Copy-Item -Force (Join-Path $BuildDir "assets\shaders\*.cso") (Join-Path $StageDir "assets\shaders\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\shaders\*.hlsl") (Join-Path $StageDir "assets\shaders\")
 
-# 3. Packed 3D meshes, Madame N stage-director IR model, cue schedules, and provenance manifest
+# 3. Packed 3D meshes, PBR texture arrays, Madame N stage-director IR model, cue schedules, and provenance manifest
 Copy-Item -Force (Join-Path $RepoRoot "assets\meshes\*.bmesh") (Join-Path $StageDir "assets\meshes\")
+Copy-Item -Force (Join-Path $RepoRoot "assets\textures\*.btex") (Join-Path $StageDir "assets\textures\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\models\madame_n_*") (Join-Path $StageDir "assets\models\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\cues\*.json") (Join-Path $StageDir "assets\cues\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\manifest.json") (Join-Path $StageDir "assets\manifest.json")

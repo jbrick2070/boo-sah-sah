@@ -91,8 +91,13 @@ try {
     $StartInfo.UseShellExecute = $false
     $StartInfo.CreateNoWindow = $true
     $StartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    foreach ($Argument in @('--install-dir', $InstallDir, '--no-shortcuts', '--no-registry', '--no-launch', '--no-activate')) {
-        $StartInfo.ArgumentList.Add($Argument)
+    if ($null -ne $StartInfo.PSObject.Properties['ArgumentList'] -and $null -ne $StartInfo.ArgumentList) {
+        foreach ($Argument in @('--install-dir', $InstallDir, '--no-shortcuts', '--no-registry', '--no-launch', '--no-activate')) {
+            $StartInfo.ArgumentList.Add($Argument)
+        }
+    } else {
+        $EscapedDir = '"' + ($InstallDir -replace '"', '\"') + '"'
+        $StartInfo.Arguments = "--install-dir $EscapedDir --no-shortcuts --no-registry --no-launch --no-activate"
     }
     $Process = [Diagnostics.Process]::Start($StartInfo)
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -119,7 +124,7 @@ try {
     }
     $InstallButton = [BooInstallerGuiProbe.Native]::GetDlgItem($Window, 106)
     $CancelButton = [BooInstallerGuiProbe.Native]::GetDlgItem($Window, 107)
-    if (-not [BooInstallerGuiProbe.Native]::PostMessageW($Window, 0x111, [UIntPtr]106, [IntPtr]::Zero)) {
+    if (-not [BooInstallerGuiProbe.Native]::PostMessageW($Window, 0x111, [UIntPtr]::new([uint32]106), [IntPtr]::Zero)) {
         throw 'Could not post the Install command.'
     }
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -147,7 +152,7 @@ try {
     if ($Process.HasExited -or [BooInstallerGuiProbe.Native]::IsWindowEnabled($InstallButton)) {
         throw 'Installation finished or failed before responsiveness could be verified; use a full packed installer.'
     }
-    if (-not [BooInstallerGuiProbe.Native]::PostMessageW($Window, 0x111, [UIntPtr]107, [IntPtr]::Zero)) {
+    if (-not [BooInstallerGuiProbe.Native]::PostMessageW($Window, 0x111, [UIntPtr]::new([uint32]107), [IntPtr]::Zero)) {
         throw 'Could not post the Cancel command.'
     }
     if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) { throw 'Setup did not finish cancellation within the timeout.' }
