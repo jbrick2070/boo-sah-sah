@@ -48,6 +48,8 @@ struct AppSettings {
     bool reducedFlash = false;
     float motionScale = 1.0f;
     bool legacyM0Visual = false;
+    bool startInExploreMode = false;
+    uint32_t initialExplorePreset = 0;
 
     int32_t sampleRate = 48000;
     bool mute = false;

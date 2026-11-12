@@ -10,11 +10,11 @@
       "seconds": 36,
       "before_p50": 2.66472,
       "before_p95": 3.02043,
-      "after_p50": 4.08496,
-      "after_p95": 4.3808,
+      "after_p50": 1.71952,
+      "after_p95": 2.17661,
       "before_frames": 360,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -22,11 +22,11 @@
       "seconds": 95,
       "before_p50": 5.06451,
       "before_p95": 5.43623,
-      "after_p50": 6.72034,
-      "after_p95": 7.0975,
+      "after_p50": 1.96102,
+      "after_p95": 2.53123,
       "before_frames": 359,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -34,11 +34,11 @@
       "seconds": 175,
       "before_p50": 3.57779,
       "before_p95": 3.90061,
-      "after_p50": 10.559,
-      "after_p95": 11.0722,
+      "after_p50": 2.82502,
+      "after_p95": 3.24381,
       "before_frames": 359,
-      "after_frames": 167,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 169,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -46,11 +46,11 @@
       "seconds": 225,
       "before_p50": 2.76378,
       "before_p95": 3.10577,
-      "after_p50": 4.37582,
-      "after_p95": 4.6312,
+      "after_p50": 1.85494,
+      "after_p95": 2.29296,
       "before_frames": 359,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -58,11 +58,11 @@
       "seconds": 260,
       "before_p50": null,
       "before_p95": null,
-      "after_p50": 1.57782,
-      "after_p95": 1.79049,
+      "after_p50": 1.19235,
+      "after_p95": 1.6423,
       "before_frames": null,
-      "after_frames": 150,
-      "after_peak_vram_mib": 604.73,
+      "after_frames": 152,
+      "after_peak_vram_mib": 806.04,
       "quality_downgrades": 0
     },
     {
@@ -70,11 +70,11 @@
       "seconds": 275,
       "before_p50": 7.73877,
       "before_p95": 8.86038,
-      "after_p50": 12.9094,
-      "after_p95": 13.3438,
+      "after_p50": 2.80864,
+      "after_p95": 3.12354,
       "before_frames": 346,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.65,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -82,11 +82,11 @@
       "seconds": 318,
       "before_p50": 7.81827,
       "before_p95": 8.92867,
-      "after_p50": 14.5432,
-      "after_p95": 14.9675,
+      "after_p50": 2.88197,
+      "after_p95": 3.36489,
       "before_frames": 341,
-      "after_frames": 168,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 169,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -94,11 +94,11 @@
       "seconds": 342,
       "before_p50": 2.67176,
       "before_p95": 3.03054,
-      "after_p50": 8.70653,
-      "after_p95": 9.18112,
+      "after_p50": 2.99482,
+      "after_p95": 3.37102,
       "before_frames": 360,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -106,11 +106,11 @@
       "seconds": 355,
       "before_p50": 2.91024,
       "before_p95": 3.25464,
-      "after_p50": 6.80736,
-      "after_p95": 7.12069,
+      "after_p50": 2.912,
+      "after_p95": 3.33151,
       "before_frames": 359,
-      "after_frames": 166,
-      "after_peak_vram_mib": 586.21,
+      "after_frames": 168,
+      "after_peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
@@ -118,11 +118,11 @@
       "seconds": 36,
       "before_p50": 3.09203,
       "before_p95": 3.36315,
-      "after_p50": 4.77334,
-      "after_p95": 5.12848,
+      "after_p50": 2.63075,
+      "after_p95": 2.90928,
       "before_frames": 359,
-      "after_frames": 166,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 168,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -130,11 +130,11 @@
       "seconds": 95,
       "before_p50": 7.08898,
       "before_p95": 8.19071,
-      "after_p50": 8.08112,
-      "after_p95": 8.46058,
+      "after_p50": 3.02941,
+      "after_p95": 3.52819,
       "before_frames": 358,
       "after_frames": 168,
-      "after_peak_vram_mib": 629.65,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -142,11 +142,11 @@
       "seconds": 175,
       "before_p50": 4.232,
       "before_p95": 4.60468,
-      "after_p50": 12.6216,
-      "after_p95": 13.3858,
+      "after_p50": 4.05488,
+      "after_p95": 4.50136,
       "before_frames": 359,
-      "after_frames": 167,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 169,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -154,11 +154,11 @@
       "seconds": 225,
       "before_p50": 3.58406,
       "before_p95": 3.89588,
-      "after_p50": 5.04509,
-      "after_p95": 5.36052,
+      "after_p50": 3.00125,
+      "after_p95": 3.46259,
       "before_frames": 359,
-      "after_frames": 162,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 164,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -166,11 +166,11 @@
       "seconds": 260,
       "before_p50": null,
       "before_p95": null,
-      "after_p50": 1.98032,
-      "after_p95": 2.2027,
+      "after_p50": 1.59779,
+      "after_p95": 2.06076,
       "before_frames": null,
-      "after_frames": 151,
-      "after_peak_vram_mib": 648.16,
+      "after_frames": 152,
+      "after_peak_vram_mib": 915.1,
       "quality_downgrades": 0
     },
     {
@@ -178,11 +178,11 @@
       "seconds": 275,
       "before_p50": 9.97214,
       "before_p95": 10.977,
-      "after_p50": 17.145,
-      "after_p95": 17.8135,
+      "after_p50": 4.08238,
+      "after_p95": 4.57966,
       "before_frames": 278,
-      "after_frames": 164,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 169,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -190,23 +190,23 @@
       "seconds": 318,
       "before_p50": 11.1409,
       "before_p95": 11.7717,
-      "after_p50": 18.6914,
-      "after_p95": 19.1952,
+      "after_p50": 4.13222,
+      "after_p95": 4.56993,
       "before_frames": 257,
-      "after_frames": 155,
-      "after_peak_vram_mib": 629.65,
-      "quality_downgrades": 1
+      "after_frames": 169,
+      "after_peak_vram_mib": 896.59,
+      "quality_downgrades": 0
     },
     {
       "preset": "showcase",
       "seconds": 342,
       "before_p50": 3.22186,
       "before_p95": 3.52871,
-      "after_p50": 11.9234,
-      "after_p95": 12.6553,
+      "after_p50": 4.65786,
+      "after_p95": 5.09089,
       "before_frames": 359,
-      "after_frames": 167,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 168,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     },
     {
@@ -214,11 +214,11 @@
       "seconds": 355,
       "before_p50": 3.62538,
       "before_p95": 3.96657,
-      "after_p50": 8.65352,
-      "after_p95": 9.04821,
+      "after_p50": 4.38224,
+      "after_p95": 4.72654,
       "before_frames": 359,
-      "after_frames": 166,
-      "after_peak_vram_mib": 629.65,
+      "after_frames": 168,
+      "after_peak_vram_mib": 896.59,
       "quality_downgrades": 0
     }
   ],
@@ -226,19 +226,61 @@
     {
       "preset": "balanced",
       "window": "342.0s -> 352.0s (10s Dawn Bathroom camera move)",
-      "p50_ms": 6.9289,
-      "p95_ms": 8.44043,
-      "frames": 563,
-      "peak_vram_mib": 586.21,
+      "p50_ms": 2.93243,
+      "p95_ms": 3.32552,
+      "frames": 557,
+      "peak_vram_mib": 787.53,
       "quality_downgrades": 0
     },
     {
       "preset": "showcase",
       "window": "342.0s -> 352.0s (10s Dawn Bathroom camera move)",
-      "p50_ms": 9.20531,
-      "p95_ms": 11.1383,
-      "frames": 559,
-      "peak_vram_mib": 629.65,
+      "p50_ms": 4.45203,
+      "p95_ms": 5.04368,
+      "frames": 555,
+      "peak_vram_mib": 896.59,
+      "quality_downgrades": 0
+    }
+  ],
+  "interactive_explore_nrd": [
+    {
+      "preset": "balanced",
+      "explore_preset": 1,
+      "label": "Preset 1 Dawn Bathroom Wide (NRD Convergence)",
+      "p50_ms": 2.38371,
+      "p95_ms": 2.6601,
+      "frames": 174,
+      "peak_vram_mib": 787.53,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "explore_preset": 2,
+      "label": "Preset 2 CNC Faucet & Basin Macro (NRD Convergence)",
+      "p50_ms": 3.1577,
+      "p95_ms": 3.9056,
+      "frames": 174,
+      "peak_vram_mib": 787.53,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "explore_preset": 1,
+      "label": "Preset 1 Dawn Bathroom Wide (NRD Convergence)",
+      "p50_ms": 3.63238,
+      "p95_ms": 4.14098,
+      "frames": 174,
+      "peak_vram_mib": 896.59,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "explore_preset": 2,
+      "label": "Preset 2 CNC Faucet & Basin Macro (NRD Convergence)",
+      "p50_ms": 4.92358,
+      "p95_ms": 5.32813,
+      "frames": 174,
+      "peak_vram_mib": 896.59,
       "quality_downgrades": 0
     }
   ]

@@ -289,6 +289,16 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSAccum -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSAccumBlend -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSAccumResolve -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+
 add_custom_target(boo_shaders DEPENDS
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
@@ -298,6 +308,9 @@ add_custom_target(boo_shaders DEPENDS
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
 
     "${M0_VS_CSO}"
     "${M0_PS_CSO}"
@@ -355,6 +368,7 @@ add_library(boo_core STATIC
     src/render/m1_scene.cpp
     src/render/bmesh.cpp
     src/render/btex.cpp
+    src/render/nrd_bridge.cpp
     src/render/trilogy_renderer.cpp
     src/render/m1_taipei_slice.cpp
     src/media/media_foundation_input.cpp
@@ -460,9 +474,21 @@ if(BOO_BUILD_TESTS)
     add_test(NAME BooHardwareIntegrationTests COMMAND boo_integration_tests --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     add_test(NAME BooTrilogyCaptures COMMAND boo_integration_tests --trilogy-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     add_test(NAME BooFilmCaptures COMMAND boo_integration_tests --film-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooInteractiveCaptures COMMAND boo_integration_tests --interactive-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     add_test(NAME BooFilmStress COMMAND boo_integration_tests --film-stress --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(BooFilmCaptures PROPERTIES LABELS "hardware;integration" TIMEOUT 600)
+    set_tests_properties(BooInteractiveCaptures PROPERTIES LABELS "hardware;integration" TIMEOUT 600)
     set_tests_properties(BooFilmStress PROPERTIES LABELS "hardware;integration" TIMEOUT 900)
     set_tests_properties(BooTrilogyCaptures PROPERTIES LABELS "hardware;integration")
     set_tests_properties(BooHardwareIntegrationTests PROPERTIES LABELS "hardware;integration")
+endif()
+
+# Stage optional NVIDIA NRD dynamic sidecar (nrd/NRD.dll) next to executables if present (zero static PE import!)
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/nvidia_nrd/bin/NRD.dll")
+    add_custom_command(TARGET boo_sah_sah POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:boo_sah_sah>/nrd"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/nvidia_nrd/bin/NRD.dll"
+            "$<TARGET_FILE_DIR:boo_sah_sah>/nrd/NRD.dll"
+        VERBATIM)
 endif()

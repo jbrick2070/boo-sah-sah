@@ -119,8 +119,11 @@ struct alignas(16) GpuM1PresentConstants {
 
     uint32_t captionPacked[16]{};
     float captionStyle[4]{};
+
+    float interactiveState[4]{0.5f, 0.52f, 0.42f, 1.0f}; // x=abSplitRatio, y=sunElev01, z=sunAzim01, w=accumSpp
+    uint32_t interactiveMeta[4]{0, 0, 0, 0};             // x: bit0=explore, bit1=sunOvr, bit2=lampsOff, bit3=nrd, bits4..7=preset
 };
-static_assert(sizeof(GpuM1PresentConstants) == 368, "GpuM1PresentConstants must be 92 DWORDs (368 bytes)");
+static_assert(sizeof(GpuM1PresentConstants) == 400, "GpuM1PresentConstants must be 100 DWORDs (400 bytes)");
 
 struct Vec3 {
     float x = 0.0f;
@@ -2868,6 +2871,54 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     const FrameContext& ctx,
     M1CameraState& outCam) const noexcept {
     outCam = evaluateShowCamera(visualMode, ctx.samplePosition, ctx.sampleRate, ctx.moodIrisAngle, ctx.reducedFlash, ctx.motionScale);
+    const float wCam = std::clamp(ctx.interactive.blendWeight, 0.0f, 1.0f);
+    if (wCam > 1e-4f) {
+        if (wCam >= 0.9999f) {
+            std::memcpy(outCam.eye, ctx.interactive.eye, sizeof(outCam.eye));
+            std::memcpy(outCam.target, ctx.interactive.target, sizeof(outCam.target));
+            std::memcpy(outCam.up, ctx.interactive.up, sizeof(outCam.up));
+            normalize3(outCam.up);
+            outCam.fovYRadians = ctx.interactive.fovYRadians;
+        } else {
+            float filmFwd[3] = {
+                outCam.target[0] - outCam.eye[0],
+                outCam.target[1] - outCam.eye[1],
+                outCam.target[2] - outCam.eye[2]};
+            const float filmDist = std::max(0.25f, std::sqrt(
+                filmFwd[0] * filmFwd[0] + filmFwd[1] * filmFwd[1] + filmFwd[2] * filmFwd[2]));
+            normalize3(filmFwd);
+
+            float expFwd[3] = {
+                ctx.interactive.target[0] - ctx.interactive.eye[0],
+                ctx.interactive.target[1] - ctx.interactive.eye[1],
+                ctx.interactive.target[2] - ctx.interactive.eye[2]};
+            const float expDist = std::max(0.25f, std::sqrt(
+                expFwd[0] * expFwd[0] + expFwd[1] * expFwd[1] + expFwd[2] * expFwd[2]));
+            normalize3(expFwd);
+
+            float blendFwd[3] = {
+                filmFwd[0] + (expFwd[0] - filmFwd[0]) * wCam,
+                filmFwd[1] + (expFwd[1] - filmFwd[1]) * wCam,
+                filmFwd[2] + (expFwd[2] - filmFwd[2]) * wCam};
+            if (blendFwd[0] * blendFwd[0] + blendFwd[1] * blendFwd[1] + blendFwd[2] * blendFwd[2] < 1e-4f) {
+                float side[3]{};
+                cross3(outCam.up, filmFwd, side);
+                normalize3(side);
+                blendFwd[0] += side[0] * 0.25f;
+                blendFwd[1] += side[1] * 0.25f;
+                blendFwd[2] += side[2] * 0.25f;
+            }
+            normalize3(blendFwd);
+            const float blendDist = filmDist + (expDist - filmDist) * wCam;
+            for (int c = 0; c < 3; ++c) {
+                outCam.eye[c] = outCam.eye[c] + (ctx.interactive.eye[c] - outCam.eye[c]) * wCam;
+                outCam.target[c] = outCam.eye[c] + blendFwd[c] * blendDist;
+                outCam.up[c] = outCam.up[c] + (ctx.interactive.up[c] - outCam.up[c]) * wCam;
+            }
+            normalize3(outCam.up);
+            outCam.fovYRadians = outCam.fovYRadians + (ctx.interactive.fovYRadians - outCam.fovYRadians) * wCam;
+        }
+    }
     const float exactTimeSec = static_cast<float>(
         static_cast<double>(ctx.samplePosition) / static_cast<double>(std::max<int32_t>(1, ctx.sampleRate)));
 
@@ -3028,6 +3079,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     ID3D12DescriptorHeap* heaps[] = {srvUavHeap.Get()};
     cmd->SetDescriptorHeaps(1, heaps);
+
+    // During stationary Explore NRD convergence (accumFrame > 0), samplePosition is paused:
+    // reuse frame 0's GPU-resident Tensor caustic texture & CUDA particle buffer without CPU/CUDA sync stalls.
+    if (isCanonicalPass && ctx.interactive.accumulate && ctx.interactive.accumFrame > 0u) {
+        skipSharedTensorUpdate = true;
+        skipSharedCudaUpdate = true;
+    }
 
     // 1. Update 320x180 RGBA16F Tensor Core neural caustic / spectral field (or scalar HLSL substitute)
     if (!skipSharedTensorUpdate) {
@@ -3519,6 +3577,21 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
         pc.captionStyle[2] = cap.isEndCard ? 1.0f : 0.0f;
     }
     pc.captionStyle[3] = hud.liveCameraActive ? 1.0f : 0.0f;
+
+    pc.interactiveState[0] = std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
+    pc.interactiveState[1] = std::clamp(ctx.interactive.sunElevation01, 0.0f, 1.0f);
+    pc.interactiveState[2] = std::clamp(ctx.interactive.sunAzimuth01, 0.0f, 1.0f);
+    const uint32_t accumSpp = ctx.interactive.accumulate ? (ctx.interactive.accumFrame + 1u) : 1u;
+    pc.interactiveState[3] = static_cast<float>(std::min<uint32_t>(accumSpp, 9999u));
+
+    uint32_t interFlags = 0u;
+    if (ctx.interactive.exploreActive)           interFlags |= (1u << 0u);
+    if (ctx.interactive.sunOverride)             interFlags |= (1u << 1u);
+    if (ctx.interactive.lampsOff)                interFlags |= (1u << 2u);
+    if (trilogyMesh && trilogyMesh->nrdActive()) interFlags |= (1u << 3u);
+    interFlags |= ((ctx.interactive.activePreset & 0xFu) << 4u);
+    if (ctx.interactive.accumulate)              interFlags |= (1u << 8u);
+    pc.interactiveMeta[0] = interFlags;
 
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;
     uint8_t* mappedCb = nullptr;

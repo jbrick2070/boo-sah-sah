@@ -1664,6 +1664,9 @@ cbuffer M1PresentCB : register(b0)
     // Pass-4 HUD-only lower-third captions, end card & LIVE CAMERA indicator (never in CanvasClean!)
     uint4  gCaptionPacked[4];   // Up to 64 ASCII characters (4 bytes per uint)
     float4 gCaptionStyle;       // .x = alpha, .y = charCount, .z = isEndCard, .w = liveCameraActive
+
+    float4 gInteractiveState;   // .x = abSplitRatio, .y = sunElev01, .z = sunAzim01, .w = accumSpp
+    uint4  gInteractiveMeta;    // .x: bit0=explore, bit1=sunOvr, bit2=lampsOff, bit3=nrd, bits4..7=preset, bit8=accum
 };
 
 Texture2D<float4> gCanvasCleanTex     : register(t0);
@@ -2168,6 +2171,22 @@ float sampleFixedMs6(float2 px, float2 origin, float scale, float val)
     return a;
 }
 
+float sampleUint4(float2 px, float2 origin, float scale, uint val)
+{
+    val = min(val, 9999u);
+    float stepX = 5.0 * scale;
+    float a = 0.0;
+    uint d3 = (val / 1000u) % 10u;
+    uint d2 = (val / 100u)  % 10u;
+    uint d1 = (val / 10u)   % 10u;
+    uint d0 = val % 10u;
+    if (val >= 1000u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + d3));
+    if (val >= 100u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + d2));
+    if (val >= 10u)   a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + d1));
+    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 48u + d0));
+    return a;
+}
+
 float sampleWord4(float2 px, float2 origin, float scale, uint c0, uint c1, uint c2, uint c3)
 {
     float stepX = 5.0 * scale;
@@ -2292,12 +2311,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         px.y >= lbMin.y && px.y < (lbMin.y + lbSize.y))
     {
         float2 canvasUv = saturate((px - lbMin) / lbSize);
+        const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
         if (showOverlay && hudMode == 2u)
         {
             if (abEngine == 3u)
             {
                 // Codec A/B: Left = Live Hardware H.264 Encoded+Decoded (or Shader Quant Sub), Right = Pristine 10-bit CanvasClean
-                if (canvasUv.x < 0.5)
+                if (canvasUv.x < splitRatio)
                 {
                     if (codecHwTexValid)
                     {
@@ -2319,7 +2339,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
                 }
             }
-            else if (abLeftHwVerified && canvasUv.x >= 0.5)
+            else if (abLeftHwVerified && canvasUv.x >= splitRatio)
             {
                 // RT / CUDA / Tensor A/B: Left = Canonical Live HW CanvasClean, Right = Isolated Substitute CanvasAbCompare
                 sdr = sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
@@ -2449,6 +2469,28 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if (e == 4u) { c0 = 67u; c1 = 79u; c2 = 68u; c3 = 67u; } // CODC
                     float txt = sampleWord4(px, pMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.6 * uiScale, c0, c1, c2, c3);
                     sdr = lerp(sdr, pillCol, txt);
+                }
+
+                // Clickable Interactive Explore Mode Pill ("F:EXPLOR" / "F:RESUME")
+                float2 expMin = float2(rightBase - 94.0 * uiScale, res.y - 34.0 * uiScale);
+                float2 expMax = expMin + float2(86.0 * uiScale, 22.0 * uiScale);
+                if (expMin.x > statX + 98.0 * uiScale)
+                {
+                    bool expActive = (gInteractiveMeta.x & 1u) != 0u;
+                    float3 expCol = expActive ? colOrchid : colJade;
+                    if (px.x >= expMin.x && px.x <= expMax.x && px.y >= expMin.y && px.y <= expMax.y)
+                    {
+                        sdr = lerp(sdr, expCol * (expActive ? 0.34 : 0.20), 0.88);
+                        if ((px.x - expMin.x < 1.5) || (expMax.x - px.x < 1.5) ||
+                            (px.y - expMin.y < 1.5) || (expMax.y - px.y < 1.5))
+                        {
+                            sdr = expCol;
+                        }
+                    }
+                    float expTxt = expActive
+                        ? sampleWord8(px, expMin + float2(11.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 70u, 58u, 82u, 69u, 83u, 85u, 77u, 69u)
+                        : sampleWord8(px, expMin + float2(11.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 70u, 58u, 69u, 88u, 80u, 76u, 79u, 82u);
+                    sdr = lerp(sdr, expActive ? colEnamel : expCol, expTxt);
                 }
             }
         }
@@ -2608,14 +2650,29 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     }
     if (showOverlay && hudMode == 2u) {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
-        float splitX = lbMin.x + lbSize.x * 0.5;
-        if (abs(px.x - splitX) < 1.2 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
+        const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
+        float splitX = lbMin.x + lbSize.x * splitRatio;
+        if (abs(px.x - splitX) < 1.35 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
             sdr = colEnamel;
 
+        // Draggable RTX Split Curtain Center Grab Handle
+        float2 handleCenter = float2(splitX, lbMin.y + lbSize.y * 0.5);
+        float2 handleHalf   = float2(6.5 * uiScale, 20.0 * uiScale);
+        if (abs(px.x - handleCenter.x) <= handleHalf.x && abs(px.y - handleCenter.y) <= handleHalf.y)
+        {
+            sdr = lerp(sdr, float3(0.018, 0.028, 0.052), 0.92);
+            bool hb = (handleHalf.x - abs(px.x - handleCenter.x) < 1.4) ||
+                      (handleHalf.y - abs(px.y - handleCenter.y) < 1.4);
+            if (hb) sdr = colJade;
+            else if (abs(abs(px.x - handleCenter.x) - 2.2 * uiScale) < 0.7 && abs(px.y - handleCenter.y) < 11.0 * uiScale)
+                sdr = colEnamel;
+        }
+
         float4 pm = gLivePillarMetrics[abEngine];
-        float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
-        float2 rightBoxMin = float2(splitX + 14.0 * uiScale,  lbMin.y + 14.0 * uiScale);
         float2 bannerSz    = float2(262.0 * uiScale, 28.0 * uiScale);
+        float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
+        float  rightMaxX   = max(lbMin.x + 14.0 * uiScale, lbMin.x + lbSize.x - bannerSz.x - 14.0 * uiScale);
+        float2 rightBoxMin = float2(clamp(max(splitX + 14.0 * uiScale, leftBoxMin.x + bannerSz.x + 12.0 * uiScale), lbMin.x + 14.0 * uiScale, rightMaxX), lbMin.y + 14.0 * uiScale);
 
         if (px.x >= leftBoxMin.x && px.x <= leftBoxMin.x + bannerSz.x &&
             px.y >= leftBoxMin.y && px.y <= leftBoxMin.y + bannerSz.y)
@@ -2661,6 +2718,155 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
 
         float rTxt = sampleWord8(px, rightBoxMin + float2(8.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, rc0, rc1, rc2, rc3, rc4, rc5, rc6, rc7);
         sdr = lerp(sdr, colOrchid, rTxt);
+    }
+
+    // Interactive NVIDIA RTX Showcase Studio Bar (Pass 4 only; shown in HUD modes 0/1/2 when Explore or lighting override is active)
+    if (showOverlay && (hudMode != 3u) && ((gInteractiveMeta.x & 7u) != 0u) && res.x >= 640.0 && res.y >= 300.0)
+    {
+        const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float barMinX = (hudMode == 0u) ? max(0.5 * res.x - 174.0 * u, 326.0 * u) : (0.5 * res.x - 174.0 * u);
+        const float barMinY = (hudMode == 2u) ? (res.y - 68.0 * u) : (14.0 * u);
+        const float2 barMin  = float2(barMinX, barMinY);
+        const float2 barSize = float2(348.0 * u, 52.0 * u);
+
+        if (px.x >= barMin.x && px.x <= barMin.x + barSize.x &&
+            px.y >= barMin.y && px.y <= barMin.y + barSize.y)
+        {
+            const bool expOn    = (gInteractiveMeta.x & 1u) != 0u;
+            const bool sunOvr   = (gInteractiveMeta.x & 2u) != 0u;
+            const bool lampsOff = (gInteractiveMeta.x & 4u) != 0u;
+            const bool nrdOn    = (gInteractiveMeta.x & 8u) != 0u;
+            const uint presetId = (gInteractiveMeta.x >> 4u) & 0xFu;
+            const bool isAccum  = (gInteractiveMeta.x & 256u) != 0u;
+            const uint sppCount = (uint)(clamp(gInteractiveState.w, 1.0, 9999.0) + 0.5);
+
+            sdr = lerp(sdr, float3(0.015, 0.024, 0.046), 0.90);
+            bool outerBdr = (px.x - barMin.x < 1.5) || (barMin.x + barSize.x - px.x < 1.5) ||
+                            (px.y - barMin.y < 1.5) || (barMin.y + barSize.y - px.y < 1.5);
+            if (outerBdr) sdr = lerp(colJade, colOrchid, 0.35);
+
+            // Row 1: [EXPLOR]  [NRD/ACC + SPP]  [LAMP]  [WIPE]  [1][2][3][4][5][6]
+            const float r1MinY = barMin.y + 5.0 * u;
+            const float r1MaxY = barMin.y + 23.0 * u;
+
+            // 1. EXPLOR / STUDIO pill
+            float2 bExpMin = float2(barMin.x + 6.0 * u, r1MinY);
+            float2 bExpMax = float2(barMin.x + 64.0 * u, r1MaxY);
+            float3 expC = expOn ? colJade : colAmber;
+            if (px.x >= bExpMin.x && px.x <= bExpMax.x && px.y >= bExpMin.y && px.y <= bExpMax.y)
+            {
+                sdr = lerp(sdr, expC * 0.24, 0.85);
+                if ((px.x - bExpMin.x < 1.2) || (bExpMax.x - px.x < 1.2) || (px.y - bExpMin.y < 1.2) || (bExpMax.y - px.y < 1.2))
+                    sdr = expC;
+            }
+            float tExp = expOn
+                ? sampleWord8(px, barMin + float2(10.0 * u, 9.5 * u), 1.35 * u, 69u, 88u, 80u, 76u, 79u, 82u, 32u, 32u)
+                : sampleWord8(px, barMin + float2(10.0 * u, 9.5 * u), 1.35 * u, 83u, 84u, 85u, 68u, 73u, 79u, 32u, 32u);
+            sdr = lerp(sdr, expC, tExp);
+
+            // 2. NRD / ACC denoiser + live SPP convergence readout
+            float2 bSppMin = float2(barMin.x + 68.0 * u, r1MinY);
+            float2 bSppMax = float2(barMin.x + 162.0 * u, r1MaxY);
+            float3 nrdC = nrdOn ? colJade : colCyan;
+            if (px.x >= bSppMin.x && px.x <= bSppMax.x && px.y >= bSppMin.y && px.y <= bSppMax.y)
+            {
+                sdr = lerp(sdr, nrdC * (isAccum ? 0.22 : 0.10), 0.85);
+                if ((px.x - bSppMin.x < 1.2) || (bSppMax.x - px.x < 1.2) || (px.y - bSppMin.y < 1.2) || (bSppMax.y - px.y < 1.2))
+                    sdr = nrdC * (isAccum ? 1.0 : 0.65);
+            }
+            float tNrd = nrdOn
+                ? sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 78u, 82u, 68u, 32u)
+                : sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 65u, 67u, 67u, 32u);
+            float tSppNum = sampleUint4(px, barMin + float2(96.0 * u, 9.5 * u), 1.35 * u, sppCount);
+            float tSppLbl = sampleWord4(px, barMin + float2(128.0 * u, 9.5 * u), 1.35 * u, 83u, 80u, 80u, 32u);
+            sdr = lerp(sdr, nrdC, tNrd);
+            sdr = lerp(sdr, colEnamel, tSppNum);
+            sdr = lerp(sdr, isAccum ? colAmber : float3(0.58, 0.64, 0.72), tSppLbl);
+
+            // 3. Practical LAMP [J] toggle pill
+            float2 bLmpMin = float2(barMin.x + 166.0 * u, r1MinY);
+            float2 bLmpMax = float2(barMin.x + 208.0 * u, r1MaxY);
+            float3 lmpC = (!lampsOff) ? colAmber : float3(0.42, 0.46, 0.56);
+            if (px.x >= bLmpMin.x && px.x <= bLmpMax.x && px.y >= bLmpMin.y && px.y <= bLmpMax.y)
+            {
+                sdr = lerp(sdr, lmpC * ((!lampsOff) ? 0.24 : 0.12), 0.85);
+                if ((px.x - bLmpMin.x < 1.2) || (bLmpMax.x - px.x < 1.2) || (px.y - bLmpMin.y < 1.2) || (bLmpMax.y - px.y < 1.2))
+                    sdr = lmpC;
+            }
+            float tLmp = sampleWord4(px, barMin + float2(173.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
+            sdr = lerp(sdr, lmpC, tLmp);
+
+            // 4. RTX Split WIPE [H] toggle pill
+            float2 bWipMin = float2(barMin.x + 212.0 * u, r1MinY);
+            float2 bWipMax = float2(barMin.x + 254.0 * u, r1MaxY);
+            bool wipeOn = (hudMode == 2u);
+            float3 wipC = wipeOn ? colOrchid : colCyan;
+            if (px.x >= bWipMin.x && px.x <= bWipMax.x && px.y >= bWipMin.y && px.y <= bWipMax.y)
+            {
+                sdr = lerp(sdr, wipC * (wipeOn ? 0.30 : 0.14), 0.85);
+                if ((px.x - bWipMin.x < 1.2) || (bWipMax.x - px.x < 1.2) || (px.y - bWipMin.y < 1.2) || (bWipMax.y - px.y < 1.2))
+                    sdr = wipC;
+            }
+            float tWip = sampleWord4(px, barMin + float2(219.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
+            sdr = lerp(sdr, wipeOn ? colEnamel : wipC, tWip);
+
+            // 5. Six Hero Macro Camera Bookmarks [1..6] (F2..F7)
+            [unroll]
+            for (uint k = 0u; k < 6u; ++k)
+            {
+                float2 cMin = float2(barMin.x + (258.0 + (float)k * 14.5) * u, r1MinY);
+                float2 cMax = cMin + float2(12.5 * u, 18.0 * u);
+                bool sel = (presetId == (k + 1u));
+                float3 cCol = sel ? colJade : float3(0.50, 0.58, 0.68);
+                if (px.x >= cMin.x && px.x <= cMax.x && px.y >= cMin.y && px.y <= cMax.y)
+                {
+                    sdr = lerp(sdr, cCol * (sel ? 0.32 : 0.12), 0.85);
+                    if ((px.x - cMin.x < 1.1) || (cMax.x - px.x < 1.1) || (px.y - cMin.y < 1.1) || (cMax.y - px.y < 1.1))
+                        sdr = cCol;
+                }
+                float dMask = sampleGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
+                sdr = lerp(sdr, sel ? colEnamel : cCol, dMask);
+            }
+
+            // Row 2: Draggable [SUN] Elevation/Time-of-Day Slider + [AZM] Azimuth Slider + [RST] Reset
+            float tSunLbl = sampleWord4(px, barMin + float2(8.0 * u, 33.5 * u), 1.35 * u, 83u, 85u, 78u, 32u);
+            sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
+
+            float2 sunMin  = barMin + float2(34.0 * u, 33.5 * u);
+            float2 sunSize = float2(118.0 * u, 8.0 * u);
+            float  sunVal  = saturate(gInteractiveState.y);
+            float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 20u);
+            float3 sunTint = lerp(float3(0.26, 0.42, 0.88), lerp(colAmber, colEnamel, smoothstep(0.45, 1.0, sunVal)), smoothstep(0.0, 0.55, sunVal));
+            sdr = lerp(sdr, sunTint, sunBar * 0.92);
+            float sunThumbX = sunMin.x + sunVal * sunSize.x;
+            if (abs(px.x - sunThumbX) <= 2.4 * u && px.y >= sunMin.y - 2.5 * u && px.y <= sunMin.y + sunSize.y + 2.5 * u)
+                sdr = colEnamel;
+
+            float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 33.5 * u), 1.35 * u, 65u, 90u, 77u, 32u);
+            sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
+
+            float2 azmMin  = barMin + float2(186.0 * u, 33.5 * u);
+            float2 azmSize = float2(114.0 * u, 8.0 * u);
+            float  azmVal  = saturate(gInteractiveState.z);
+            float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 20u);
+            sdr = lerp(sdr, colCyan, azmBar * 0.90);
+            float azmThumbX = azmMin.x + azmVal * azmSize.x;
+            if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
+                sdr = colEnamel;
+
+            float2 bRstMin = barMin + float2(306.0 * u, 29.0 * u);
+            float2 bRstMax = bRstMin + float2(36.0 * u, 17.0 * u);
+            bool anyOvr = sunOvr || lampsOff;
+            float3 rstC = anyOvr ? colAmber : float3(0.42, 0.46, 0.56);
+            if (px.x >= bRstMin.x && px.x <= bRstMax.x && px.y >= bRstMin.y && px.y <= bRstMax.y)
+            {
+                sdr = lerp(sdr, rstC * (anyOvr ? 0.24 : 0.10), 0.85);
+                if ((px.x - bRstMin.x < 1.1) || (bRstMax.x - px.x < 1.1) || (px.y - bRstMin.y < 1.1) || (bRstMax.y - px.y < 1.1))
+                    sdr = rstC;
+            }
+            float tRst = sampleWord4(px, bRstMin + float2(8.0 * u, 4.5 * u), 1.35 * u, 82u, 83u, 84u, 32u);
+            sdr = lerp(sdr, rstC, tRst);
+        }
     }
 
     // Authored vector title and Traditional Chinese place motif (台北, Taipei).

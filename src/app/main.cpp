@@ -8,6 +8,7 @@
 #include "boo/director.hpp"
 #include "boo/health.hpp"
 #include "boo/logging.hpp"
+#include "boo/m1_scene.hpp"
 #include "boo/media_input.hpp"
 #include "boo/render.hpp"
 #include "boo/settings.hpp"
@@ -25,8 +26,10 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
@@ -137,6 +140,574 @@ boo::M1TaipeiSliceEffect* createAndRegisterShowEffects(
         return nullptr;
     }
 }
+
+// Dynamically loaded XInput gamepad reader (preserves strict zero-static-SDK PE import gate).
+struct BooXInputGamepad {
+    WORD wButtons = 0;
+    BYTE bLeftTrigger = 0;
+    BYTE bRightTrigger = 0;
+    SHORT sThumbLX = 0;
+    SHORT sThumbLY = 0;
+    SHORT sThumbRX = 0;
+    SHORT sThumbRY = 0;
+};
+struct BooXInputState {
+    DWORD dwPacketNumber = 0;
+    BooXInputGamepad Gamepad{};
+};
+static_assert(sizeof(BooXInputState) == 16, "BooXInputState must match Win32 XINPUT_STATE ABI");
+
+class DynamicXInput {
+public:
+    using PfnGetState = DWORD(WINAPI*)(DWORD, BooXInputState*);
+
+    DynamicXInput() noexcept {
+        mod_ = LoadLibraryExW(L"xinput1_4.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!mod_) {
+            mod_ = LoadLibraryExW(L"xinput9_1_0.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        }
+        if (mod_) {
+            getState_ = reinterpret_cast<PfnGetState>(GetProcAddress(mod_, "XInputGetState"));
+        }
+    }
+
+    ~DynamicXInput() noexcept {
+        if (mod_) {
+            FreeLibrary(mod_);
+            mod_ = nullptr;
+        }
+    }
+
+    DynamicXInput(const DynamicXInput&) = delete;
+    DynamicXInput& operator=(const DynamicXInput&) = delete;
+
+    bool poll(BooXInputGamepad& outPad) noexcept {
+        if (!getState_) return false;
+        BooXInputState st{};
+        if (getState_(0, &st) != ERROR_SUCCESS) return false;
+        outPad = st.Gamepad;
+        return true;
+    }
+
+private:
+    HMODULE mod_ = nullptr;
+    PfnGetState getState_ = nullptr;
+};
+
+struct InteractiveExploreController {
+    enum class DragTarget : uint8_t {
+        None = 0,
+        SplitCurtain,
+        SunSlider,
+        AzmSlider,
+        AltSunOrbit,
+        ViewportLook
+    };
+
+    bool exploreActive = false;
+    float blendT = 0.0f;
+    float eye[3]{-0.56f, 3.90f, 4.32f};
+    float yaw = 0.22f;
+    float pitch = -0.02f;
+    float fovY = 0.62f;
+
+    bool sunOverride = false;
+    float sunElevation01 = 0.43f;   // Golden Taipei dawn default (~+19.9 deg)
+    float sunAzimuth01 = 0.4125f;   // Southeast window portal default (~-31.5 deg)
+    float sunDir[3]{0.80f, 0.34f, -0.49f};
+    float sunScale = 1.0f;
+    bool lampsOff = false;
+    float abSplitRatio = 0.50f;
+    uint32_t activePreset = 0;
+
+    uint32_t accumFrame = 0;
+    bool hasPrevState = false;
+    int64_t prevSamplePos = -1;
+    uint32_t prevCanvasW = 0;
+    uint32_t prevCanvasH = 0;
+    bool prevDisableRt = false;
+    boo::Edition prevEdition = boo::Edition::Family;
+
+    DragTarget dragTarget = DragTarget::None;
+    WORD prevPadButtons = 0;
+    DynamicXInput xinput;
+
+    void recomputeSunDir() noexcept {
+        const float elev = -0.35f + std::clamp(sunElevation01, 0.0f, 1.0f) * 1.62f;
+        const float azim = (std::clamp(sunAzimuth01, 0.0f, 1.0f) - 0.5f) * 6.2831853f;
+        const float ce = std::cos(elev);
+        sunDir[0] = std::cos(azim) * ce;
+        sunDir[1] = std::sin(elev);
+        sunDir[2] = std::sin(azim) * ce;
+    }
+
+    void setPoseFromEyeTarget(const float e[3], const float t[3], float fovRad) noexcept {
+        eye[0] = e[0]; eye[1] = e[1]; eye[2] = e[2];
+        float dx = t[0] - e[0];
+        float dy = t[1] - e[1];
+        float dz = t[2] - e[2];
+        const float len = std::max(1e-5f, std::sqrt(dx * dx + dy * dy + dz * dz));
+        dx /= len; dy /= len; dz /= len;
+        pitch = std::asin(std::clamp(dy, -0.985f, 0.985f));
+        yaw = std::atan2(dx, dz);
+        fovY = std::clamp(fovRad, 0.30f, 1.65f);
+    }
+
+    void enterExplore(
+        boo::ShowVisualMode showMode,
+        boo::TimelineClock& clock,
+        boo::AudioEngine& audio,
+        bool audioClockReady,
+        boo::AppWindow& window,
+        const boo::AppSettings& settings,
+        float moodIris) {
+        if (!exploreActive) {
+            const boo::M1CameraState cur = boo::evaluateShowCamera(
+                showMode, clock.currentSample(), clock.sampleRate(), moodIris, settings.reducedFlash, settings.motionScale);
+            setPoseFromEyeTarget(cur.eye, cur.target, cur.fovYRadians);
+        }
+        exploreActive = true;
+        blendT = 1.0f;
+        hasPrevState = false;
+        window.setExploreKeyCapture(true);
+        clock.pause();
+        if (audioClockReady) audio.setPaused(true);
+        BOO_LOG_INFO("Explore", "Interactive RTX Explore camera ENABLED [F] (WASDQE + Mouse + Wheel + Alt-Drag Sun + NRD PT)");
+    }
+
+    void exitExplore(
+        boo::TimelineClock& clock,
+        boo::AudioEngine& audio,
+        bool audioClockReady,
+        boo::AppWindow& window) {
+        exploreActive = false;
+        activePreset = 0;
+        hasPrevState = false;
+        window.setExploreKeyCapture(false);
+        clock.resume();
+        if (audioClockReady) audio.setPaused(false);
+        BOO_LOG_INFO("Explore", "Returning smoothly to scripted film choreography [F]");
+    }
+
+    void applyHeroPreset(
+        uint32_t preset1To6,
+        const boo::CueSheet& cueSheet,
+        boo::AppSettings& settings,
+        boo::TimelineClock& clock,
+        boo::AudioEngine& audio,
+        bool audioClockReady,
+        boo::FallbackOrchestrator& orchestrator,
+        boo::AppWindow& window) {
+        preset1To6 = std::clamp(preset1To6, 1u, 6u);
+        const boo::ShowVisualMode curMode = boo::resolveShowVisualMode(cueSheet, settings.playbackMode);
+
+        double targetSec = 343.5;
+        float pEye[3]{-0.56f, 3.90f, 4.32f};
+        float pTgt[3]{-0.08f, 3.85f, 6.38f};
+        float pFov = 0.58f;
+        const char* label = "Dawn Penthouse Bathroom Wide";
+
+        if (curMode == boo::ShowVisualMode::M2Trilogy180s) {
+            static constexpr double kTrilogySec[6] = {15.0, 45.0, 75.0, 108.0, 132.0, 168.0};
+            static constexpr const char* kTrilogyNames[6] = {
+                "Shanghai Steel Truss", "Huangpu Bund Panorama", "Shenzhen eVTOL Cruise",
+                "Shenzhen Civic Hover", "Taipei 101 Golden TMD", "Rooftop Glass Orchid"};
+            targetSec = kTrilogySec[preset1To6 - 1u];
+            label = kTrilogyNames[preset1To6 - 1u];
+            const auto cam = boo::evaluateTrilogyCamera(
+                boo::TimelineClock::secondsToSamples(targetSec, cueSheet.sampleRate), cueSheet.sampleRate, settings.reducedFlash);
+            for (int c = 0; c < 3; ++c) { pEye[c] = cam.eye[c]; pTgt[c] = cam.target[c]; }
+            pFov = cam.fovYRadians;
+        } else if (curMode == boo::ShowVisualMode::M1Slice60s || curMode == boo::ShowVisualMode::LegacyM0) {
+            static constexpr double kM1Sec[6] = {8.0, 18.0, 28.0, 38.0, 46.0, 55.0};
+            targetSec = kM1Sec[preset1To6 - 1u];
+            label = "Taipei Slice Bookmark";
+            const auto cam = boo::evaluateM1Camera(
+                boo::TimelineClock::secondsToSamples(targetSec, cueSheet.sampleRate), cueSheet.sampleRate, 0.5f, settings.reducedFlash);
+            for (int c = 0; c < 3; ++c) { pEye[c] = cam.eye[c]; pTgt[c] = cam.target[c]; }
+            pFov = cam.fovYRadians;
+        } else {
+            if (cueSheet.durationSamples >= boo::TimelineClock::kFullFilmSamples &&
+                settings.playbackMode != boo::PlaybackMode::FullFilm) {
+                settings.playbackMode = boo::PlaybackMode::FullFilm;
+                clock.clearLoopRange();
+                clock.setLoopEnabled(settings.loop);
+            }
+            switch (preset1To6) {
+            case 1u:
+                targetSec = 343.5; label = "Dawn Penthouse Bathroom Wide";
+                pEye[0] = -0.56f; pEye[1] = 3.90f; pEye[2] = 4.32f;
+                pTgt[0] = -0.08f; pTgt[1] = 3.85f; pTgt[2] = 6.38f;
+                pFov = 0.58f;
+                break;
+            case 2u:
+                targetSec = 346.0; label = "CNC Faucet, Aerator Droplet & Porcelain Basin Macro";
+                pEye[0] = 0.05f;  pEye[1] = 3.83f; pEye[2] = 5.76f;
+                pTgt[0] = -0.18f; pTgt[1] = 3.67f; pTgt[2] = 6.34f;
+                pFov = 0.44f;
+                break;
+            case 3u:
+                targetSec = 348.0; label = "Backlit Calathea Veins & Keepsake Glass Orchid";
+                pEye[0] = -0.86f; pEye[1] = 3.87f; pEye[2] = 5.58f;
+                pTgt[0] = -0.46f; pTgt[1] = 3.82f; pTgt[2] = 6.27f;
+                pFov = 0.50f;
+                break;
+            case 4u:
+                targetSec = 36.0; label = "Hero Glass Orchid Crystal Sanctuary";
+                pEye[0] = 0.56f;  pEye[1] = 5.08f; pEye[2] = -0.82f;
+                pTgt[0] = 0.00f;  pTgt[1] = 5.28f; pTgt[2] = 5.50f;
+                pFov = 0.72f;
+                break;
+            case 5u:
+                targetSec = 72.0; label = "Enamel Cathedral & Hall of Mirrors";
+                pEye[0] = 1.68f;  pEye[1] = 5.12f; pEye[2] = 0.25f;
+                pTgt[0] = -0.15f; pTgt[1] = 5.62f; pTgt[2] = 5.65f;
+                pFov = 0.76f;
+                break;
+            case 6u:
+                targetSec = 175.0; label = "Botanical Sanctuary & Machined Brass Iris";
+                pEye[0] = 0.72f;  pEye[1] = 4.66f; pEye[2] = -0.78f;
+                pTgt[0] = 0.00f;  pTgt[1] = 4.85f; pTgt[2] = 5.50f;
+                pFov = 0.78f;
+                break;
+            }
+            const double maxCueSec = std::max(0.0, boo::TimelineClock::samplesToSeconds(cueSheet.durationSamples, cueSheet.sampleRate) - 0.5);
+            targetSec = std::min(targetSec, maxCueSec);
+        }
+
+        clock.seekToSeconds(targetSec);
+        clock.pause();
+        if (audioClockReady) {
+            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+            audio.setPaused(true);
+        }
+        orchestrator.resetTo(clock.currentSeconds());
+
+        setPoseFromEyeTarget(pEye, pTgt, pFov);
+        exploreActive = true;
+        blendT = 1.0f;
+        activePreset = preset1To6;
+        hasPrevState = false;
+        window.setExploreKeyCapture(true);
+        BOO_LOG_INFO("Explore", std::string("Hero Preset [") + std::to_string(preset1To6) + "]: " + label);
+    }
+
+    void handlePreTickInput(
+        const boo::WindowInputSnapshot& snap,
+        boo::AppWindow& window,
+        const boo::AppSettings& settings,
+        uint32_t hudMode,
+        BooXInputGamepad& outPad,
+        bool& outHasPad) {
+        outHasPad = xinput.poll(outPad);
+        if (outHasPad && snap.hasFocus) {
+            const WORD pressed = static_cast<WORD>(outPad.wButtons & ~prevPadButtons);
+            if (pressed & 0x8000u) window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);    // Y
+            if (pressed & 0x4000u) window.pushCommandFromWndProc(boo::TransportCommand::TogglePracticalLamps); // X
+            if (pressed & 0x2000u) window.pushCommandFromWndProc(boo::TransportCommand::ToggleRtxSplitWipe);   // B
+            if (pressed & 0x1000u) window.pushCommandFromWndProc(boo::TransportCommand::TogglePlayPause);      // A
+            if (pressed & 0x0008u) { // DPad Right -> next hero preset
+                const uint32_t nxt = (activePreset % 6u) + 1u;
+                window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
+                    static_cast<int>(boo::TransportCommand::HeroPreset1) + static_cast<int>(nxt - 1u)));
+            }
+            if (pressed & 0x0004u) { // DPad Left -> prev hero preset
+                const uint32_t prv = (activePreset <= 1u) ? 6u : (activePreset - 1u);
+                window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
+                    static_cast<int>(boo::TransportCommand::HeroPreset1) + static_cast<int>(prv - 1u)));
+            }
+            prevPadButtons = outPad.wButtons;
+        } else if (!outHasPad) {
+            prevPadButtons = 0;
+        }
+
+        if (!snap.lmbDown) {
+            dragTarget = DragTarget::None;
+        }
+
+        const float w = static_cast<float>(std::max<uint32_t>(1u, window.clientWidth()));
+        const float h = static_cast<float>(std::max<uint32_t>(1u, window.clientHeight()));
+        const float u = std::clamp(std::floor(h / 540.0f), 1.0f, 3.0f);
+
+        if (snap.lmbJustPressed) {
+            bool consumed = false;
+
+            // 1. Bottom HUD bar clickable "F:EXPLOR" / "F:RESUME" pill
+            if (settings.showOverlay && hudMode == 0u && w >= 480.0f && h >= 300.0f) {
+                const float rightBase = w - 245.0f * u;
+                const float expMinX = rightBase - 94.0f * u;
+                const float expMinY = h - 34.0f * u;
+                if (snap.mouseX >= expMinX && snap.mouseX <= expMinX + 86.0f * u &&
+                    snap.mouseY >= expMinY && snap.mouseY <= expMinY + 22.0f * u) {
+                    window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
+                    consumed = true;
+                }
+            }
+
+            // 2. Top/Bottom RTX Showcase Studio Bar buttons & sliders
+            const bool barVisible = settings.showOverlay && (hudMode != 3u) &&
+                                    (exploreActive || sunOverride || lampsOff) && w >= 640.0f && h >= 300.0f;
+            if (!consumed && barVisible) {
+                const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 174.0f * u, 326.0f * u) : (0.5f * w - 174.0f * u);
+                const float barMinY = (hudMode == 2u) ? (h - 68.0f * u) : (14.0f * u);
+                if (snap.mouseX >= barMinX && snap.mouseX <= barMinX + 348.0f * u &&
+                    snap.mouseY >= barMinY && snap.mouseY <= barMinY + 52.0f * u) {
+                    consumed = true;
+                    const float rx = (snap.mouseX - barMinX) / u;
+                    const float ry = (snap.mouseY - barMinY) / u;
+                    if (ry >= 4.0f && ry <= 24.0f) {
+                        if (rx >= 6.0f && rx <= 64.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
+                        } else if (rx >= 166.0f && rx <= 208.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::TogglePracticalLamps);
+                        } else if (rx >= 212.0f && rx <= 254.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::ToggleRtxSplitWipe);
+                        } else if (rx >= 258.0f && rx <= 345.0f) {
+                            const uint32_t k = std::min<uint32_t>(5u, static_cast<uint32_t>((rx - 258.0f) / 14.5f));
+                            window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
+                                static_cast<int>(boo::TransportCommand::HeroPreset1) + static_cast<int>(k)));
+                        }
+                    } else if (ry >= 27.0f && ry <= 48.0f) {
+                        if (rx >= 30.0f && rx <= 155.0f) {
+                            dragTarget = DragTarget::SunSlider;
+                            sunOverride = true;
+                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
+                            recomputeSunDir();
+                            hasPrevState = false;
+                        } else if (rx >= 182.0f && rx <= 303.0f) {
+                            dragTarget = DragTarget::AzmSlider;
+                            sunOverride = true;
+                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (114.0f * u), 0.0f, 1.0f);
+                            recomputeSunDir();
+                            hasPrevState = false;
+                        } else if (rx >= 305.0f && rx <= 344.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::ResetInteractiveLighting);
+                        }
+                    }
+                }
+            }
+
+            // 3. Draggable RTX ON / OFF A/B Split-Screen Curtain
+            if (!consumed && settings.showOverlay && hudMode == 2u) {
+                const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
+                const float splitX = lb.x + lb.width * abSplitRatio;
+                if (std::abs(snap.mouseX - splitX) <= 18.0f * u &&
+                    snap.mouseY >= lb.y && snap.mouseY <= lb.y + lb.height) {
+                    dragTarget = DragTarget::SplitCurtain;
+                    consumed = true;
+                }
+            }
+
+            // 4. Viewport Alt+LMB Sun Orbit or LMB Camera Look
+            if (!consumed) {
+                if (snap.altDown) {
+                    dragTarget = DragTarget::AltSunOrbit;
+                } else if (exploreActive) {
+                    dragTarget = DragTarget::ViewportLook;
+                }
+            }
+        }
+
+        // Ongoing slider / split-curtain drag updates
+        if (snap.lmbDown) {
+            const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 174.0f * u, 326.0f * u) : (0.5f * w - 174.0f * u);
+            if (dragTarget == DragTarget::SplitCurtain) {
+                const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
+                abSplitRatio = std::clamp((snap.mouseX - lb.x) / std::max(1.0f, lb.width), 0.05f, 0.95f);
+            } else if (dragTarget == DragTarget::SunSlider) {
+                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
+                if (std::abs(nextEl - sunElevation01) > 1e-4f || !sunOverride) {
+                    sunOverride = true;
+                    sunElevation01 = nextEl;
+                    recomputeSunDir();
+                    hasPrevState = false;
+                }
+            } else if (dragTarget == DragTarget::AzmSlider) {
+                const float nextAz = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (114.0f * u), 0.0f, 1.0f);
+                if (std::abs(nextAz - sunAzimuth01) > 1e-4f || !sunOverride) {
+                    sunOverride = true;
+                    sunAzimuth01 = nextAz;
+                    recomputeSunDir();
+                    hasPrevState = false;
+                }
+            } else if (dragTarget == DragTarget::AltSunOrbit &&
+                       (std::abs(snap.dragLmbDx) > 0.1f || std::abs(snap.dragLmbDy) > 0.1f)) {
+                sunOverride = true;
+                sunAzimuth01 = std::fmod(sunAzimuth01 + snap.dragLmbDx * 0.0018f + 1.0f, 1.0f);
+                sunElevation01 = std::clamp(sunElevation01 - snap.dragLmbDy * 0.0022f, 0.0f, 1.0f);
+                recomputeSunDir();
+                hasPrevState = false;
+            }
+        }
+    }
+
+    void updateFrame(
+        const boo::WindowInputSnapshot& snap,
+        const BooXInputGamepad& pad,
+        bool hasPad,
+        const boo::ClockSnapshot& tick,
+        const boo::QualityPresetSpec& activeSpec,
+        const boo::CueSheet& cueSheet,
+        const boo::AppSettings& settings,
+        boo::TimelineClock& clock,
+        boo::AudioEngine& audio,
+        bool audioClockReady,
+        boo::AppWindow& window,
+        boo::FrameContext& ioCtx) {
+        const float wallDt = std::clamp(static_cast<float>(tick.unclampedDtSeconds), 0.0005f, 0.100f);
+        const boo::ShowVisualMode showMode = boo::resolveShowVisualMode(cueSheet, settings.playbackMode);
+
+        // Right-mouse drag anywhere in the viewport immediately enters Explore mode & orbits look!
+        if (!exploreActive && snap.rmbDown && (std::abs(snap.dragRmbDx) > 1.5f || std::abs(snap.dragRmbDy) > 1.5f)) {
+            enterExplore(showMode, clock, audio, audioClockReady, window, settings, ioCtx.moodIrisAngle);
+            ioCtx.paused = (clock.state() == boo::TransportState::Paused);
+        }
+
+        bool cameraOrLightChanged = false;
+
+        // Keyboard [ / ] sun azimuth & Shift+[ / Shift+] sun elevation nudges in Explore mode
+        if (exploreActive && (std::abs(snap.sunAzimKey) > 0.01f || std::abs(snap.sunElevKey) > 0.01f)) {
+            sunOverride = true;
+            sunAzimuth01 = std::fmod(sunAzimuth01 + snap.sunAzimKey * wallDt * 0.25f + 1.0f, 1.0f);
+            sunElevation01 = std::clamp(sunElevation01 + snap.sunElevKey * wallDt * 0.25f, 0.0f, 1.0f);
+            recomputeSunDir();
+            cameraOrLightChanged = true;
+        }
+
+        if (exploreActive) {
+            blendT = 1.0f;
+
+            // Mouse look (RMB drag or Viewport LMB drag)
+            float lookDx = snap.dragRmbDx;
+            float lookDy = snap.dragRmbDy;
+            if (dragTarget == DragTarget::ViewportLook) {
+                lookDx += snap.dragLmbDx;
+                lookDy += snap.dragLmbDy;
+            }
+            if (std::abs(lookDx) > 0.01f || std::abs(lookDy) > 0.01f) {
+                constexpr float kMouseSens = 0.0024f;
+                yaw += lookDx * kMouseSens;
+                pitch = std::clamp(pitch - lookDy * kMouseSens, -1.48f, 1.48f);
+                activePreset = 0;
+                cameraOrLightChanged = true;
+            }
+
+            // Wheel FOV zoom + MMB FOV reset
+            if (std::abs(snap.wheelNotches) > 0.01f) {
+                fovY = std::clamp(fovY - snap.wheelNotches * 0.045f, 0.30f, 1.60f);
+                cameraOrLightChanged = true;
+            }
+            if (snap.mmbJustPressed) {
+                fovY = (showMode == boo::ShowVisualMode::FullFilm360s && ioCtx.filmTimeSeconds >= 336.0) ? 0.58f : 0.76f;
+                cameraOrLightChanged = true;
+            }
+
+            // Analog XInput stick look & movement
+            auto deadzone = [](SHORT v, SHORT dz) noexcept -> float {
+                const float fv = static_cast<float>(v);
+                const float fdz = static_cast<float>(dz);
+                if (std::abs(fv) <= fdz) return 0.0f;
+                const float sign = (fv >= 0.0f) ? 1.0f : -1.0f;
+                return sign * std::min(1.0f, (std::abs(fv) - fdz) / (32767.0f - fdz));
+            };
+            float moveF = snap.moveForward;
+            float moveR = snap.moveRight;
+            float moveU = snap.moveUp;
+            if (hasPad && snap.hasFocus) {
+                const float lx = deadzone(pad.sThumbLX, 7849);
+                const float ly = deadzone(pad.sThumbLY, 7849);
+                const float rx = deadzone(pad.sThumbRX, 8689);
+                const float ry = deadzone(pad.sThumbRY, 8689);
+                const float trig = (static_cast<float>(pad.bRightTrigger) - static_cast<float>(pad.bLeftTrigger)) / 255.0f;
+                moveR = std::clamp(moveR + lx, -1.0f, 1.0f);
+                moveF = std::clamp(moveF + ly, -1.0f, 1.0f);
+                if (std::abs(trig) > 0.08f) moveU = std::clamp(moveU + trig, -1.0f, 1.0f);
+                if (std::abs(rx) > 0.01f || std::abs(ry) > 0.01f) {
+                    yaw += rx * 2.1f * wallDt;
+                    pitch = std::clamp(pitch + ry * 1.6f * wallDt, -1.48f, 1.48f);
+                    activePreset = 0;
+                    cameraOrLightChanged = true;
+                }
+            }
+
+            if (std::abs(moveF) > 0.001f || std::abs(moveR) > 0.001f || std::abs(moveU) > 0.001f) {
+                const bool inMetricRoom = (showMode == boo::ShowVisualMode::FullFilm360s && ioCtx.filmTimeSeconds >= 335.5);
+                float speed = inMetricRoom ? 1.65f : 4.60f;
+                if (snap.shiftDown) speed *= 2.85f;
+                if (snap.altDown)   speed *= 0.22f;
+
+                const float cp = std::cos(pitch);
+                const float fwd[3] = {std::sin(yaw) * cp, std::sin(pitch), std::cos(yaw) * cp};
+                const float rgt[3] = {std::cos(yaw), 0.0f, -std::sin(yaw)};
+
+                eye[0] += (fwd[0] * moveF + rgt[0] * moveR) * speed * wallDt;
+                eye[1] += (fwd[1] * moveF + moveU) * speed * wallDt;
+                eye[2] += (fwd[2] * moveF + rgt[2] * moveR) * speed * wallDt;
+                activePreset = 0;
+                cameraOrLightChanged = true;
+            }
+        } else if (blendT > 0.0f) {
+            blendT = std::max(0.0f, blendT - wallDt / 0.65f);
+            cameraOrLightChanged = true;
+        }
+
+        const float smoothBlend = blendT * blendT * (3.0f - 2.0f * blendT);
+        const float cp = std::cos(pitch);
+        const float fwd[3] = {std::sin(yaw) * cp, std::sin(pitch), std::cos(yaw) * cp};
+
+        ioCtx.interactive.exploreActive = exploreActive;
+        ioCtx.interactive.blendWeight = smoothBlend;
+        for (int c = 0; c < 3; ++c) {
+            ioCtx.interactive.eye[c] = eye[c];
+            ioCtx.interactive.target[c] = eye[c] + fwd[c] * 2.5f;
+            ioCtx.interactive.up[c] = (c == 1) ? 1.0f : 0.0f;
+            ioCtx.interactive.sunDir[c] = sunDir[c];
+        }
+        ioCtx.interactive.fovYRadians = fovY;
+        ioCtx.interactive.sunOverride = sunOverride;
+        ioCtx.interactive.sunScale = sunScale;
+        ioCtx.interactive.sunElevation01 = sunElevation01;
+        ioCtx.interactive.sunAzimuth01 = sunAzimuth01;
+        ioCtx.interactive.lampsOff = lampsOff;
+        ioCtx.interactive.abSplitRatio = abSplitRatio;
+        ioCtx.interactive.activePreset = activePreset;
+
+        // Progressive multi-sample path-tracing accumulation when interactive view is still & paused
+        const bool interactiveSession = exploreActive || sunOverride || lampsOff;
+        const bool sceneInvalidated =
+            !hasPrevState ||
+            cameraOrLightChanged ||
+            ioCtx.seeking ||
+            !ioCtx.paused ||
+            ioCtx.samplePosition != prevSamplePos ||
+            activeSpec.renderWidth != prevCanvasW ||
+            activeSpec.renderHeight != prevCanvasH ||
+            settings.disableRT != prevDisableRt ||
+            settings.edition != prevEdition;
+
+        if (interactiveSession && ioCtx.paused && !ioCtx.seeking && !settings.disableRT) {
+            ioCtx.interactive.accumulate = true;
+            if (sceneInvalidated) {
+                accumFrame = 0u;
+                hasPrevState = true;
+            } else {
+                accumFrame = std::min<uint32_t>(accumFrame + 1u, 4095u);
+            }
+            ioCtx.interactive.accumFrame = accumFrame;
+        } else {
+            ioCtx.interactive.accumulate = false;
+            ioCtx.interactive.accumFrame = 0u;
+            accumFrame = 0u;
+            hasPrevState = false;
+        }
+
+        prevSamplePos = ioCtx.samplePosition;
+        prevCanvasW = activeSpec.renderWidth;
+        prevCanvasH = activeSpec.renderHeight;
+        prevDisableRt = settings.disableRT;
+        prevEdition = settings.edition;
+    }
+};
 
 } // namespace
 
@@ -604,6 +1175,15 @@ int main(int argc, char** argv) {
     std::array<float, 16> recentGpuMs{};
     uint32_t hudMode = settings.showOverlay ? 0u : 3u;
     AbCompareEngine abCompareEngine = AbCompareEngine::RT;
+    InteractiveExploreController interactiveCtrl{};
+    interactiveCtrl.recomputeSunDir();
+    if (settings.initialExplorePreset >= 1u && settings.initialExplorePreset <= 6u) {
+        interactiveCtrl.applyHeroPreset(
+            settings.initialExplorePreset, cueSheet, settings, clock, audio, audioClockReady, orchestrator, window);
+    } else if (settings.startInExploreMode) {
+        interactiveCtrl.enterExplore(
+            resolveShowVisualMode(cueSheet, settings.playbackMode), clock, audio, audioClockReady, window, settings, 0.5f);
+    }
 
     // One recovery policy covers loss during resize, fence waits, resource sync,
     // and Present. The 48 kHz transport is deliberately never stopped or rebased.
@@ -662,6 +1242,11 @@ int main(int argc, char** argv) {
     while (running && window.pumpMessages()) {
         const auto cpuFrameT0 = std::chrono::steady_clock::now();
         bool manualPresetChanged = false;
+
+        const WindowInputSnapshot winInput = window.consumeInputSnapshot();
+        BooXInputGamepad padState{};
+        bool hasGamepad = false;
+        interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode, padState, hasGamepad);
 
         TransportCommand cmd = TransportCommand::None;
         while (window.popCommand(cmd)) {
@@ -886,6 +1471,56 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
+                case TransportCommand::ToggleExploreMode:
+                    if (interactiveCtrl.exploreActive) {
+                        interactiveCtrl.exitExplore(clock, audio, audioClockReady, window);
+                    } else {
+                        interactiveCtrl.enterExplore(
+                            resolveShowVisualMode(cueSheet, settings.playbackMode),
+                            clock, audio, audioClockReady, window, settings, 0.5f);
+                    }
+                    break;
+                case TransportCommand::TogglePracticalLamps:
+                    interactiveCtrl.lampsOff = !interactiveCtrl.lampsOff;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Explore", std::string("Practical lamps / RTXDI emitters [J]: ") +
+                                            (interactiveCtrl.lampsOff ? "OFF" : "ON"));
+                    break;
+                case TransportCommand::ToggleRtxSplitWipe:
+                    if (hudMode == 2u && abCompareEngine == AbCompareEngine::RT) {
+                        hudMode = 0u;
+                        settings.showOverlay = true;
+                        BOO_LOG_INFO("Render", "RTX Split-Screen Wipe [H]: OFF");
+                    } else {
+                        hudMode = 2u;
+                        settings.showOverlay = true;
+                        abCompareEngine = AbCompareEngine::RT;
+                        orchestrator.setAbCompareEngine(abCompareEngine);
+                        BOO_LOG_INFO("Render", "RTX Split-Screen Wipe [H]: LIVE DXR vs RASTER (drag divider curtain)");
+                    }
+                    break;
+                case TransportCommand::ResetInteractiveLighting:
+                    interactiveCtrl.sunOverride = false;
+                    interactiveCtrl.lampsOff = false;
+                    interactiveCtrl.sunElevation01 = 0.43f;
+                    interactiveCtrl.sunAzimuth01 = 0.4125f;
+                    interactiveCtrl.recomputeSunDir();
+                    interactiveCtrl.abSplitRatio = 0.50f;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Explore", "Reset interactive sun, practical lamps & split curtain [F8]");
+                    break;
+                case TransportCommand::HeroPreset1:
+                case TransportCommand::HeroPreset2:
+                case TransportCommand::HeroPreset3:
+                case TransportCommand::HeroPreset4:
+                case TransportCommand::HeroPreset5:
+                case TransportCommand::HeroPreset6: {
+                    const uint32_t idx = static_cast<uint32_t>(
+                        static_cast<int>(cmd) - static_cast<int>(TransportCommand::HeroPreset1) + 1);
+                    interactiveCtrl.applyHeroPreset(
+                        idx, cueSheet, settings, clock, audio, audioClockReady, orchestrator, window);
+                    break;
+                }
                 default: break;
             }
         }
@@ -1011,6 +1646,10 @@ int main(int argc, char** argv) {
         fctx.moodIntensity = mood.lightTension;
         fctx.moodPaletteAccent = mood.spectralShift;
 
+        interactiveCtrl.updateFrame(
+            winInput, padState, hasGamepad, tick, activeSpec, cueSheet, settings,
+            clock, audio, audioClockReady, window, fctx);
+
         if (captureRequested && !graphicsUnavailable) {
             captureRequested = false;
             std::string captureError;
@@ -1116,11 +1755,17 @@ int main(int argc, char** argv) {
 
         if (std::chrono::duration<double>(cpuFrameT1 - lastTitleUpdate).count() >= 0.5) {
             lastTitleUpdate = cpuFrameT1;
-            char titleBuf[280]{};
+            char expTag[64]{};
+            if (interactiveCtrl.exploreActive) {
+                const uint32_t spp = fctx.interactive.accumulate ? (fctx.interactive.accumFrame + 1u) : 1u;
+                std::snprintf(expTag, sizeof(expTag), " [EXPLORE %u SPP] |", spp);
+            }
+            char titleBuf[320]{};
             std::snprintf(
                 titleBuf,
                 sizeof(titleBuf),
-                "BOO SAH SAH | %s | Act %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [X/C/T/U/V]=Pillars [A]=A/B [K]=Cap [Tab]=HUD",
+                "BOO SAH SAH |%s %s | Act %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [F]=Explore [H]=Wipe [J]=Lamp [Tab]=HUD",
+                expTag,
                 TimelineClock::formatTimecode(tick.samplePosition, cueSheet.sampleRate).c_str(),
                 actIdx + 1,
                 cueSheet.scenes.size(),

@@ -19,6 +19,8 @@ cbuffer Scene : register(b0) {
     uint width;      uint height;   uint act;       uint canonical;
     float daylight;  float pulse;   uint showFlags; float moodAccent;
     float moodBloom; float moodLight; float moodCut; float scenePadding;
+    float3 sunOverrideDir; float sunOverrideScale;   // Explore-mode interactive sun (interFlags bit 0)
+    uint accumFrame; uint interFlags; float2 jitterNdc; // bit1 = progressive accumulation, bit2 = lamps off
 };
 
 cbuffer Draw : register(b1) {
@@ -84,6 +86,10 @@ bool isDawnFinale() {
     return ((showFlags & 1u) != 0u) && (time >= 338.5);
 }
 
+bool isGrandTutti() {
+    return ((showFlags & 1u) != 0u) && (time >= 274.5) && (time < 338.0);
+}
+
 bool isInsideDawnBathroom(float3 p) {
     return isDawnFinale() &&
            (p.x > -2.56 && p.x < 1.56) &&
@@ -91,7 +97,34 @@ bool isInsideDawnBathroom(float3 p) {
            (p.z > 2.12 && p.z < 6.62);
 }
 
+bool sunOverridden() {
+    return (interFlags & 1u) != 0u;
+}
+
+bool accumulating() {
+    return (interFlags & 2u) != 0u;
+}
+
+bool lampsOff() {
+    return (interFlags & 4u) != 0u;
+}
+
+bool exploreMode() {
+    return (interFlags & 8u) != 0u;
+}
+
+// Scripted dawn ramp over film time, or (in Explore mode) driven by the interactive sun elevation.
+float timeRamp(float a, float b) {
+    if (sunOverridden()) {
+        return smoothstep(-0.10, 0.30, norm(sunOverrideDir).y);
+    }
+    return smoothstep(a, b, time);
+}
+
 float3 sceneSunDir() {
+    if (sunOverridden()) {
+        return norm(sunOverrideDir);
+    }
     if (isDawnFinale()) {
         // Golden-peach Taipei dawn sun shining from the southeast (+X, +Y, -Z) through the X=+1.65 bathroom window
         return norm(float3(0.80, 0.34, -0.49));
@@ -103,8 +136,18 @@ float3 sceneSunDir() {
 }
 
 float3 sceneSunRadiance() {
+    if (sunOverridden()) {
+        // Physically motivated time-of-day: warm low sun -> neutral high sun -> cool moonlight below the horizon
+        float3 d = norm(sunOverrideDir);
+        float above = smoothstep(-0.04, 0.10, d.y);
+        float3 lowSun  = float3(3.35, 2.05, 1.12);
+        float3 highSun = float3(3.30, 3.05, 2.80);
+        float3 moon    = float3(0.10, 0.14, 0.24);
+        float3 sunCol = lerp(lowSun, highSun, smoothstep(0.08, 0.60, saturate(d.y)));
+        return (sunCol * above + moon * (1.0 - above)) * sunOverrideScale;
+    }
     if (isDawnFinale()) {
-        float dawnRamp = smoothstep(336.0, 346.0, time);
+        float dawnRamp = timeRamp(336.0, 346.0);
         return lerp(float3(0.55, 0.62, 0.82), float3(3.35, 2.32, 1.52), dawnRamp);
     }
     float3 nightKey = (act == 1u) ? float3(0.30, 0.44, 0.66) : float3(0.52, 0.78, 1.08);
@@ -120,12 +163,17 @@ float3 sampleIblEnv(float3 d, float rough, bool insideBathroom) {
     float2 uv = dirToEquirectUv(d);
     float mip = clamp(rough * 8.0, 0.0, 8.0);
     if (insideBathroom) {
-        return gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb;
+        float3 dawnEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb;
+        if (sunOverridden()) {
+            float3 nightEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb * 0.24;
+            return lerp(nightEnv, dawnEnv, timeRamp(336.0, 345.0));
+        }
+        return dawnEnv;
     }
     if (isDawnFinale()) {
         float3 nightEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
         float3 dawnEnv  = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb;
-        return lerp(nightEnv, dawnEnv, smoothstep(336.0, 345.0, time));
+        return lerp(nightEnv, dawnEnv, timeRamp(336.0, 345.0));
     }
     if (act == 1u) {
         float3 nightEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
@@ -142,7 +190,7 @@ float3 sampleIblEnv(float3 d, float rough, bool insideBathroom) {
 float3 sky(float3 d) {
     float3 dn = norm(d);
     if (isDawnFinale()) {
-        float dawnT = smoothstep(336.0, 346.0, time);
+        float dawnT = timeRamp(336.0, 346.0);
         float3 sDir = sceneSunDir();
         float horiz = pow(saturate(1.0 - max(dn.y, 0.0)), 3.2);
         float sunDot = saturate(dot(dn, sDir));
@@ -180,7 +228,7 @@ float3 sky(float3 d) {
     float3 day = lerp(float3(0.12, 0.29, 0.52), float3(0.92, 0.54, 0.24), horizon);
     float3 clearSky = lerp(lerp(night, day, daylight), dusk, twilight * 0.55);
 
-    float3 sunDir = norm(float3(-0.48, 0.16 + 0.22 * daylight, 0.72));
+    float3 sunDir = sunOverridden() ? sceneSunDir() : norm(float3(-0.48, 0.16 + 0.22 * daylight, 0.72));
     float sun = pow(saturate(dot(dn, sunDir)), 180.0);
     float sunHalo = pow(saturate(dot(dn, sunDir)), 10.0);
     float3 c = clearSky + (sun * float3(3.2, 1.9, 0.85) + sunHalo * float3(0.32, 0.16, 0.06)) * daylight;
@@ -203,7 +251,7 @@ float3 emissive(uint m, float3 p, float filterW) {
     if (isDawnFinale()) {
         // Warm subtle architectural halo/sconce glow in bathroom even at dawn; exterior city lights fade gently
         if (m == 15u && isInsideDawnBathroom(p)) {
-            return float3(0.92, 0.68, 0.42) * 0.52;
+            return lampsOff() ? (float3)0.0 : float3(0.92, 0.68, 0.42) * 0.52;
         }
         nightFactor *= 0.22;
     }
@@ -403,12 +451,28 @@ void traceBathroomGiRay(float3 origin, float3 direction, out float3 giRad, out f
         float wMeso  = 1.0 - smoothstep(0.020, 0.92, hitT);
         occWeight = 0.68 * wMicro + 0.32 * wMeso;
 
-        float dawnRamp = smoothstep(336.0, 346.0, time);
-        float winProx = smoothstep(-0.95, 1.35, hitP.x) * 0.58 + smoothstep(3.0, 6.45, hitP.z) * 0.42;
-        float3 bounceIrr = lerp(float3(0.14, 0.13, 0.13), float3(0.96, 0.78, 0.62), winProx * dawnRamp);
-        giRad = hitAlb * bounceIrr * smoothstep(0.005, 0.095, hitT);
-        if (hm == 15u) {
-            giRad += float3(0.85, 0.60, 0.34) * 0.65;
+        float3 hitObjN = v0.n.xyz + bary.x * (v1.n.xyz - v0.n.xyz) + bary.y * (v2.n.xyz - v0.n.xyz);
+        float3 hitWN = norm(mul(hitObjN, (float3x3)q.CommittedWorldToObject3x4()));
+        if (dot(hitWN, direction) > 0.0) hitWN = -hitWN;
+
+        float dawnRamp = timeRamp(336.0, 346.0);
+        float3 sDir = sceneSunDir();
+        float3 sRad = sceneSunRadiance();
+        float sunNdotL = saturate(dot(hitWN, sDir));
+        // Analytical window-aperture projection estimates sunlit floor/vanity/wall patch for warm 2nd-bounce color bleeding
+        float tWin = (1.62 - hitP.x) / max(sDir.x, 0.08);
+        float3 winHit = hitP + sDir * max(tWin, 0.0);
+        float inWinPatch = (tWin > 0.0)
+            ? (smoothstep(2.90, 3.25, winHit.y) * (1.0 - smoothstep(5.45, 5.75, winHit.y)) *
+               smoothstep(2.75, 3.20, winHit.z) * (1.0 - smoothstep(6.35, 6.60, winHit.z)))
+            : 0.0;
+        float winProx = smoothstep(-1.25, 1.40, hitP.x) * 0.56 + smoothstep(2.8, 6.48, hitP.z) * 0.44;
+        float3 skyBounce = lerp(float3(0.16, 0.16, 0.17), float3(0.92, 0.80, 0.68), winProx * dawnRamp);
+        float3 sunBounce = sRad * (sunNdotL * inWinPatch * 0.42);
+        float3 pracBounce = lampsOff() ? (float3)0.0 : (float3(0.42, 0.28, 0.15) / (1.0 + 0.65 * dot(hitP - float3(0.08, 4.44, 2.32), hitP - float3(0.08, 4.44, 2.32))));
+        giRad = hitAlb * (skyBounce + sunBounce + pracBounce) * smoothstep(0.004, 0.080, hitT);
+        if (hm == 15u && !lampsOff()) {
+            giRad += float3(0.95, 0.66, 0.36) * 0.78;
         }
         return;
     }
@@ -511,7 +575,8 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
 
         // Sharp mirrors/glass/water evaluate secondary sun shadow so reflected rooms display real window sunbeams!
         float sunVis2 = 1.0;
-        if (coneSpread < 0.055 && (dot(hitNGeom, sunDir) > 0.0 || hTrans > 0.2)) {
+        float secShadowConeMax = (accumulating() && accumFrame >= 2u) ? 0.0035 : 0.055;
+        if (coneSpread < secShadowConeMax && (dot(hitNGeom, sunDir) > 0.0 || hTrans > 0.2)) {
             float3 shOrig = p + hitNGeom * 0.018 + ((hm == 29u || hm == 36u) ? sunDir * 0.020 : 0.0.xxx);
             sunVis2 = traceShadow(shOrig, sunDir, inBath ? 16.0 : 22.0) ? 0.0 : 1.0;
         }
@@ -532,11 +597,20 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             float3 toWin = float3(1.48, 4.25, 4.90) - p;
             float winDist = length(toWin);
             float3 winL = toWin / max(winDist, 0.25);
-            float winFall = 1.0 / (1.0 + 0.18 * winDist * winDist);
+            float winDay = sunOverridden() ? (0.03 + 0.97 * timeRamp(336.0, 345.0)) : 1.0;
+            float winFall = winDay / (1.0 + 0.18 * winDist * winDist);
             diffEnv2 = diffEnv2 * 0.34 + float3(0.58, 0.56, 0.54) * (0.28 + 0.72 * saturate(dot(hitN, winL))) * winFall;
-            float3 toSconce = float3(0.08, 4.44, 2.32) - p;
-            float dSc = length(toSconce);
-            diffEnv2 += float3(0.95, 0.64, 0.34) * saturate(dot(hitN, toSconce / max(dSc, 0.15)) * 0.6 + 0.4) / (1.0 + 2.4 * dSc * dSc);
+            if (!lampsOff()) {
+                float sconceBoost = sunOverridden() ? lerp(2.6, 1.0, timeRamp(336.0, 345.0)) : 1.0;
+                float3 toSconce = float3(0.08, 4.44, 2.32) - p;
+                float dSc = length(toSconce);
+                diffEnv2 += float3(0.95, 0.64, 0.34) * sconceBoost * saturate(dot(hitN, toSconce / max(dSc, 0.15)) * 0.6 + 0.4) / (1.0 + 2.4 * dSc * dSc);
+                float3 toVanityLamp = float3(-0.18, 5.16, 5.88) - p;
+                float dVl = length(toVanityLamp);
+                if (sunOverridden()) {
+                    diffEnv2 += float3(0.88, 0.58, 0.30) * (sconceBoost - 0.85) * saturate(dot(hitN, toVanityLamp / max(dVl, 0.15))) / (1.0 + 1.6 * dVl * dVl);
+                }
+            }
         }
 
         float3 kd2 = (1.0 - f0_2) * (1.0 - hMetal);
@@ -610,6 +684,81 @@ bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uin
 }
 #endif
 
+
+// =============================================================================
+// Borrowed NVIDIA RTXDI Reservoir Resampling (ReSTIR DI — Weighted RIS)
+// Evaluates dynamic practical emitters with 1 unbiased DXR visibility shadow ray.
+// =============================================================================
+struct RTXDI_DIReservoir {
+    uint  lightIndex;
+    uint  valid;
+    float weightSum;
+    float targetPdf;
+    float M;
+};
+
+RTXDI_DIReservoir RTXDI_EmptyDIReservoir() {
+    RTXDI_DIReservoir r;
+    r.lightIndex = 0u;
+    r.valid = 0u;
+    r.weightSum = 0.0;
+    r.targetPdf = 0.0;
+    r.M = 0.0;
+    return r;
+}
+
+void RTXDI_StreamLight(inout RTXDI_DIReservoir r, uint candidateIdx, float candidateTargetPdf, float rnd01) {
+    r.M += 1.0;
+    r.weightSum += candidateTargetPdf;
+    if (candidateTargetPdf > 0.0 && (rnd01 * r.weightSum < candidateTargetPdf)) {
+        r.lightIndex = candidateIdx;
+        r.targetPdf = candidateTargetPdf;
+        r.valid = 1u;
+    }
+}
+
+void getRtxdiEmitter(uint idx, float3 worldP, bool inBath, out float3 lightPos, out float3 lightIntensity, out float lightRadius) {
+    if (inBath) {
+        float lampGate = lampsOff() ? 0.0 : (sunOverridden() ? lerp(3.40, 1.0, timeRamp(336.0, 345.0)) : 1.0);
+        if (idx == 0u) { // Recessed warm 2700K architectural ceiling vanity downlight above porcelain basin
+            lightPos = float3(-0.18, 5.18, 5.82);
+            lightIntensity = float3(1.55, 1.02, 0.56) * lampGate;
+            lightRadius = 0.065;
+        } else if (idx == 1u) { // Backlit vanity mirror perimeter halo (2900K)
+            lightPos = float3(clamp(worldP.x, -0.54, 0.18), clamp(worldP.y, 3.85, 4.92), 6.48);
+            lightIntensity = float3(0.72, 0.50, 0.28) * lampGate;
+            lightRadius = 0.048;
+        } else if (idx == 2u) { // Opal cylindrical wall sconce (2700K) & warm under-cabinet wash
+            lightPos = (worldP.z < 4.2) ? float3(0.08, 4.44, 2.32) : float3(clamp(worldP.x, -0.82, 0.44), 3.04, 5.84);
+            lightIntensity = float3(1.05, 0.70, 0.38) * lampGate;
+            lightRadius = 0.050;
+        } else { // Keepsake Glass Orchid bioluminescent labellum core in celadon vase
+            lightPos = float3(0.402, 3.80, 6.235);
+            lightIntensity = float3(0.28, 0.88, 0.72) * (0.68 + 0.32 * pulse) * lampGate;
+            lightRadius = 0.032;
+        }
+    } else {
+        float lampGate = lampsOff() ? 0.0 : 1.0;
+        if (idx == 0u) { // Hero Glass Orchid bioluminescent core
+            lightPos = float3(0.0, 4.55, 5.20);
+            lightIntensity = float3(0.45, 1.35, 1.05) * (0.45 + 0.55 * reveal) * lampGate;
+            lightRadius = 0.12;
+        } else if (idx == 1u) { // Sanctuary warm left brass specimen lamp
+            lightPos = float3(-2.65, 5.85, 3.80);
+            lightIntensity = float3(1.85, 1.28, 0.74) * lampGate;
+            lightRadius = 0.10;
+        } else if (idx == 2u) { // Sanctuary warm right brass specimen lamp
+            lightPos = float3(2.65, 5.85, 3.80);
+            lightIntensity = float3(1.85, 1.28, 0.74) * lampGate;
+            lightRadius = 0.10;
+        } else { // Enamel Cathedral / Plaza warm uplight
+            lightPos = float3(0.0, 2.95, 6.10);
+            lightIntensity = float3(1.40, 1.02, 0.66) * lampGate;
+            lightRadius = 0.12;
+        }
+    }
+}
+
 struct VOut {
     float4 pos         : SV_Position;
     float3 world       : TEXCOORD0;
@@ -631,6 +780,7 @@ VOut VSMain(uint id : SV_VertexID) {
     float z = dot(d, forward);
     float fy = 1.0 / tan(fov * 0.5);
     o.pos = float4(dot(d, right) * fy / aspect, dot(d, up) * fy, z * 1000.0 / 999.9 - 0.1 * 1000.0 / 999.9, z);
+    o.pos.xy += jitterNdc * o.pos.w;
     return o;
 }
 
@@ -744,6 +894,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     bool hasTracedReflection = false;
     bool hasTracedBathGi = false;
     float3 tracedBathGi = (float3)0.0;
+    float3 restirDirect = (float3)0.0;
 
 #if defined(M2_RT)
     bool reflHit = false;
@@ -752,13 +903,28 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     uint aoHits = 0u;
     uint queries = 0u;
 
-    float ign = interleavedGradientNoise(i.pos.xy);
+    // Explore-mode progressive accumulation decorrelates every stochastic estimator per frame
+    float ign = accumulating()
+        ? frac(interleavedGradientNoise(i.pos.xy + float2(5.588238, 3.143218) * (float)(accumFrame & 255u)) + 0.6180340 * (float)accumFrame)
+        : interleavedGradientNoise(i.pos.xy);
+    float accumJit = accumulating() ? hash21(i.pos.xy + (float)(accumFrame & 1023u) * 17.31) : 0.5;
     float rotPhi = ign * kTwoPi;
 
     if (isGlass) {
         uint reflMask = (matId == 40u || isWaterDroplet) ? 0x01u : 0x03u;
         reflHit = traceScene(i.world + nGeom * 0.018, reflect(-v, n), 180.0, reflMask, 0.004 + rough * rough * 0.14, reflected);
         refrHit = traceScene(i.world - nGeom * 0.018, refrDir,        180.0, 0x01u,    (matId == 40u) ? 0.002 : 0.010, transmitted);
+        // Close-up thick dielectric internal reflection + spectral dispersion sparkle (Glass Orchid, vase, amber bottle, droplets)
+        if (matId != 40u && dist < 8.0) {
+            float3 tirDir = reflect(refrDir, -n);
+            if (accumulating() || isWaterDroplet || matId == 35u || (inBath && matId == 3u)) {
+                float3 internalCol = transmitted;
+                if (traceScene(i.world + nGeom * 0.012, tirDir, 24.0, 0x01u, 0.018, internalCol)) {
+                    transmitted = lerp(transmitted, internalCol * float3(1.06, 1.00, 0.94), 0.24 * (1.0 - ndotv));
+                }
+                ++queries;
+            }
+        }
         hasTracedReflection = reflHit;
         queries += 2u;
     } else {
@@ -786,12 +952,20 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             } else {
                 float spread = 0.004 + rough * rough * 0.22;
                 float3 rDir0 = reflect(-v, n);
+                if (accumulating() && rough > 0.025) {
+                    float3 jB1, jB2;
+                    buildOrthonormalBasis(rDir0, jB1, jB2);
+                    float ggxR = rough * rough * sqrt(accumJit / max(1.0 - accumJit * 0.85, 0.05)) * 0.55;
+                    float3 jDir = norm(rDir0 + (jB1 * cos(rotPhi) + jB2 * sin(rotPhi)) * min(ggxR, 0.45));
+                    if (dot(jDir, nGeom) > 0.03) rDir0 = jDir;
+                }
                 reflHit = traceScene(i.world + nGeom * 0.016, rDir0, 180.0, 0x03u, spread, reflected);
                 hasTracedReflection = reflHit;
                 ++queries;
 
                 // 2-ray satin GGX lobe filter for close brushed nickel, bronze & honed Calacatta marble in bathroom
-                if (inBath && dist < 4.5 && (matId == 23u || matId == 31u || matId == 38u)) {
+                // (During NRD temporal accumulation after frame 1, rDir0 is already GGX-jittered every frame!)
+                if (inBath && dist < 4.5 && !(accumulating() && accumFrame >= 2u) && (matId == 23u || matId == 31u || matId == 38u)) {
                     float3 rB1, rB2;
                     buildOrthonormalBasis(rDir0, rB1, rB2);
                     float lobeR = clamp(rough * 0.32, 0.015, 0.095);
@@ -814,34 +988,44 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         if (canReceiveSun && dist < 85.0) {
             float3 sT1, sT2;
             buildOrthonormalBasis(sunDir, sT1, sT2);
-            uint maxShadowSamples = isDawnFinale() ? 6u : ((dist < 24.0) ? 4u : 1u);
+            uint maxShadowSamples = isDawnFinale()
+                ? 6u
+                : (isGrandTutti() ? ((dist < 6.0) ? 2u : 1u) : ((dist < 9.5) ? 4u : ((dist < 22.0) ? 2u : 1u)));
             float sunRadius = isDawnFinale() ? 0.021 : 0.015;
             float maxShadowDist = isDawnFinale() ? 18.0 : 28.0;
             float3 shOrigin = i.world + nGeom * 0.015 + ((matId == 29u || matId == 36u) ? (sunDir * 0.022) : 0.0.xxx);
 
-            if (maxShadowSamples == 1u) {
+            if (accumulating() && accumFrame >= 2u) {
+                // Unbiased 1-SPP stochastic disk sun shadow per temporal NRD accumulation frame
+                float r = sqrt(accumJit) * sunRadius;
+                float3 jitDir = norm(sunDir + (sT1 * cos(rotPhi) + sT2 * sin(rotPhi)) * r);
+                bool occ = traceShadow(shOrigin, jitDir, maxShadowDist);
+                if (occ) ++shadowHits;
+                sunVis = occ ? 0.0 : 1.0;
+                ++queries;
+            } else if (maxShadowSamples == 1u) {
                 bool occ = traceShadow(shOrigin, sunDir, maxShadowDist);
                 if (occ) ++shadowHits;
                 sunVis = occ ? 0.0 : 1.0;
                 ++queries;
             } else {
                 float rProbe = 0.72 * sunRadius;
-                float th0 = rotPhi * 0.30;
+                float th0 = accumulating() ? rotPhi : rotPhi * 0.30;
                 bool occ0 = traceShadow(shOrigin, norm(sunDir + (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist);
                 bool occ1 = traceShadow(shOrigin, norm(sunDir - (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist);
                 if (occ0) ++shadowHits;
                 if (occ1) ++shadowHits;
                 queries += 2u;
 
-                bool needPenumbraRefine = (occ0 != occ1) || (dist < 1.35) || (matId == 29u || matId == 36u);
+                bool needPenumbraRefine = (occ0 != occ1) || (!exploreMode() && dist < 1.35) || (matId == 29u || matId == 36u);
                 if (!needPenumbraRefine) {
                     sunVis = occ0 ? 0.0 : 1.0;
                 } else {
                     float visAcc = (occ0 ? 0.0 : 1.0) + (occ1 ? 0.0 : 1.0);
                     [loop]
                     for (uint s = 2u; s < maxShadowSamples; ++s) {
-                        float r = sqrt(((float)s + 0.5) / (float)maxShadowSamples) * sunRadius;
-                        float theta = (float)s * 2.3999632 + rotPhi * 0.30;
+                        float r = sqrt(((float)s + (accumulating() ? accumJit : 0.5)) / (float)maxShadowSamples) * sunRadius;
+                        float theta = (float)s * 2.3999632 + (accumulating() ? rotPhi : rotPhi * 0.30);
                         float3 jitDir = norm(sunDir + (sT1 * cos(theta) + sT2 * sin(theta)) * r);
                         bool occ = traceShadow(shOrigin, jitDir, maxShadowDist);
                         if (occ) ++shadowHits;
@@ -853,19 +1037,20 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             }
         }
 
-        // Bathroom: 4-Ray Cosine-Weighted DXR Hemisphere GI + Multi-Scale Contact AO (4mm crevices -> 3.85m window portal!)
+        // Bathroom: Cosine-Weighted DXR Hemisphere GI + Multi-Scale Contact AO (4mm crevices -> 3.85m window portal!)
         if (inBath && matId != 34u) {
             float3 gB1, gB2;
             buildOrthonormalBasis(n, gB1, gB2);
             float3 giAcc = (float3)0.0;
             float occAcc = 0.0;
             float3 giOrigin = i.world + nGeom * 0.010;
-            [unroll]
-            for (uint g = 0u; g < 4u; ++g) {
-                float uRad = ((float)g + 0.5) / 4.0;
+            uint giSamples = (accumulating() && accumFrame >= 2u) ? 2u : 4u;
+            [loop]
+            for (uint g = 0u; g < giSamples; ++g) {
+                float uRad = ((float)g + accumJit) / (float)giSamples;
                 float sinTheta = sqrt(uRad * 0.86);
                 float cosTheta = sqrt(max(1.0 - sinTheta * sinTheta, 0.04));
-                float phi = (float)g * 2.3999632 + rotPhi * 0.18;
+                float phi = (float)g * 2.3999632 + (accumulating() ? rotPhi : rotPhi * 0.18);
                 float3 giDir = norm(n * cosTheta + (gB1 * cos(phi) + gB2 * sin(phi)) * sinTheta);
                 // Prevent normal-mapped bumps from shooting hemisphere rays below the geometric surface
                 if (dot(giDir, nGeom) < 0.06) {
@@ -879,24 +1064,70 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 occAcc += sampleOcc;
                 ++queries;
             }
-            tracedBathGi = giAcc * 0.25;
-            rtContactAO = clamp(1.0 - 0.88 * (occAcc * 0.25), 0.06, 1.0);
+            float invGi = 1.0 / (float)giSamples;
+            tracedBathGi = giAcc * invGi;
+            rtContactAO = clamp(1.0 - 0.88 * (occAcc * invGi), 0.06, 1.0);
             hasTracedBathGi = true;
-        } else if (dist < 16.0 && matId != 34u && matId != 21u && matId != 17u) {
-            // Exterior / Sanctuary / Cathedral: 3-ray Contact Ambient Occlusion
+        } else if (dist < (isGrandTutti() ? 8.5 : 13.5) && matId != 34u && matId != 21u && matId != 17u) {
+            // Exterior / Sanctuary / Cathedral: distance-adaptive 3-ray close / 1-ray mid Contact AO
             float3 aB1, aB2;
             buildOrthonormalBasis(nGeom, aB1, aB2);
+            uint aoCount = isGrandTutti() ? 1u : ((dist < 7.2 || accumulating()) ? 3u : 1u);
             float occSum = 0.0;
-            [unroll]
-            for (uint a = 0u; a < 3u; ++a) {
-                float ang = (float)a * (kTwoPi / 3.0) + rotPhi * 0.28;
+            [loop]
+            for (uint a = 0u; a < aoCount; ++a) {
+                float ang = (float)a * (kTwoPi / 3.0) + (accumulating() ? rotPhi : rotPhi * 0.28);
                 float3 aoDir = norm(nGeom * 0.72 + (aB1 * cos(ang) + aB2 * sin(ang)) * 0.694);
                 float wOcc = traceAmbientRay(i.world + nGeom * 0.010, aoDir, 0.65);
                 if (wOcc > 0.05) ++aoHits;
                 occSum += wOcc;
                 ++queries;
             }
-            rtContactAO = 1.0 - 0.62 * (occSum / 3.0);
+            rtContactAO = 1.0 - 0.62 * (occSum / (float)aoCount);
+        }
+
+        // RTXDI ReSTIR Many-Light Reservoir Sampling (4 physical practical emitters -> 1 unbiased DXR shadow ray)
+        if ((inBath || (exploreMode() && dist < 10.5)) && matId != 34u && matId != 21u && matId != 17u && !lampsOff()) {
+            RTXDI_DIReservoir res = RTXDI_EmptyDIReservoir();
+            [unroll]
+            for (uint li = 0u; li < 4u; ++li) {
+                float3 lPos, lInt;
+                float lRad;
+                getRtxdiEmitter(li, i.world, inBath, lPos, lInt, lRad);
+                float3 toL = lPos - i.world;
+                float d2 = dot(toL, toL);
+                float dL = sqrt(max(d2, 1e-4));
+                if (dL < (inBath ? 4.8 : 9.5)) {
+                    float3 Ldir = toL / dL;
+                    float atten = 1.0 / (1.0 + (inBath ? 1.85 : 0.45) * d2);
+                    float3 contrib = evalGgxDirect(n, v, Ldir, base, max(rough, 0.14), metallic, clearcoat * 0.5) * lInt * atten;
+                    float pHat = dot(contrib, float3(0.2126, 0.7152, 0.0722));
+                    float uStream = frac(ign + (float)li * 0.3819660 + accumJit * 0.6180340);
+                    RTXDI_StreamLight(res, li, pHat, uStream);
+                }
+            }
+            if (res.valid != 0u && res.targetPdf > 1e-5) {
+                float3 winPos, winInt;
+                float winRad;
+                getRtxdiEmitter(res.lightIndex, i.world, inBath, winPos, winInt, winRad);
+                float3 lB1, lB2;
+                float3 rawVec = winPos - i.world;
+                float rawDist = length(rawVec);
+                float3 lDir = rawVec / max(rawDist, 1e-3);
+                buildOrthonormalBasis(lDir, lB1, lB2);
+                float3 jitterPos = winPos + (lB1 * cos(rotPhi) + lB2 * sin(rotPhi)) * (winRad * sqrt(accumJit));
+                float3 jVec = jitterPos - i.world;
+                float jDist = length(jVec);
+                float3 jDir = jVec / max(jDist, 1e-3);
+                bool lOcc = (jDist > 0.08) ? traceShadow(i.world + nGeom * 0.014, jDir, max(jDist - 0.05, 0.02)) : false;
+                ++queries;
+                if (!lOcc) {
+                    float atten = 1.0 / (1.0 + (inBath ? 1.85 : 0.45) * jDist * jDist);
+                    float3 fullEval = evalGgxDirect(n, v, jDir, base, max(rough, 0.14), metallic, clearcoat * 0.5) * winInt * atten;
+                    float risW = min(res.weightSum / max(res.targetPdf, 1e-5), 4.0);
+                    restirDirect = fullEval * risW * (inBath ? 0.52 : 0.38);
+                }
+            }
         }
     }
 
@@ -915,7 +1146,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 neural = tensorField.SampleLevel(linearClamp, frac(i.world.xz * 0.035), 0.0).rgb;
 
     // 1. Direct Sun / Key GGX + Clearcoat Lighting
-    float3 directLight = evalGgxDirect(n, v, sunDir, base, rough, metallic, clearcoat) * sunRad * sunVis;
+    float3 directLight = evalGgxDirect(n, v, sunDir, base, rough, metallic, clearcoat) * sunRad * sunVis + restirDirect;
 
     // 2. Subsurface / Botanical Leaf Translucency (backlit Calathea veins, Fern fronds, Succulent, Enamel, Towel)
     if (translucency > 0.02) {
@@ -936,7 +1167,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float winDist = length(toWin);
         float3 winL = toWin / max(winDist, 0.22);
         float winAtten = 1.0 / (1.0 + 0.22 * winDist * winDist);
-        float3 winSkyIrr = float3(0.68, 0.76, 0.90) * smoothstep(336.0, 345.0, time) * winAtten * rtContactAO;
+        float3 winSkyIrr = float3(0.68, 0.76, 0.90) * timeRamp(336.0, 345.0) * winAtten * rtContactAO;
         directLight += evalGgxDirect(n, v, winL, base, max(rough, 0.14), metallic, clearcoat * 0.5) * winSkyIrr * (hasTracedBathGi ? 0.55 : 1.15);
 
         // Subtle warm 2900K backlit mirror halo at (-0.18, 4.39, 6.53)
@@ -945,7 +1176,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         if (dmh < 2.1) {
             float3 mhL = toMirrorHalo / max(dmh, 0.12);
             float mhFall = 1.0 / (1.0 + 4.2 * dmh * dmh);
-            directLight += evalGgxDirect(n, v, mhL, base, max(rough, 0.22), metallic, 0.0) * float3(0.48, 0.34, 0.20) * mhFall * combinedAO;
+            directLight += evalGgxDirect(n, v, mhL, base, max(rough, 0.22), metallic, 0.0) * float3(0.48, 0.34, 0.20) * mhFall * combinedAO * (lampsOff() ? 0.0 : 1.0);
         }
     } else {
         // Outdoor / Sanctuary / Cathedral secondary rim fill
@@ -966,7 +1197,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             // 82% true 6-ray DXR hemisphere GI + 18% smooth prefiltered ambient stabilizer
             diffIrr = tracedBathGi * 0.84 + diffIrr * 0.16 * 0.36;
         } else {
-            float sunRoomGlow = smoothstep(336.5, 346.0, time);
+            float sunRoomGlow = timeRamp(336.5, 346.0);
             float3 warmBounce = float3(0.18, 0.15, 0.12) * (0.55 + 0.45 * saturate(-n.y * 0.4 + 0.6));
             diffIrr = diffIrr * 0.42 + warmBounce * sunRoomGlow;
         }
@@ -1185,3 +1416,27 @@ Targets PSSky(SkyOut i) {
     o.distance = 1000.0;
     return o;
 }
+
+
+#if defined(BOO_ACCUM)
+// Explore-mode progressive accumulation: full-screen blend of the current HDR frame into an
+// RGBA32F history (blend factor = 1/(n+1)) and resolve back into the HDR scene target.
+Texture2D<float4> accumSrc : register(t0, space1);
+
+float4 VSAccum(uint id : SV_VertexID) : SV_Position {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+
+float4 PSAccumBlend(float4 pos : SV_Position) : SV_Target0 {
+    float4 c = accumSrc.Load(int3(pos.xy, 0));
+    // Luminance firefly clamp keeps rare specular outliers from sparkling in the converged image
+    float lum = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    c.rgb *= (lum > 48.0) ? (48.0 / lum) : 1.0;
+    return c;
+}
+
+float4 PSAccumResolve(float4 pos : SV_Position) : SV_Target0 {
+    return accumSrc.Load(int3(pos.xy, 0));
+}
+#endif

@@ -110,7 +110,30 @@ struct SceneCue {
     bool allowDirectorModulation = true;
 };
 
+// Live "Explore" mode (NVIDIA-demo style): free-fly camera, interactive sun/time-of-day and
+// practical-lamp control, plus progressive path-traced accumulation while the view is still.
+// Default-constructed (inactive) values leave the deterministic film output untouched.
+struct InteractiveView {
+    bool exploreActive = false;          // Active interactive Explore session
+    float blendWeight = 0.0f;            // [0..1] camera blend (1=Explore, (0,1)=smooth cubic return to film)
+    float eye[3]{0.0f, 0.0f, 0.0f};
+    float target[3]{0.0f, 0.0f, 1.0f};
+    float up[3]{0.0f, 1.0f, 0.0f};
+    float fovYRadians = 0.92f;
+    bool sunOverride = false;            // Use sunDir/sunScale instead of the scripted sun
+    float sunDir[3]{0.80f, 0.34f, -0.49f};
+    float sunScale = 1.0f;
+    float sunElevation01 = 0.52f;        // [0..1] UI slider normalized elevation (night -> dawn -> day)
+    float sunAzimuth01 = 0.42f;          // [0..1] UI slider normalized azimuth
+    bool lampsOff = false;               // Switch off practical lamps (sconce / mirror halo / RTXDI emitters)
+    bool accumulate = false;             // Progressive temporal accumulation + sub-pixel jitter
+    uint32_t accumFrame = 0;             // 0 = reset history this frame
+    float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
+    uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark
+};
+
 struct FrameContext {
+    InteractiveView interactive{};
     uint64_t presentationFrame = 0;
     int64_t samplePosition = 0;
     int32_t sampleRate = 48000;

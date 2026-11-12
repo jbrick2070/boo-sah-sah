@@ -1,8 +1,8 @@
 # User & Stage Operator Guide — BOO SAH SAH: The Glass Orchid Protocol
 
-**BOO SAH SAH — The Glass Orchid Protocol** is a six-minute (`360.000 s`), noninteractive, nonviolent Taiwanese-inspired spy-noir demoscene film and honest hardware-orchestra showcase for Windows 11 x64.
+**BOO SAH SAH — The Glass Orchid Protocol** is a six-minute (`360.000 s`), nonviolent Taiwanese-inspired spy-noir demoscene film and honest hardware-orchestra showcase for Windows 11 x64, featuring an optional **Interactive NVIDIA-RTX Showcase & Explore Studio** mode.
 
-There is no gameplay, score, combat, free camera, or interactive task—sit back and watch, switch between **Family** and **Midnight** editions, inspect each hardware pillar live in side-by-side A/B split-screen, or route a clean 16:9 feed into OBS / Resolume via Spout2.
+There is no gameplay, score, or combat: by default, sit back and watch the deterministic 360-second film, switch between **Family** and **Midnight** editions, inspect each hardware pillar live in side-by-side A/B split-screen, or route a clean 16:9 feed into OBS / Resolume via Spout2. At any moment, press **`F`** (or drag with the right mouse button) to step inside any scene with a 6-DOF free camera, jump to curated macro presets (`F2`–`F7`), orbit the sun and toggle RTXDI practical sconces live, drag the RTX ON / Raster OFF split curtain, and watch **NVIDIA NRD v4.18.0** converge to 4096-SPP reference path-traced quality.
 
 ---
 
@@ -39,6 +39,9 @@ Double-click `boo_sah_sah.exe` or launch from PowerShell:
 
 # Clean stage / screening mode (HUD hidden, borderless fullscreen, Spout2 clean output enabled)
 .\boo_sah_sah.exe --fullscreen --hide-overlay --enable-spout --spout-name BooSahSah_Clean
+
+# Launch directly into Interactive RTX Explore Studio on Hero Macro Preset 2 (CNC Faucet & Porcelain Basin)
+.\boo_sah_sah.exe --preset showcase --explore-preset 2
 ```
 
 ### Selecting Standalone Hardware Solos & Historical Cues
@@ -81,6 +84,23 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `F11` / `Alt+Enter` | Toggle borderless fullscreen |
 | `F12` | Save clean 8-bit `.bmp` frame + `.json` timing metadata into `diagnostics/captures/` |
 | `Esc` | Clean shutdown |
+
+### Interactive NVIDIA-RTX Explore & Lighting Studio Controls (Optional)
+
+When Explore mode is inactive, playback remains 100% deterministic and identical to the canonical 360-second film.
+
+| Input | Function |
+|---|---|
+| `F` / Right-Mouse Drag / `F:EXPLOR` Pill | Toggle **6-DOF Interactive Explore Camera** (smooth `0.65 s` cubic blend back to live film camera on exit) |
+| `W` `A` `S` `D` + `Q` / `E` (in Explore) | Fly Forward / Left / Back / Right + Down / Up (`Shift` = 3.5x sprint, `Ctrl`/`Alt` = 0.22x macro precision) |
+| Mouse Wheel / Gamepad `LT` `RT` | Smooth optical FOV zoom (`14 deg` macro telephoto to `85 deg` wide angle) |
+| XInput Gamepad (`Y` button + Sticks) | `Y` toggles Explore; Left Stick moves, Right Stick looks, `LB`/`RB` vertical, `D-Pad Left/Right` cycles Hero Presets |
+| `F2` – `F7` (or Studio Bar `[1]..[6]`) | Jump to curated **Hero Showcase Presets** (`1` Dawn Bathroom Wide, `2` CNC Faucet & Aerator Droplet Macro, `3` Backlit `Calathea` & Keepsake Orchid, `4` Hero Glass Orchid Sanctuary, `5` Enamel Cathedral & Mirrors, `6` Botanical Sanctuary & Brass Iris) |
+| `Alt` + Left-Mouse Drag / `[` `]` / `SUN` `AZM` Sliders | Orbit live **Sun Elevation (Time-of-Day)** and **Sun Azimuth** (`Golden Dawn` -> `High Day` -> `Midnight`) |
+| `J` (or Studio Bar `LAMP` button) | Toggle **RTXDI ReSTIR Practical Sconce & Mirror Emitters** ON / OFF |
+| `H` (or Studio Bar `WIPE` + LMB Drag) | Toggle & drag the live **RTX ON / Raster OFF Split-Screen Curtain** anywhere from `5%` to `95%` without resetting converged `SPP` |
+| `F8` (or Studio Bar `RST` button) | Reset interactive Sun & Lamp overrides back to authored scene lighting |
+| Stillness Auto-Convergence (`NRD` / `ACC`) | Whenever camera and lighting hold still in Explore mode, Halton sub-pixel jitter + dynamically loaded **NVIDIA NRD v4.18.0 (`REFERENCE`)** progressively accumulate stochastic GGX reflections, 2nd-bounce GI, ReSTIR DI shadows, and internal glass refraction up to **`4096 SPP`** |
 
 Edition changes crossfade the score's voices. The seven acts now include dedicated enamel cathedral, microbial sanctuary, and dawn alcove geometry. Act cards pair Chinese numerals 一–七 with Roman numbers; the original title lettering also includes 台北.
 

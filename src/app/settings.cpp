@@ -277,6 +277,12 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.motionScale = 0.35f;
         } else if (a == "--legacy-m0-visual") {
             ioSettings.legacyM0Visual = true;
+        } else if (a == "--explore") {
+            ioSettings.startInExploreMode = true;
+        } else if (a == "--explore-preset") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.startInExploreMode = true;
+            ioSettings.initialExplorePreset = static_cast<uint32_t>(std::clamp(std::atoi(v->c_str()), 1, 6));
         } else {
             if (outError) *outError = "Unrecognized command-line argument: " + a;
             return false;
@@ -300,6 +306,8 @@ std::string buildCliHelpText() {
         "  --captions / --no-captions  Toggle HUD lower-third captions (default: on)\n"
         "  --reduced-flash             Photosensitivity-safe zero-pulse lighting envelope\n"
         "  --reduced-motion            Dampen orbital camera excursion (motion_scale=0.35)\n"
+        "  --explore                   Start in interactive RTX Explore studio mode\n"
+        "  --explore-preset <1..6>     Start at hero camera preset (1=Dawn Wide, 2=Faucet Macro, 3=Calathea, 4=Orchid, 5=Cathedral, 6=Sanctuary)\n"
         "  --legacy-m0-visual          Force Milestone M0 test visual renderer\n"
         "  --loop                      Loop timeline playback\n"
         "  --mute                      Start audio muted\n"
@@ -335,7 +343,9 @@ std::string buildCliHelpText() {
         "  --headless-probe            Probe capabilities, validate cues, and exit\n"
         "  --export-diagnostics <json> Write local Hardware Orchestra diagnostics JSON\n"
         "  --log-file <path>           Write structured log file\n\n"
-        "Keyboard Transport (Noninteractive Demoscene Controls):\n"
+        "Keyboard & Interactive RTX Showcase Controls:\n"
+        "  F / RMB-Drag: Toggle Interactive Explore 6-DOF Camera (WASDQE + Mouse + Wheel FOV + Gamepad)\n"
+        "  F2-F7: Hero Macro Presets | Alt+LMB Drag / [ ]: Live Sun Time-of-Day | J: Lamps | H: Draggable RTX Split | F8: Reset\n"
         "  ,/.: Paused frame step | Left/Right: Seek 2s (Shift: 10s) | G: Reveal pre-roll\n"
         "  -/=: Volume | F12: Clean BMP + JSON | Tab: Full/Compact/A-B/Off | K: Captions\n"
         "  Space: Play/Pause | R: Restart | N/P: Next/Prev Act | L: Loop | M: Mute\n"

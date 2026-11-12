@@ -375,3 +375,227 @@ bool testHeroVideoCaptureGate() {
     BOO_CHECK(d3d.debugErrorCount() == 0);
     return true;
 }
+
+bool testInteractiveShowcaseCaptureGate() {
+    using namespace boo;
+    CaptureComScope com;
+    BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
+    const std::filesystem::path outDir = (gFilmCaptureDirectory == std::filesystem::path("build/film_captures"))
+        ? std::filesystem::path("build/interactive_captures")
+        : gFilmCaptureDirectory;
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    BOO_CHECK(!ec);
+
+    D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
+
+    CueSheet cue;
+    ValidationReport validation;
+    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath("assets/cues/film_360s.json"), cue, validation) && validation.valid);
+    const auto mode = resolveShowVisualMode(cue);
+    M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, mode);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+    fx.setDisableRt(false);
+
+    const int64_t bathroomSample = 346LL * 48000LL;
+    auto baseCtx = makeFilmGateContext(cue, bathroomSample, Edition::Family);
+
+    HudTelemetrySnapshot hud{};
+    hud.filmTimeSeconds = 346.0;
+    hud.durationSeconds = 360.0;
+    hud.fps = 60.0f;
+    hud.gpuFrameMs = 13.8f;
+    hud.actIndex = baseCtx.actIndex;
+    hud.totalActs = static_cast<uint32_t>(cue.scenes.size());
+    hud.edition = Edition::Family;
+    hud.canvasWidth = 2560;
+    hud.canvasHeight = 1440;
+    hud.swapchainBits = 10;
+
+    CaptureContactSheet sheet;
+    JsonValue report(JsonValue::Object{});
+    report["schema"] = 1;
+    report["width"] = 2560;
+    report["height"] = 1440;
+    report["adapter"] = d3d.adapterName();
+    report["frames"] = JsonValue::Array{};
+
+    auto renderConvergedView = [&](FrameContext ctx, uint32_t targetSpp, std::vector<uint8_t>& outClean, uint32_t& outW, uint32_t& outH) -> bool {
+        fx.resetTo(ctx.filmTimeSeconds);
+        for (uint32_t s = 0; s < targetSpp; ++s) {
+            ctx.presentationFrame = s;
+            ctx.interactive.accumulate = (targetSpp > 1u);
+            ctx.interactive.accumFrame = s;
+            if (s + 1u == targetSpp) {
+                BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, outClean, outW, outH, &error));
+            } else {
+                // Pump accumulation without slow CPU readback on intermediate samples
+                std::vector<uint8_t> tmp;
+                BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, tmp, outW, outH, &error));
+            }
+        }
+        uint64_t nonFinite = 0;
+        BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &error) && nonFinite == 0);
+        return true;
+    };
+
+    auto setSunSpherical = [](InteractiveView& iv, float elev01, float azim01) {
+        iv.sunOverride = true;
+        iv.sunElevation01 = elev01;
+        iv.sunAzimuth01 = azim01;
+        const float elevRad = (-0.28f + elev01 * 1.48f);
+        const float azimRad = (azim01 * 6.2831853f) - 0.58f;
+        const float ce = std::cos(elevRad);
+        iv.sunDir[0] = ce * std::cos(azimRad);
+        iv.sunDir[1] = std::sin(elevRad);
+        iv.sunDir[2] = ce * std::sin(azimRad);
+        iv.sunScale = 1.0f;
+    };
+
+    // 1. Preset 2: CNC Faucet, Aerator Droplet & Porcelain Basin Macro (1 SPP vs 64 SPP NRD Reference PT + Studio Bar)
+    {
+        FrameContext ctx = baseCtx;
+        ctx.interactive.exploreActive = true;
+        ctx.interactive.blendWeight = 1.0f;
+        ctx.interactive.activePreset = 2u;
+        ctx.interactive.eye[0] = 0.05f;    ctx.interactive.eye[1] = 3.83f;    ctx.interactive.eye[2] = 5.76f;
+        ctx.interactive.target[0] = -0.18f; ctx.interactive.target[1] = 3.67f; ctx.interactive.target[2] = 6.34f;
+        ctx.interactive.fovYRadians = 0.44f;
+
+        std::vector<uint8_t> spp1, spp64, studioPres;
+        uint32_t w = 0, h = 0;
+        BOO_CHECK(renderConvergedView(ctx, 1u, spp1, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_preset2_faucet_1spp_clean.png", spp1, w, h));
+
+        BOO_CHECK(renderConvergedView(ctx, 64u, spp64, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_preset2_faucet_64spp_clean.png", spp64, w, h));
+        sheet.add(spp64, w, h, "Preset [2] Faucet & Porcelain Macro | 64 SPP NRD PT");
+
+        ctx.showOverlay = true;
+        ctx.hudMode = 1u;
+        ctx.interactive.accumulate = true;
+        ctx.interactive.accumFrame = 63u;
+        ctx.presentationFrame = 63u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(ctx, hud, 2560, 1440, studioPres, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_preset2_faucet_64spp_studio.png", studioPres, 2560, 1440));
+        sheet.add(studioPres, 2560, 1440, "Preset [2] with Pass-4 RTX Showcase Studio Bar");
+        std::cout << "Captured Preset 2 Faucet Macro (1 SPP + 64 SPP NRD + Studio Bar)\n" << std::flush;
+    }
+
+    // 2. Preset 3: Backlit Calathea Veins & Keepsake Glass Orchid (64 SPP NRD Reference PT)
+    {
+        FrameContext ctx = baseCtx;
+        ctx.interactive.exploreActive = true;
+        ctx.interactive.blendWeight = 1.0f;
+        ctx.interactive.activePreset = 3u;
+        ctx.interactive.eye[0] = -0.16f;   ctx.interactive.eye[1] = 3.88f;   ctx.interactive.eye[2] = 5.62f;
+        ctx.interactive.target[0] = -0.58f; ctx.interactive.target[1] = 3.82f; ctx.interactive.target[2] = 6.26f;
+        ctx.interactive.fovYRadians = 0.48f;
+
+        std::vector<uint8_t> spp64;
+        uint32_t w = 0, h = 0;
+        BOO_CHECK(renderConvergedView(ctx, 64u, spp64, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_preset3_calathea_64spp_clean.png", spp64, w, h));
+        sheet.add(spp64, w, h, "Preset [3] Calathea Subsurface Veins | 64 SPP NRD PT");
+        std::cout << "Captured Preset 3 Calathea Subsurface Macro (64 SPP NRD)\n" << std::flush;
+    }
+
+    // 3. Preset 4: Keepsake Glass Orchid & Celadon Vase Refraction Macro (64 SPP NRD Reference PT)
+    {
+        FrameContext ctx = baseCtx;
+        ctx.interactive.exploreActive = true;
+        ctx.interactive.blendWeight = 1.0f;
+        ctx.interactive.activePreset = 4u;
+        ctx.interactive.eye[0] = 0.14f;    ctx.interactive.eye[1] = 3.84f;    ctx.interactive.eye[2] = 5.72f;
+        ctx.interactive.target[0] = 0.402f; ctx.interactive.target[1] = 3.75f; ctx.interactive.target[2] = 6.235f;
+        ctx.interactive.fovYRadians = 0.44f;
+
+        std::vector<uint8_t> spp64;
+        uint32_t w = 0, h = 0;
+        BOO_CHECK(renderConvergedView(ctx, 64u, spp64, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_preset4_orchid_vase_64spp_clean.png", spp64, w, h));
+        sheet.add(spp64, w, h, "Preset [4] Keepsake Glass Orchid & Celadon Vase | 64 SPP NRD");
+        std::cout << "Captured Preset 4 Keepsake Glass Orchid Macro (64 SPP NRD)\n" << std::flush;
+    }
+
+    // 4. Interactive Sun Time-of-Day Sweep & RTXDI ReSTIR Practical Lamps in Dawn Bathroom (Preset 1 Wide)
+    {
+        FrameContext wide = baseCtx;
+        wide.interactive.exploreActive = true;
+        wide.interactive.blendWeight = 1.0f;
+        wide.interactive.activePreset = 1u;
+        wide.interactive.eye[0] = 0.34f;    wide.interactive.eye[1] = 4.02f;    wide.interactive.eye[2] = 5.12f;
+        wide.interactive.target[0] = -0.18f; wide.interactive.target[1] = 3.88f; wide.interactive.target[2] = 6.32f;
+        wide.interactive.fovYRadians = 0.56f;
+
+        std::vector<uint8_t> golden32, highDay32, nightLampsOn32, nightLampsOff32;
+        uint32_t w = 0, h = 0;
+
+        FrameContext golden = wide;
+        setSunSpherical(golden.interactive, 0.31f, 0.14f);
+        BOO_CHECK(renderConvergedView(golden, 32u, golden32, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_bathroom_golden_dawn_32spp.png", golden32, w, h));
+        sheet.add(golden32, w, h, "Interactive Sun: Low Golden Dawn | 32 SPP NRD");
+
+        FrameContext highDay = wide;
+        setSunSpherical(highDay.interactive, 0.72f, 0.22f);
+        BOO_CHECK(renderConvergedView(highDay, 32u, highDay32, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_bathroom_high_day_32spp.png", highDay32, w, h));
+        sheet.add(highDay32, w, h, "Interactive Sun: Crisp High Day | 32 SPP NRD");
+
+        FrameContext nightOn = wide;
+        setSunSpherical(nightOn.interactive, 0.04f, 0.14f);
+        nightOn.interactive.lampsOff = false;
+        BOO_CHECK(renderConvergedView(nightOn, 32u, nightLampsOn32, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_bathroom_midnight_rtxdi_lamps_on_32spp.png", nightLampsOn32, w, h));
+        sheet.add(nightLampsOn32, w, h, "Midnight + RTXDI ReSTIR Practical Sconces ON | 32 SPP");
+
+        FrameContext nightOff = nightOn;
+        nightOff.interactive.lampsOff = true;
+        BOO_CHECK(renderConvergedView(nightOff, 32u, nightLampsOff32, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_bathroom_midnight_lamps_off_32spp.png", nightLampsOff32, w, h));
+        sheet.add(nightLampsOff32, w, h, "Midnight + Practical Lamps OFF [J] | 32 SPP");
+        std::cout << "Captured Interactive Sun & RTXDI Practical Lamp sweep (4 lighting states)\n" << std::flush;
+    }
+
+    // 5. Draggable RTX ON / Raster OFF Split-Screen Wipe across Bathroom Mirror & Vanity (abSplitRatio = 0.42)
+    {
+        FrameContext wipeCtx = baseCtx;
+        wipeCtx.interactive.exploreActive = true;
+        wipeCtx.interactive.blendWeight = 1.0f;
+        wipeCtx.interactive.activePreset = 1u;
+        wipeCtx.interactive.eye[0] = 0.34f;    wipeCtx.interactive.eye[1] = 4.02f;    wipeCtx.interactive.eye[2] = 5.12f;
+        wipeCtx.interactive.target[0] = -0.18f; wipeCtx.interactive.target[1] = 3.88f; wipeCtx.interactive.target[2] = 6.32f;
+        wipeCtx.interactive.fovYRadians = 0.56f;
+        wipeCtx.interactive.abSplitRatio = 0.42f;
+
+        std::vector<uint8_t> cleanTmp, wipePres;
+        uint32_t w = 0, h = 0;
+        BOO_CHECK(renderConvergedView(wipeCtx, 24u, cleanTmp, w, h));
+        wipeCtx.showOverlay = true;
+        wipeCtx.hudMode = 2u;
+        wipeCtx.interactive.accumulate = true;
+        wipeCtx.interactive.accumFrame = 23u;
+        wipeCtx.presentationFrame = 23u;
+        fx.setAbCompareEngine(AbCompareEngine::RT);
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(wipeCtx, hud, 2560, 1440, wipePres, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_bathroom_rtx_split_wipe_studio.png", wipePres, 2560, 1440));
+        sheet.add(wipePres, 2560, 1440, "Draggable RTX ON | Raster OFF Split Curtain (42%)");
+        std::cout << "Captured Draggable RTX ON / Raster OFF Split-Screen Wipe\n" << std::flush;
+    }
+
+    BOO_CHECK(sheet.save(outDir / "interactive_showcase_montage.png", 2));
+    report["complete"] = true;
+    BOO_CHECK(writeFilmGateJson(outDir / "manifest.json", report));
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    std::cout << "Interactive showcase captures saved to: " << outDir.string() << '\n';
+    return true;
+}

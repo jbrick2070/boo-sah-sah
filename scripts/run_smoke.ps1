@@ -24,8 +24,8 @@ New-Item -ItemType Directory -Force -Path $DiagDir | Out-Null
 Write-Host "`n==> [1/8] Running CTest Unit, Cue Validation, and Hardware Integration Suites" -ForegroundColor Cyan
 Push-Location $BuildDir
 try {
-    # Run unit, cue validation, and main hardware integration suite (excluding heavy 1440p PNG export test, which has its own dedicated gate)
-    ctest -E "BooTrilogyCaptures|BooFilmCaptures|BooFilmStress" --output-on-failure
+    # Run unit, cue validation, and main hardware integration suite (excluding heavy 1440p PNG export tests, which have dedicated gates)
+    ctest -E "BooTrilogyCaptures|BooFilmCaptures|BooInteractiveCaptures|BooFilmStress" --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw "CTest suite reported failures." }
 } finally {
     Pop-Location
@@ -44,7 +44,7 @@ if (-not $DumpbinCmd) {
 $DepsOutput = (& $DumpbinCmd /dependents $ExePath) -join "`n"
 if ($LASTEXITCODE -ne 0) { throw "dumpbin dependency audit failed." }
 Write-Host $DepsOutput
-$ForbiddenImports = @("nvcuda", "cudart", "cublas", "openvino", "nvEncodeAPI", "Spout", "mfreadwrite", "assimp", "gltf", "fbx", "usd")
+$ForbiddenImports = @("nvcuda", "cudart", "cublas", "openvino", "nvEncodeAPI", "Spout", "mfreadwrite", "assimp", "gltf", "fbx", "usd", "NRD", "xinput")
 foreach ($forbidden in $ForbiddenImports) {
     if ($DepsOutput -match $forbidden) {
         throw "Forbidden hard DLL dependency '$forbidden' found in boo_sah_sah.exe import table!"

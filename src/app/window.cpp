@@ -72,19 +72,61 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 self->pushCommandFromWndProc(TransportCommand::ToggleFullscreen);
                 return 0;
             }
+            if (wParam == VK_MENU) return 0; // Keep Alt available as sun-orbit / slow-camera modifier without menu freeze
             break;
         }
+        case WM_SYSKEYUP: {
+            if (wParam == VK_MENU) return 0;
+            break;
+        }
+        case WM_LBUTTONDOWN:
+            self->onMouseButtonFromWndProc(0, true, static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_LBUTTONUP:
+            self->onMouseButtonFromWndProc(0, false, static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_RBUTTONDOWN:
+            self->onMouseButtonFromWndProc(1, true, static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_RBUTTONUP:
+            self->onMouseButtonFromWndProc(1, false, static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_MBUTTONDOWN:
+            self->onMouseButtonFromWndProc(2, true, static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_MOUSEMOVE:
+            self->onMouseMoveFromWndProc(static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)));
+            return 0;
+        case WM_MOUSEWHEEL:
+            self->onMouseWheelFromWndProc(GET_WHEEL_DELTA_WPARAM(wParam));
+            return 0;
+        case WM_KILLFOCUS:
+        case WM_CAPTURECHANGED:
+            self->onFocusLostFromWndProc();
+            break;
         case WM_KEYDOWN: {
             const bool repeat = (lParam & 0x40000000) != 0;
+            const bool inExplore = self->exploreKeyCapture();
             if (!repeat) {
                 switch (wParam) {
                     case VK_LEFT: self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::SeekBackLong : TransportCommand::SeekBack); return 0;
                     case VK_RIGHT: self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::SeekForwardLong : TransportCommand::SeekForward); return 0;
-                    case VK_OEM_COMMA:
-                    case VK_OEM_4: self->pushCommandFromWndProc(TransportCommand::StepBack); return 0;
-                    case VK_OEM_PERIOD:
-                    case VK_OEM_6: self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
+                    case VK_OEM_COMMA: self->pushCommandFromWndProc(TransportCommand::StepBack); return 0;
+                    case VK_OEM_4: if (!inExplore) self->pushCommandFromWndProc(TransportCommand::StepBack); return 0;
+                    case VK_OEM_PERIOD: self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
+                    case VK_OEM_6: if (!inExplore) self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
                     case 'G': self->pushCommandFromWndProc(TransportCommand::RevealPreroll); return 0;
+                    case 'F': self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
+                    case VK_BACK: if (inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
+                    case 'J': self->pushCommandFromWndProc(TransportCommand::TogglePracticalLamps); return 0;
+                    case 'H': self->pushCommandFromWndProc(TransportCommand::ToggleRtxSplitWipe); return 0;
+                    case VK_F2: self->pushCommandFromWndProc(TransportCommand::HeroPreset1); return 0;
+                    case VK_F3: self->pushCommandFromWndProc(TransportCommand::HeroPreset2); return 0;
+                    case VK_F4: self->pushCommandFromWndProc(TransportCommand::HeroPreset3); return 0;
+                    case VK_F5: self->pushCommandFromWndProc(TransportCommand::HeroPreset4); return 0;
+                    case VK_F6: self->pushCommandFromWndProc(TransportCommand::HeroPreset5); return 0;
+                    case VK_F7: self->pushCommandFromWndProc(TransportCommand::HeroPreset6); return 0;
+                    case VK_F8: self->pushCommandFromWndProc(TransportCommand::ResetInteractiveLighting); return 0;
                     case VK_DOWN:
                     case VK_OEM_MINUS: self->pushCommandFromWndProc(TransportCommand::VolumeDown); return 0;
                     case VK_UP:
@@ -98,8 +140,8 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case 'P':   self->pushCommandFromWndProc(TransportCommand::PrevAct); return 0;
                     case 'L':       self->pushCommandFromWndProc(TransportCommand::ToggleLoop); return 0;
                     case 'M':       self->pushCommandFromWndProc(TransportCommand::ToggleMute); return 0;
-                    case 'Q':       self->pushCommandFromWndProc(TransportCommand::CycleQualityPreset); return 0;
-                    case 'E':       self->pushCommandFromWndProc(TransportCommand::ToggleEdition); return 0;
+                    case 'Q':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::CycleQualityPreset); return 0;
+                    case 'E':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleEdition); return 0;
                     case 'K':       self->pushCommandFromWndProc(TransportCommand::ToggleCaptions); return 0;
                     case VK_TAB:
                     case VK_F1:     self->pushCommandFromWndProc(TransportCommand::ToggleOverlay); return 0;
@@ -110,8 +152,10 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case 'U':       self->pushCommandFromWndProc(TransportCommand::ToggleNpuRuntime); return 0;
                     case 'V':       self->pushCommandFromWndProc(TransportCommand::ToggleCodecRuntime); return 0;
                     case 'O':       self->pushCommandFromWndProc(TransportCommand::ToggleSpoutRuntime); return 0;
-                    case 'W':       self->pushCommandFromWndProc(TransportCommand::ToggleCameraRuntime); return 0;
-                    case 'A':       self->pushCommandFromWndProc(TransportCommand::CycleAbCompareEngine); return 0;
+                    case 'W':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleCameraRuntime); return 0;
+                    case 'A':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::CycleAbCompareEngine); return 0;
+                    case 'S':
+                    case 'D':       if (inExplore) return 0; break;
                     case VK_F11:    self->pushCommandFromWndProc(TransportCommand::ToggleFullscreen); return 0;
                     case '1':       self->pushCommandFromWndProc(TransportCommand::SelectModeFull); return 0;
                     case '2':       self->pushCommandFromWndProc(TransportCommand::SelectModeRT); return 0;
@@ -343,6 +387,100 @@ void AppWindow::onResizeFromWndProc(uint32_t w, uint32_t h, bool minimized) {
         clientHeight_ = h;
         resized_ = true;
     }
+}
+
+void AppWindow::onMouseButtonFromWndProc(int button, bool down, int x, int y) {
+    lastMouseX_ = x;
+    lastMouseY_ = y;
+    hasMousePos_ = true;
+    if (button == 0) {
+        if (down && !lmbDown_) lmbJustPressed_ = true;
+        lmbDown_ = down;
+    } else if (button == 1) {
+        if (down && !rmbDown_) rmbJustPressed_ = true;
+        rmbDown_ = down;
+    } else if (button == 2 && down) {
+        mmbJustPressed_ = true;
+    }
+    if (hwnd_) {
+        if (lmbDown_ || rmbDown_) {
+            SetCapture(hwnd_);
+        } else if (GetCapture() == hwnd_) {
+            ReleaseCapture();
+        }
+    }
+}
+
+void AppWindow::onMouseMoveFromWndProc(int x, int y) {
+    if (hasMousePos_) {
+        const float dx = static_cast<float>(x - lastMouseX_);
+        const float dy = static_cast<float>(y - lastMouseY_);
+        if (rmbDown_) {
+            accumRmbDx_ += dx;
+            accumRmbDy_ += dy;
+        }
+        if (lmbDown_) {
+            accumLmbDx_ += dx;
+            accumLmbDy_ += dy;
+        }
+    }
+    lastMouseX_ = x;
+    lastMouseY_ = y;
+    hasMousePos_ = true;
+}
+
+void AppWindow::onMouseWheelFromWndProc(int delta) {
+    accumWheel_ += static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA);
+}
+
+void AppWindow::onFocusLostFromWndProc() noexcept {
+    lmbDown_ = false;
+    rmbDown_ = false;
+}
+
+WindowInputSnapshot AppWindow::consumeInputSnapshot() noexcept {
+    WindowInputSnapshot snap{};
+    snap.mouseX = static_cast<float>(lastMouseX_);
+    snap.mouseY = static_cast<float>(lastMouseY_);
+    snap.dragRmbDx = accumRmbDx_;
+    snap.dragRmbDy = accumRmbDy_;
+    snap.dragLmbDx = accumLmbDx_;
+    snap.dragLmbDy = accumLmbDy_;
+    snap.wheelNotches = accumWheel_;
+    snap.lmbDown = lmbDown_;
+    snap.lmbJustPressed = lmbJustPressed_;
+    snap.rmbDown = rmbDown_;
+    snap.rmbJustPressed = rmbJustPressed_;
+    snap.mmbJustPressed = mmbJustPressed_;
+    snap.hasFocus = (hwnd_ != nullptr) && (GetForegroundWindow() == hwnd_);
+
+    accumRmbDx_ = accumRmbDy_ = 0.0f;
+    accumLmbDx_ = accumLmbDy_ = 0.0f;
+    accumWheel_ = 0.0f;
+    lmbJustPressed_ = false;
+    rmbJustPressed_ = false;
+    mmbJustPressed_ = false;
+
+    if (snap.hasFocus) {
+        auto keyDown = [](int vk) noexcept -> bool {
+            return (GetAsyncKeyState(vk) & 0x8000) != 0;
+        };
+        snap.altDown = keyDown(VK_MENU);
+        snap.shiftDown = keyDown(VK_SHIFT);
+        if (exploreKeyCapture_) {
+            snap.moveForward = (keyDown('W') ? 1.0f : 0.0f) - (keyDown('S') ? 1.0f : 0.0f);
+            snap.moveRight   = (keyDown('D') ? 1.0f : 0.0f) - (keyDown('A') ? 1.0f : 0.0f);
+            snap.moveUp      = ((keyDown('E') || keyDown(VK_PRIOR)) ? 1.0f : 0.0f) -
+                               ((keyDown('Q') || keyDown(VK_NEXT) || keyDown(VK_CONTROL)) ? 1.0f : 0.0f);
+            const float bracketAxis = (keyDown(VK_OEM_6) ? 1.0f : 0.0f) - (keyDown(VK_OEM_4) ? 1.0f : 0.0f);
+            if (snap.shiftDown) {
+                snap.sunElevKey = bracketAxis;
+            } else {
+                snap.sunAzimKey = bracketAxis;
+            }
+        }
+    }
+    return snap;
 }
 
 } // namespace boo

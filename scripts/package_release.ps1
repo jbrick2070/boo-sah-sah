@@ -2,7 +2,8 @@ param(
     [ValidateSet("x64-base-release", "x64-base-debug")]
     [string]$Preset = "x64-base-release",
     [string]$OutRoot = "",
-    [switch]$ExcludeOpenVinoRuntime
+    [switch]$ExcludeOpenVinoRuntime,
+    [switch]$ExcludeNrdRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -106,6 +107,21 @@ if ((-not $ExcludeOpenVinoRuntime) -and (Test-Path $VenvOvDir)) {
     Write-Host "==> Staged compact OpenVINO NPU runtime sidecar into openvino\" -ForegroundColor Cyan
 }
 
+# 5b. Optional NVIDIA Real-Time Denoisers (`nrd\NRD.dll` v4.18.0) dynamic DXIL compute sidecar
+#     Loaded exclusively via LoadLibraryExW + GetProcAddress at runtime (zero static PE import on boo_sah_sah.exe),
+#     enabling progressive NRD REFERENCE accumulation up to 4096 SPP in Interactive Explore Studio mode.
+$NrdDllSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\bin\NRD.dll"
+$NrdLicSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\LICENSE-NVIDIA-NRD.txt"
+if ((-not $ExcludeNrdRuntime) -and (Test-Path $NrdDllSrc)) {
+    $NrdStage = Join-Path $StageDir "nrd"
+    New-Item -ItemType Directory -Force -Path $NrdStage | Out-Null
+    Copy-Item -Force $NrdDllSrc (Join-Path $NrdStage "NRD.dll")
+    if (Test-Path $NrdLicSrc) {
+        Copy-Item -Force $NrdLicSrc (Join-Path $NrdStage "LICENSE-NVIDIA-NRD.txt")
+    }
+    Write-Host "==> Staged dynamic NVIDIA NRD v4.18.0 DXIL sidecar into nrd\" -ForegroundColor Cyan
+}
+
 # 6. Documentation, changelog, and licenses
 Copy-Item -Force (Join-Path $RepoRoot "README.md") (Join-Path $StageDir "README.md")
 Copy-Item -Force (Join-Path $RepoRoot "LICENSES.md") (Join-Path $StageDir "LICENSES.md")
@@ -142,6 +158,9 @@ try {
     $Uninstaller  = Join-Path $VerifyDir "Uninstall-BooSahSah.exe"
     if (-not (Test-Path $InstalledApp) -or -not (Test-Path $Uninstaller)) {
         throw "Installed app or uninstaller missing after silent install!"
+    }
+    if ((-not $ExcludeNrdRuntime) -and (Test-Path $NrdDllSrc) -and -not (Test-Path (Join-Path $VerifyDir "nrd\NRD.dll"))) {
+        throw "Installed nrd\NRD.dll sidecar missing after silent install!"
     }
 
     $Config = Join-Path $VerifyDir 'config\default.toml'

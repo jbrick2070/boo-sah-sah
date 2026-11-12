@@ -1,6 +1,7 @@
 #include "boo/trilogy_renderer.hpp"
 #include "boo/bmesh.hpp"
 #include "boo/btex.hpp"
+#include "boo/nrd_bridge.hpp"
 #include "boo/logging.hpp"
 #include <windows.h>
 #include <d3d12.h>
@@ -30,7 +31,9 @@ void transition(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r,D3D12_RESOURCE_
 }
 void uav(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r) {D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;b.UAV.pResource=r;cmd->ResourceBarrier(1,&b);}
 struct DrawConstants {float rows[12]{};uint32_t first=0,mat=0,part=0,pad=0;};
-struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;float moodBloom,moodLight,moodCut,pad;};
+struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;float moodBloom,moodLight,moodCut,pad;float sunDir[3];float sunScale;uint32_t accumFrame,interFlags;float jitter[2];};
+    static_assert(sizeof(SceneConstants)==36*4,"SceneConstants must match m2_mesh.hlsl cbuffer Scene (36 dwords)");
+    float halton(uint32_t i,uint32_t b){float f=1,r=0;while(i){f/=float(b);r+=f*float(i%b);i/=b;}return r;}
 void normalize(float v[3]) {float l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(int c=0;c<3;++c)v[c]/=std::max(l,1e-6f);}
 void cross(const float a[3],const float b[3],float r[3]) {r[0]=a[1]*b[2]-a[2]*b[1];r[1]=a[2]*b[0]-a[0]*b[2];r[2]=a[0]*b[1]-a[1]*b[0];}
 bool isCutoutMaterial(uint32_t m) noexcept { return m == 29u || m == 36u; }
@@ -107,9 +110,13 @@ struct TrilogyMeshRenderer::Impl {
     std::array<ComPtr<ID3D12Resource>,4> counters,readbacks;
     ComPtr<ID3D12Resource> zero;
     std::array<bool,4> pending{};
+    // Explore-mode progressive accumulation (RGBA32F history, canonical pass only)
+    ComPtr<ID3D12Resource> accum;ComPtr<ID3D12RootSignature> accumRoot;ComPtr<ID3D12PipelineState> accumBlend,accumResolve;
+    bool accumValid=false;
+    NrdBridge nrd;
     uint32_t w=0,h=0,hits=0,queries=0,fallbacks=0;
     bool verified=false,rtReady=false;
-    explicit Impl(D3D12Context& c):context(c){}
+    explicit Impl(D3D12Context& c):context(c),nrd(c){}
     bool isPartActiveInShow(const Part& p,float time) const noexcept {
         const uint32_t pt=p.sub.part;
         const bool hero=p.kit>=4;
@@ -293,8 +300,24 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                 vertices.insert(vertices.end(),micro.vertices.begin(),micro.vertices.end());
             }
         }
-        s.vb=buffer(d,vertices.size()*sizeof(BmeshVertex),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);upload(s.vb.Get(),vertices.data(),vertices.size()*sizeof(BmeshVertex));
-        s.ib=buffer(d,indices.size()*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);upload(s.ib.Get(),indices.data(),indices.size()*4);
+        const size_t vbBytes = vertices.size() * sizeof(BmeshVertex);
+        const size_t ibBytes = indices.size() * sizeof(uint32_t);
+        auto vbUpload = buffer(d, vbBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto ibUpload = buffer(d, ibBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        upload(vbUpload.Get(), vertices.data(), vbBytes);
+        upload(ibUpload.Get(), indices.data(), ibBytes);
+        s.vb = buffer(d, vbBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        s.ib = buffer(d, ibBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (!s.context.executeSingleCommandListAndWait([&](void* raw) {
+            auto* copyCmd = static_cast<ID3D12GraphicsCommandList*>(raw);
+            copyCmd->CopyBufferRegion(s.vb.Get(), 0, vbUpload.Get(), 0, vbBytes);
+            copyCmd->CopyBufferRegion(s.ib.Get(), 0, ibUpload.Get(), 0, ibBytes);
+            const auto srvState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            transition(copyCmd, s.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST, srvState);
+            transition(copyCmd, s.ib.Get(), D3D12_RESOURCE_STATE_COPY_DEST, srvState);
+        }, error)) {
+            return false;
+        }
 
         // Load & upload authored/scanned PBR BTEX001 texture arrays (with deterministic fallback when fault==true or missing)
         Btex bAlb, bNor, bOrm, bEnv;
@@ -329,7 +352,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
 
         D3D12_DESCRIPTOR_HEAP_DESC shd{};
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        shd.NumDescriptors = 5;
+        shd.NumDescriptors = 5 + 2 * 4; // + per-slot accumulation SRVs (hdr, history)
         shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(d->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&s.srvHeap)));
         const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -365,7 +388,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
 
         D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=5;range.BaseShaderRegister=3;
         D3D12_ROOT_PARAMETER params[7]{};
-        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:28;}
+        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:36;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
         params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={1,&range};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
@@ -417,7 +440,20 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             auto rpsCut=shader("m2_mesh_rt_cutout_ps.cso");pd.PS={rpsCut.data(),rpsCut.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.rtCutout)));
         }
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.sky)));
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
+        {
+            // Accumulation root signature: one SRV table (t0, space1), pixel-only
+            D3D12_DESCRIPTOR_RANGE ar{};ar.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ar.NumDescriptors=1;ar.BaseShaderRegister=0;ar.RegisterSpace=1;
+            D3D12_ROOT_PARAMETER ap{};ap.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;ap.DescriptorTable={1,&ar};ap.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC ars{};ars.NumParameters=1;ars.pParameters=&ap;
+            ComPtr<ID3DBlob> ab,ae;check(D3D12SerializeRootSignature(&ars,D3D_ROOT_SIGNATURE_VERSION_1,&ab,&ae));check(d->CreateRootSignature(0,ab->GetBufferPointer(),ab->GetBufferSize(),IID_PPV_ARGS(&s.accumRoot)));
+            const auto avs=shader("m2_accum_vs.cso"),abps=shader("m2_accum_blend_ps.cso"),arps=shader("m2_accum_resolve_ps.cso");
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC ad{};ad.pRootSignature=s.accumRoot.Get();ad.VS={avs.data(),avs.size()};ad.PS={abps.data(),abps.size()};ad.SampleMask=UINT_MAX;
+            ad.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;ad.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;ad.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;ad.NumRenderTargets=1;ad.SampleDesc.Count=1;
+            auto& bt=ad.BlendState.RenderTarget[0];bt.BlendEnable=TRUE;bt.SrcBlend=D3D12_BLEND_BLEND_FACTOR;bt.DestBlend=D3D12_BLEND_INV_BLEND_FACTOR;bt.BlendOp=D3D12_BLEND_OP_ADD;bt.SrcBlendAlpha=D3D12_BLEND_BLEND_FACTOR;bt.DestBlendAlpha=D3D12_BLEND_INV_BLEND_FACTOR;bt.BlendOpAlpha=D3D12_BLEND_OP_ADD;bt.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
+            ad.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT;check(d->CreateGraphicsPipelineState(&ad,IID_PPV_ARGS(&s.accumBlend)));
+            bt.BlendEnable=FALSE;ad.PS={arps.data(),arps.size()};ad.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;check(d->CreateGraphicsPipelineState(&ad,IID_PPV_ARGS(&s.accumResolve)));
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=3;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
         if(s.rtReady) {
@@ -442,6 +478,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                 for(size_t i=0;i<count;++i) {D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs=inputs[i];build.ScratchAccelerationStructureData=s.scratch->GetGPUVirtualAddress();build.DestAccelerationStructureData=s.parts[i].blas->GetGPUVirtualAddress();cmd->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd.Get(),s.scratch.Get());uav(cmd.Get(),s.parts[i].blas.Get());}
             },error))return false;
         }
+        s.nrd.initialize(nullptr);
         BOO_LOG_INFO("M2Mesh","Loaded "+std::to_string(vertices.size())+" vertices / "+std::to_string(indices.size()/3)+" triangles + 42 PBR material arrays; fallback kits="+std::to_string(s.fallbacks));
         return true;
     }catch(const std::exception& e) {if(error)*error=e.what();return false;}
@@ -454,7 +491,11 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
     try {
         auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=width;rd.Height=height;rd.DepthOrArraySize=1;rd.MipLevels=1;rd.Format=DXGI_FORMAT_D32_FLOAT;rd.SampleDesc.Count=1;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         D3D12_CLEAR_VALUE clear{};clear.Format=rd.Format;clear.DepthStencil.Depth=1;ComPtr<ID3D12Resource> depth;
-        check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_DEPTH_WRITE,&clear,IID_PPV_ARGS(&depth)));s.depth=std::move(depth);d->CreateDepthStencilView(s.depth.Get(),nullptr,s.dsv->GetCPUDescriptorHandleForHeapStart());s.w=width;s.h=height;return true;
+        check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_DEPTH_WRITE,&clear,IID_PPV_ARGS(&depth)));s.depth=std::move(depth);d->CreateDepthStencilView(s.depth.Get(),nullptr,s.dsv->GetCPUDescriptorHandleForHeapStart());
+        rd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;ComPtr<ID3D12Resource> acc;
+        check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&acc)));s.accum=std::move(acc);s.accumValid=false;
+        s.nrd.resize(width,height);
+        s.w=width;s.h=height;return true;
     }catch(...) {return false;}
 }
 void TrilogyMeshRenderer::retire(uint32_t slot) {
@@ -504,10 +545,21 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         c.moodCut=isHijack?0.f:std::clamp(f.moodCutAccent,0.f,1.f);
     }
     c.pulse=camera.emissivePulse;
+    const InteractiveView& iv=f.interactive;
+    const bool accumulate=canonical&&iv.accumulate&&s.accum&&s.accumBlend&&s.w==width&&s.h==height;
+    if(iv.sunOverride){std::copy_n(iv.sunDir,3,c.sunDir);c.sunScale=iv.sunScale;c.interFlags|=1u;}
+    if(iv.lampsOff)c.interFlags|=4u;
+    if(iv.exploreActive)c.interFlags|=8u;
+    if(accumulate){
+        c.interFlags|=2u;c.accumFrame=iv.accumFrame;
+        // Halton(2,3) sub-pixel jitter converges to a supersampled, anti-aliased image while still
+        const uint32_t k=(iv.accumFrame%64u)+1u;
+        c.jitter[0]=(halton(k,2)-0.5f)*2.0f/float(width);c.jitter[1]=(halton(k,3)-0.5f)*2.0f/float(height);
+    }
     (void)tensor;
     ID3D12DescriptorHeap* m2Heaps[] = {s.srvHeap.Get()};
     cmd->SetDescriptorHeaps(1, m2Heaps);
-    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,28,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,s.srvHeap->GetGPUDescriptorHandleForHeapStart());cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,36,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,s.srvHeap->GetGPUDescriptorHandleForHeapStart());cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->SetPipelineState(s.sky.Get());cmd->DrawInstanced(3,1,0,0);
     // Hardware Z-Prepass eliminates all hidden-surface DXR ray-query & cutout overdraw across overlapping kits
     cmd->OMSetRenderTargets(0,nullptr,FALSE,&depthHandle);
@@ -544,6 +596,39 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             }
         }
     }
+    if(accumulate) {
+        // Prefer NVIDIA NRD.dll dynamic DXIL compute sidecar; fall back cleanly to built-in HLSL accumulator
+        const uint32_t kJ=(iv.accumFrame%64u)+1u;
+        const float jitterPx[2]={halton(kJ,2)-0.5f,halton(kJ,3)-0.5f};
+        const bool reset=(iv.accumFrame==0u)||!s.accumValid;
+        const bool nrdRan=s.nrd.isAvailable()&&s.nrd.recordAccumulation(cmd,hdr,width,height,slot,reset?0u:iv.accumFrame,jitterPx);
+        if(nrdRan) {
+            s.accumValid=true;
+        } else {
+        const float wgt=reset?1.0f:1.0f/float(std::min<uint32_t>(iv.accumFrame,4095u)+1u);
+        const UINT inc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        const UINT base=5u+2u*(slot&3u);
+        auto cpuAt=[&](UINT i){auto h=s.srvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*inc;return h;};
+        auto gpuAt=[&](UINT i){auto h=s.srvHeap->GetGPUDescriptorHandleForHeapStart();h.ptr+=UINT64(i)*inc;return h;};
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};sv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;sv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
+        sv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d->CreateShaderResourceView(hdr,&sv,cpuAt(base));
+        sv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;d->CreateShaderResourceView(s.accum.Get(),&sv,cpuAt(base+1u));
+        auto accRtv=s.rtv->GetCPUDescriptorHandleForHeapStart();accRtv.ptr+=SIZE_T(2)*rtvInc;d->CreateRenderTargetView(s.accum.Get(),nullptr,accRtv);
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmd->SetGraphicsRootSignature(s.accumRoot.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->OMSetRenderTargets(1,&accRtv,FALSE,nullptr);const float bf[4]={wgt,wgt,wgt,wgt};cmd->OMSetBlendFactor(bf);
+        cmd->SetPipelineState(s.accumBlend.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base));cmd->DrawInstanced(3,1,0,0);
+        transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmd->OMSetRenderTargets(1,&handle,FALSE,nullptr);
+        cmd->SetPipelineState(s.accumResolve.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base+1u));cmd->DrawInstanced(3,1,0,0);
+            s.accumValid=true;
+        }
+    } else if(canonical) {
+        s.accumValid=false;
+    }
     transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
     if(canonical&&useRt) {cmd->CopyBufferRegion(s.readbacks[slot].Get(),0,s.counters[slot].Get(),0,8);s.pending[slot]=true;}
@@ -551,6 +636,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     return useRt;
 }
 bool TrilogyMeshRenderer::hardwareVerified() const {return impl_->verified;}
+bool TrilogyMeshRenderer::nrdActive() const {return impl_&&impl_->nrd.isAvailable();}
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}

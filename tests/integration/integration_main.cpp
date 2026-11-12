@@ -506,7 +506,12 @@ bool testNoActivateWindowTransitions() {
         {'R', TransportCommand::Restart}, {'N', TransportCommand::NextAct}, {'P', TransportCommand::PrevAct},
         {'X', TransportCommand::ToggleRtRuntime}, {'C', TransportCommand::ToggleCudaRuntime},
         {'T', TransportCommand::ToggleTensorRuntime}, {'V', TransportCommand::ToggleCodecRuntime},
-        {'A', TransportCommand::CycleAbCompareEngine}
+        {'A', TransportCommand::CycleAbCompareEngine},
+        {'F', TransportCommand::ToggleExploreMode}, {'J', TransportCommand::TogglePracticalLamps},
+        {'H', TransportCommand::ToggleRtxSplitWipe}, {VK_F8, TransportCommand::ResetInteractiveLighting},
+        {VK_F2, TransportCommand::HeroPreset1}, {VK_F3, TransportCommand::HeroPreset2},
+        {VK_F4, TransportCommand::HeroPreset3}, {VK_F5, TransportCommand::HeroPreset4},
+        {VK_F6, TransportCommand::HeroPreset5}, {VK_F7, TransportCommand::HeroPreset6}
     };
     for (const auto& [key, expected] : keys) {
         SendMessageW(window.hwnd(), WM_KEYDOWN, key, 0);
@@ -1989,6 +1994,167 @@ bool testSignalHijackMediaIngestCameraPrivacyAndFallback() {
     return true;
 }
 
+bool testInteractiveExploreLightingAndNrdConvergence() {
+    using namespace boo;
+
+    D3D12Context d3d;
+    std::string err;
+    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+
+    CueSheet cue;
+    ValidationReport validation;
+    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath("assets/cues/film_360s.json"), cue, validation) && validation.valid);
+
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Balanced);
+    spec.renderWidth = 960;
+    spec.renderHeight = 540;
+
+    M1TaipeiSliceEffect fx(
+        d3d, spec,
+        false, false, false, false, false, false, true, false,
+        ShowVisualMode::FullFilm360s);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+    fx.setDisableRt(false);
+
+    const int64_t bathroomSample = 346LL * 48000LL;
+    auto makeBaseBathroomCtx = [&]() {
+        auto ctx = makeM1TestContext(bathroomSample, 0u);
+        const size_t sceneIdx = findSceneIndexAtSample(cue, bathroomSample);
+        const auto& scene = cue.scenes.at(sceneIdx);
+        ctx.sampleRate = cue.sampleRate;
+        ctx.actIndex = static_cast<uint32_t>(sceneIdx);
+        ctx.actProgress = float(double(bathroomSample - scene.startSample) /
+                                double(std::max<int64_t>(1, scene.endSample - scene.startSample)));
+        ctx.randomSeed = scene.deterministicSeed;
+        ctx.edition = Edition::Family;
+        ctx.qualityPreset = QualityPresetId::Balanced;
+        ctx.showOverlay = false;
+        ctx.hudMode = 3u;
+        ctx.showCaptions = false;
+        ScriptedDirector dir;
+        dir.reset(cue.seed);
+        const auto mood = dir.evaluate(ctx, &scene);
+        ctx.moodIrisAngle = mood.irisAngle;
+        ctx.moodIntensity = mood.lightTension;
+        ctx.moodPaletteAccent = mood.spectralShift;
+        ctx.moodBloomStrength = mood.bloomStrength;
+        ctx.moodCutAccent = mood.cutAccent;
+        return ctx;
+    };
+
+    const FrameContext canonicalCtx = makeBaseBathroomCtx();
+    std::vector<uint8_t> baseA, baseB;
+    std::vector<uint32_t> rgb10A, rgb10B;
+    uint32_t cw = 0, ch = 0;
+
+    // 1. Canonical baseline render at 346.0 s (Dawn Bathroom)
+    fx.resetTo(346.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(canonicalCtx, baseA, cw, ch, &err, &rgb10A));
+    BOO_CHECK(cw == 960u && ch == 540u);
+    uint64_t nonFinite = 0;
+    BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+
+    // 2. Interactive 6-DOF Hero Preset 2 (CNC Faucet Macro) + NRD / Progressive PT accumulation (8 SPP)
+    FrameContext macroCtx = canonicalCtx;
+    macroCtx.interactive.exploreActive = true;
+    macroCtx.interactive.blendWeight = 1.0f;
+    macroCtx.interactive.activePreset = 2u;
+    macroCtx.interactive.eye[0] = 0.05f;    macroCtx.interactive.eye[1] = 3.83f;    macroCtx.interactive.eye[2] = 5.76f;
+    macroCtx.interactive.target[0] = -0.18f; macroCtx.interactive.target[1] = 3.67f; macroCtx.interactive.target[2] = 6.34f;
+    macroCtx.interactive.fovYRadians = 0.44f;
+    macroCtx.interactive.accumulate = true;
+
+    std::vector<uint8_t> macroSpp1, macroSpp8;
+    std::vector<uint32_t> macroRgb10Spp8;
+    for (uint32_t s = 0; s < 8u; ++s) {
+        macroCtx.presentationFrame = s;
+        macroCtx.interactive.accumFrame = s;
+        std::vector<uint8_t> cur;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(
+            macroCtx, cur, cw, ch, &err, (s == 7u) ? &macroRgb10Spp8 : nullptr));
+        BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+        if (s == 0u) macroSpp1 = std::move(cur);
+        if (s == 7u) macroSpp8 = std::move(cur);
+    }
+    BOO_CHECK(computeMeanAbsDiffRgb01(macroSpp1, baseA) > 0.025);
+    BOO_CHECK(macroSpp8 != macroSpp1);
+    BOO_CHECK(computeMeanAbsDiffRgb01(macroSpp8, macroSpp1) < 0.085);
+
+    // 3. Pass-4 Studio Bar + Draggable Split Curtain isolation (must never contaminate Pass-3 CanvasClean!)
+    HudTelemetrySnapshot hud{};
+    hud.filmTimeSeconds = 346.0;
+    hud.durationSeconds = 360.0;
+    hud.fps = 60.0f;
+    hud.canvasWidth = 960;
+    hud.canvasHeight = 540;
+    hud.swapchainBits = 8;
+
+    FrameContext wipeLeft = macroCtx;
+    wipeLeft.showOverlay = true;
+    wipeLeft.hudMode = 2u;
+    wipeLeft.interactive.abSplitRatio = 0.26f;
+    wipeLeft.interactive.accumFrame = 7u;
+    fx.setAbCompareEngine(AbCompareEngine::RT);
+
+    std::vector<uint8_t> presWipe26, presWipe74, verifyClean;
+    std::vector<uint32_t> verifyRgb10;
+    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(wipeLeft, hud, 960, 540, presWipe26, &err));
+    BOO_CHECK(fx.readLastRenderedCanvasForTest(verifyClean, cw, ch, &err, &verifyRgb10));
+
+    FrameContext wipeRight = wipeLeft;
+    wipeRight.interactive.abSplitRatio = 0.74f;
+    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(wipeRight, hud, 960, 540, presWipe74, &err));
+    if (!d3d.isWarp()) {
+        BOO_CHECK(presWipe26 != presWipe74);
+    }
+
+    // 4. Live Sun Time-of-Day Override + RTXDI ReSTIR Practical Lamps Toggle at Midnight
+    FrameContext sunGolden = canonicalCtx;
+    sunGolden.interactive.exploreActive = true;
+    sunGolden.interactive.blendWeight = 1.0f;
+    sunGolden.interactive.eye[0] = 0.34f;    sunGolden.interactive.eye[1] = 4.02f;    sunGolden.interactive.eye[2] = 5.12f;
+    sunGolden.interactive.target[0] = -0.18f; sunGolden.interactive.target[1] = 3.88f; sunGolden.interactive.target[2] = 6.32f;
+    sunGolden.interactive.fovYRadians = 0.56f;
+    sunGolden.interactive.sunOverride = true;
+    sunGolden.interactive.sunDir[0] = 0.80f; sunGolden.interactive.sunDir[1] = 0.34f; sunGolden.interactive.sunDir[2] = -0.49f;
+    sunGolden.interactive.sunScale = 1.05f;
+
+    FrameContext sunNightLampsOn = sunGolden;
+    sunNightLampsOn.interactive.sunDir[0] = 0.80f; sunNightLampsOn.interactive.sunDir[1] = -0.28f; sunNightLampsOn.interactive.sunDir[2] = -0.49f;
+    sunNightLampsOn.interactive.sunScale = 1.0f;
+    sunNightLampsOn.interactive.lampsOff = false;
+
+    FrameContext sunNightLampsOff = sunNightLampsOn;
+    sunNightLampsOff.interactive.lampsOff = true;
+
+    std::vector<uint8_t> imgGolden, imgNightOn, imgNightOff;
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunGolden, imgGolden, cw, ch, &err));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunNightLampsOn, imgNightOn, cw, ch, &err));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunNightLampsOff, imgNightOff, cw, ch, &err));
+
+    const auto mGolden = computeRgba8LumaMetrics(imgGolden);
+    const auto mNightOn = computeRgba8LumaMetrics(imgNightOn);
+    const auto mNightOff = computeRgba8LumaMetrics(imgNightOff);
+    BOO_CHECK(computeMeanAbsDiffRgb01(imgGolden, imgNightOn) > 0.015);
+    BOO_CHECK(mGolden.meanLuma > mNightOn.meanLuma);
+    if (!d3d.isWarp()) {
+        BOO_CHECK(mNightOn.meanLuma > mNightOff.meanLuma + 0.002);
+        BOO_CHECK(computeMeanAbsDiffRgb01(imgNightOn, imgNightOff) > 0.003);
+    }
+
+    // 5. Return to Canonical Film Mode -> MUST match baseline frame bit-for-bit (`rgb10A == rgb10B`)!
+    fx.resetTo(346.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(canonicalCtx, baseB, cw, ch, &err, &rgb10B));
+    BOO_CHECK(rgb10A == rgb10B && baseA == baseB);
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
+
 #include "film_capture_gate.hpp"
 #include "film_stress_gate.hpp"
 
@@ -2026,7 +2192,7 @@ bool testQuarantinedGpuRetirement() {
 int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
-    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, filmStress = false, lifecycleTests = false;
+    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, interactiveCaptures = false, filmStress = false, lifecycleTests = false;
     for (int arg = 1; arg < argc; ++arg) {
         const std::string option = argv[arg];
         if (option == "--no-activate") noActivate = true;
@@ -2034,6 +2200,7 @@ int main(int argc, char** argv) {
         else if (option == "--trilogy-captures") trilogyCaptures = true;
         else if (option == "--film-captures") filmCaptures = true;
         else if (option == "--hero-video-capture") heroVideoCapture = true;
+        else if (option == "--interactive-captures") interactiveCaptures = true;
         else if (option == "--film-stress") filmStress = true;
         else if (option == "--lifecycle-tests") lifecycleTests = true;
         else if (option == "--capture-dir" && arg + 1 < argc) gFilmCaptureDirectory = argv[++arg];
@@ -2046,14 +2213,15 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
-    if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
-    if ((trilogyCaptures || filmCaptures || heroVideoCapture || filmStress || lifecycleTests) && !noActivate) {
+    if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
+    if ((trilogyCaptures || filmCaptures || heroVideoCapture || interactiveCaptures || filmStress || lifecycleTests) && !noActivate) {
         std::cerr << "Automated integration gates require --no-activate.\n";
         return 2;
     }
     if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
     if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
     if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", testHeroVideoCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (interactiveCaptures) { runTest("InteractiveShowcaseCaptures", testInteractiveShowcaseCaptureGate); return gTestsFailed ? 1 : 0; }
     if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }
     if (lifecycleTests) {
         runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);
@@ -2073,6 +2241,7 @@ int main(int argc, char** argv) {
     runTest("FullFilm360sRevealsEditionsAndM7CombinedFailover", testFullFilm360sRevealsEditionsAndM7CombinedFailover);
     runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
     runTest("SignalHijackMediaIngestCameraPrivacyAndFallback", testSignalHijackMediaIngestCameraPrivacyAndFallback);
+    runTest("InteractiveExploreLightingAndNrdConvergence", testInteractiveExploreLightingAndNrdConvergence);
     runTest("NativeCanvasModesAndCapture", testNativeCanvasModesAndCapture);
     if (noActivate) {
         runTest("NoActivateWindowTransitions", testNoActivateWindowTransitions);

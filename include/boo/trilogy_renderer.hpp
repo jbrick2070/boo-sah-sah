@@ -16,6 +16,7 @@ public:
                 void* hdr, void* distance, uint64_t tensorSrv, uint32_t width, uint32_t height,
                 uint32_t slot, bool raytracing, bool canonical);
     bool hardwareVerified() const;
+    bool nrdActive() const;
     uint32_t verifiedHits() const;
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;
