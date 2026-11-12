@@ -1,0 +1,773 @@
+#include "boo/render.hpp"
+#include "boo/logging.hpp"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dxgi1_6.h>
+#include <d3d12.h>
+#include <d3d12sdklayers.h>
+#include <vector>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+
+namespace boo {
+
+using Microsoft::WRL::ComPtr;
+
+namespace {
+constexpr uint32_t kTimestampsPerFrame = 5;
+
+std::string w2u8(const wchar_t* w) {
+    if (!w || !*w) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string s(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+std::string hrHex(HRESULT hr) {
+    char buf[24]{};
+    std::snprintf(buf, sizeof(buf), "0x%08X", static_cast<unsigned int>(hr));
+    return std::string(buf);
+}
+} // namespace
+
+struct D3D12Context::Impl {
+    ComPtr<IDXGIFactory6> factory;
+    ComPtr<IDXGIAdapter3> adapter3;
+    ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12CommandQueue> commandQueue;
+    ComPtr<IDXGISwapChain4> swapChain;
+    ComPtr<ID3D12DescriptorHeap> rtvHeap;
+    std::array<ComPtr<ID3D12Resource>, kFrameCount> renderTargets;
+    std::array<ComPtr<ID3D12CommandAllocator>, kFrameCount> commandAllocators;
+    ComPtr<ID3D12GraphicsCommandList> commandList;
+
+    ComPtr<ID3D12Fence> fence;
+    HANDLE fenceEvent = nullptr;
+    HANDLE waitableHandle = nullptr;
+    uint64_t nextFenceValue = 1;
+    std::array<uint64_t, kFrameCount> frameFenceValues{0, 0, 0};
+
+    // 5 GPU timestamp queries per buffered frame: [0]=start, [1]=scene, [2]=bloom, [3]=composite, [4]=presentPass
+    ComPtr<ID3D12QueryHeap> timestampHeap;
+    ComPtr<ID3D12Resource> timestampReadback;
+    uint64_t gpuTimestampFreq = 0;
+    uint8_t currentRecordedMask = 0;
+    std::array<uint8_t, kFrameCount> frameRecordedMask{0, 0, 0};
+    GpuPassTimingsMs lastPassTimings{};
+
+    DXGI_FORMAT backBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    UINT swapChainFlags = 0;
+    uint32_t rtvDescriptorSize = 0;
+    uint32_t frameIndex = 0;
+    bool allowTearing = false;
+    bool headless = false;
+    bool frameOpen = false;
+    bool occluded = false;
+    bool synchronizationFailed = false;
+};
+
+D3D12Context::D3D12Context() : impl_(std::make_unique<Impl>()) {}
+
+D3D12Context::~D3D12Context() {
+    shutdown();
+}
+
+bool D3D12Context::initialize(
+    HWND hwnd,
+    uint32_t width,
+    uint32_t height,
+    bool forceWarp,
+    bool enableDebugLayer,
+    std::string* outError) {
+    shutdown();
+    impl_ = std::make_unique<Impl>();
+    impl_->headless = (hwnd == nullptr);
+
+    if (enableDebugLayer) {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
+    }
+    UINT dxgiFactoryFlags = 0;
+    if (enableDebugLayer) {
+        ComPtr<ID3D12Debug> debugController;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+            debugController->EnableDebugLayer();
+            dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            BOO_LOG_INFO("D3D12", "D3D12 debug layer enabled.");
+        } else {
+            BOO_LOG_WARN("D3D12", "D3D12 debug layer requested, but Graphics Tools SDKLayers not installed; continuing without it.");
+        }
+    }
+
+    HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&impl_->factory));
+    if (FAILED(hr)) {
+        hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&impl_->factory));
+    }
+    if (FAILED(hr) || !impl_->factory) {
+        if (outError) *outError = "CreateDXGIFactory2 failed (" + hrHex(hr) + ")";
+        return false;
+    }
+
+    BOOL tearing = FALSE;
+    if (SUCCEEDED(impl_->factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing)))) {
+        impl_->allowTearing = (tearing == TRUE);
+    }
+
+    ComPtr<IDXGIAdapter1> chosenAdapter;
+    if (forceWarp) {
+        hr = impl_->factory->EnumWarpAdapter(IID_PPV_ARGS(&chosenAdapter));
+        if (SUCCEEDED(hr) && chosenAdapter) {
+            hr = D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device));
+            isWarp_ = true;
+        }
+    } else {
+        ComPtr<IDXGIAdapter1> candidate;
+        for (UINT idx = 0;
+             SUCCEEDED(impl_->factory->EnumAdapterByGpuPreference(idx, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate)));
+             ++idx) {
+            DXGI_ADAPTER_DESC1 desc{};
+            candidate->GetDesc1(&desc);
+            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+                continue;
+            }
+            if (SUCCEEDED(D3D12CreateDevice(candidate.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device)))) {
+                chosenAdapter = candidate;
+                isWarp_ = false;
+                break;
+            }
+        }
+        // Graceful fallback to WARP if no hardware D3D12 GPU succeeded
+        if (!impl_->device) {
+            if (SUCCEEDED(impl_->factory->EnumWarpAdapter(IID_PPV_ARGS(&chosenAdapter))) && chosenAdapter) {
+                if (SUCCEEDED(D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device)))) {
+                    isWarp_ = true;
+                    BOO_LOG_WARN("D3D12", "No hardware D3D12 adapter succeeded; fell back to WARP software adapter.");
+                }
+            }
+        }
+    }
+
+    if (!impl_->device || !chosenAdapter) {
+        if (outError) *outError = "No compatible Direct3D 12 device found on this system.";
+        return false;
+    }
+
+    chosenAdapter.As(&impl_->adapter3);
+    DXGI_ADAPTER_DESC1 adapterDesc{};
+    chosenAdapter->GetDesc1(&adapterDesc);
+    adapterName_ = w2u8(adapterDesc.Description);
+    luidLow_     = static_cast<int32_t>(adapterDesc.AdapterLuid.LowPart);
+    luidHigh_    = adapterDesc.AdapterLuid.HighPart;
+
+    D3D12_COMMAND_QUEUE_DESC queueDesc{};
+    queueDesc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    hr = impl_->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&impl_->commandQueue));
+    if (FAILED(hr)) {
+        if (outError) *outError = "CreateCommandQueue failed (" + hrHex(hr) + ")";
+        return false;
+    }
+    impl_->commandQueue->GetTimestampFrequency(&impl_->gpuTimestampFreq);
+
+    hr = impl_->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&impl_->fence));
+    if (FAILED(hr)) {
+        if (outError) *outError = "CreateFence failed (" + hrHex(hr) + ")";
+        return false;
+    }
+    impl_->fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!impl_->fenceEvent) {
+        if (outError) *outError = "CreateEventW for D3D12 fence failed";
+        return false;
+    }
+
+    for (uint32_t i = 0; i < kFrameCount; ++i) {
+        hr = impl_->device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&impl_->commandAllocators[i]));
+        if (FAILED(hr)) {
+            if (outError) *outError = "CreateCommandAllocator failed (" + hrHex(hr) + ")";
+            return false;
+        }
+    }
+
+    hr = impl_->device->CreateCommandList(
+        0,
+        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        impl_->commandAllocators[0].Get(),
+        nullptr,
+        IID_PPV_ARGS(&impl_->commandList));
+    if (FAILED(hr)) {
+        if (outError) *outError = "CreateCommandList failed (" + hrHex(hr) + ")";
+        return false;
+    }
+    impl_->commandList->Close();
+
+    // Timestamp query heap + readback buffer (5 * kFrameCount uint64_t timestamps)
+    D3D12_QUERY_HEAP_DESC qhDesc{};
+    qhDesc.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qhDesc.Count = kFrameCount * kTimestampsPerFrame;
+    if (SUCCEEDED(impl_->device->CreateQueryHeap(&qhDesc, IID_PPV_ARGS(&impl_->timestampHeap)))) {
+        D3D12_HEAP_PROPERTIES readbackHeap{};
+        readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+
+        D3D12_RESOURCE_DESC bufDesc{};
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = sizeof(uint64_t) * kFrameCount * kTimestampsPerFrame;
+        bufDesc.Height = 1;
+        bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1;
+        bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        impl_->device->CreateCommittedResource(
+            &readbackHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &bufDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&impl_->timestampReadback));
+    }
+
+    width_  = std::max<uint32_t>(1, width);
+    height_ = std::max<uint32_t>(1, height);
+
+    if (impl_->headless) {
+        impl_->backBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        return true;
+    }
+
+    // Section 3.1 + M1 [G1.1]: 10-bit SDR swapchain with checked Rec.709 G22 color space & scoped 8-bit fallback
+    const DXGI_FORMAT candidateFormats[2] = {
+        DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM
+    };
+    const UINT baseTearingFlag = impl_->allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+    const UINT candidateFlags[2] = {
+        baseTearingFlag | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+        baseTearingFlag
+    };
+
+    HRESULT lastSwapHr = E_FAIL;
+    for (DXGI_FORMAT fmt : candidateFormats) {
+        for (UINT flags : candidateFlags) {
+            DXGI_SWAP_CHAIN_DESC1 scDesc{};
+            scDesc.BufferCount = kFrameCount;
+            scDesc.Width       = width_;
+            scDesc.Height      = height_;
+            scDesc.Format      = fmt;
+            scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            scDesc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            scDesc.SampleDesc.Count = 1;
+            scDesc.Flags       = flags;
+
+            // Keep both candidate COM pointers strictly scoped so failed 10-bit checks
+            // release all flip-model swapchain references on hwnd before retrying 8-bit!
+            ComPtr<IDXGISwapChain1> candSc1;
+            lastSwapHr = impl_->factory->CreateSwapChainForHwnd(
+                impl_->commandQueue.Get(),
+                hwnd,
+                &scDesc,
+                nullptr,
+                nullptr,
+                &candSc1);
+            if (FAILED(lastSwapHr) || !candSc1) {
+                continue;
+            }
+
+            ComPtr<IDXGISwapChain4> candSc4;
+            if (FAILED(candSc1.As(&candSc4)) || !candSc4) {
+                continue;
+            }
+
+            if (fmt == DXGI_FORMAT_R10G10B10A2_UNORM) {
+                UINT csSupport = 0;
+                const HRESULT csHr = candSc4->CheckColorSpaceSupport(
+                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                    &csSupport);
+                if (FAILED(csHr) || (csSupport & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0) {
+                    continue;
+                }
+                if (FAILED(candSc4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709))) {
+                    continue;
+                }
+            }
+
+            impl_->swapChain = std::move(candSc4);
+            impl_->backBufferFormat = fmt;
+            impl_->swapChainFlags = flags;
+            break;
+        }
+        if (impl_->swapChain) {
+            break;
+        }
+    }
+
+    if (!impl_->swapChain) {
+        if (outError) *outError = "CreateSwapChainForHwnd failed (" + hrHex(lastSwapHr) + ")";
+        return false;
+    }
+
+    impl_->factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    if ((impl_->swapChainFlags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0) {
+        impl_->swapChain->SetMaximumFrameLatency(2);
+        impl_->waitableHandle = impl_->swapChain->GetFrameLatencyWaitableObject();
+    }
+
+    BOO_LOG_INFO(
+        "D3D12",
+        std::string("Swapchain initialized: ") +
+            (impl_->backBufferFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? "10-bit R10G10B10A2_UNORM (Rec.709 G2.2 SDR)" : "8-bit R8G8B8A8_UNORM") +
+            " | WaitableLatency=" + (impl_->waitableHandle ? "ON(max=2)" : "OFF"));
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
+    rtvHeapDesc.NumDescriptors = kFrameCount;
+    rtvHeapDesc.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    hr = impl_->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&impl_->rtvHeap));
+    if (FAILED(hr)) {
+        if (outError) *outError = "CreateDescriptorHeap(RTV) failed (" + hrHex(hr) + ")";
+        return false;
+    }
+    impl_->rtvDescriptorSize = impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (uint32_t i = 0; i < kFrameCount; ++i) {
+        hr = impl_->swapChain->GetBuffer(i, IID_PPV_ARGS(&impl_->renderTargets[i]));
+        if (FAILED(hr)) {
+            if (outError) *outError = "SwapChain GetBuffer failed (" + hrHex(hr) + ")";
+            return false;
+        }
+        impl_->device->CreateRenderTargetView(impl_->renderTargets[i].Get(), nullptr, rtvHandle);
+        rtvHandle.ptr += impl_->rtvDescriptorSize;
+    }
+    impl_->frameIndex = impl_->swapChain->GetCurrentBackBufferIndex();
+    return true;
+}
+
+void D3D12Context::shutdown() noexcept {
+    if (!impl_) return;
+    waitForGpu();
+    if (impl_->waitableHandle) {
+        CloseHandle(impl_->waitableHandle);
+        impl_->waitableHandle = nullptr;
+    }
+    if (impl_->fenceEvent) {
+        CloseHandle(impl_->fenceEvent);
+        impl_->fenceEvent = nullptr;
+    }
+    impl_.reset();
+    presentCount_ = 0;
+    presentStallCount_ = 0;
+}
+
+void D3D12Context::waitForGpu() noexcept {
+    if (!impl_ || !impl_->commandQueue || !impl_->fence || !impl_->fenceEvent) return;
+    const uint64_t value = impl_->nextFenceValue++;
+    if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), value))) {
+        impl_->synchronizationFailed = true;
+        return;
+    }
+    if (impl_->fence->GetCompletedValue() < value) {
+        if (FAILED(impl_->fence->SetEventOnCompletion(value, impl_->fenceEvent))) {
+            impl_->synchronizationFailed = true;
+            return;
+        }
+        for (;;) {
+            const DWORD result = WaitForSingleObjectEx(impl_->fenceEvent, 100, FALSE);
+            if (result == WAIT_OBJECT_0) break;
+            if (result != WAIT_TIMEOUT || FAILED(impl_->device->GetDeviceRemovedReason())) {
+                impl_->synchronizationFailed = true;
+                return;
+            }
+        }
+    }
+}
+
+bool D3D12Context::executeSingleCommandListAndWait(
+    const std::function<void(void* cmdList)>& recordFn,
+    std::string* outError) {
+    if (!impl_ || !impl_->device || !impl_->commandQueue || !impl_->commandList) {
+        if (outError) *outError = "D3D12Context not initialized";
+        return false;
+    }
+    if (impl_->frameOpen) {
+        if (outError) *outError = "Cannot call executeSingleCommandListAndWait while a swapchain frame is open";
+        return false;
+    }
+
+    waitForGpu();
+    if (!checkDeviceHealthy(outError)) return false;
+    HRESULT hr = impl_->commandAllocators[0]->Reset();
+    if (FAILED(hr)) {
+        if (outError) *outError = "CommandAllocator[0]->Reset failed (" + hrHex(hr) + ")";
+        return false;
+    }
+    hr = impl_->commandList->Reset(impl_->commandAllocators[0].Get(), nullptr);
+    if (FAILED(hr)) {
+        if (outError) *outError = "CommandList->Reset failed (" + hrHex(hr) + ")";
+        return false;
+    }
+
+    recordFn(impl_->commandList.Get());
+
+    hr = impl_->commandList->Close();
+    if (FAILED(hr)) {
+        if (outError) *outError = "CommandList->Close failed (" + hrHex(hr) + ")";
+        return false;
+    }
+
+    ID3D12CommandList* lists[] = {impl_->commandList.Get()};
+    impl_->commandQueue->ExecuteCommandLists(1, lists);
+    waitForGpu();
+    return checkDeviceHealthy(outError);
+}
+
+bool D3D12Context::resize(uint32_t width, uint32_t height) {
+    if (!impl_ || impl_->headless || !impl_->swapChain) return false;
+    if (width == 0 || height == 0) return true;
+    if (width == width_ && height == height_) return true;
+
+    waitForGpu();
+    if (!checkDeviceHealthy()) return false;
+    for (uint32_t i = 0; i < kFrameCount; ++i) {
+        impl_->renderTargets[i].Reset();
+        impl_->frameFenceValues[i] = 0;
+        impl_->frameRecordedMask[i] = 0;
+    }
+
+    const HRESULT hr = impl_->swapChain->ResizeBuffers(
+        kFrameCount,
+        width,
+        height,
+        impl_->backBufferFormat,
+        impl_->swapChainFlags);
+    if (FAILED(hr)) {
+        BOO_LOG_ERROR("D3D12", "SwapChain::ResizeBuffers failed (" + hrHex(hr) + ")");
+        return false;
+    }
+
+    width_  = width;
+    height_ = height;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (uint32_t i = 0; i < kFrameCount; ++i) {
+        if (FAILED(impl_->swapChain->GetBuffer(i, IID_PPV_ARGS(&impl_->renderTargets[i])))) {
+            return false;
+        }
+        impl_->device->CreateRenderTargetView(impl_->renderTargets[i].Get(), nullptr, rtvHandle);
+        rtvHandle.ptr += impl_->rtvDescriptorSize;
+    }
+    impl_->frameIndex = impl_->swapChain->GetCurrentBackBufferIndex();
+    return true;
+}
+
+bool D3D12Context::beginFrame() {
+    if (!impl_ || impl_->headless || !impl_->swapChain) return false;
+
+    std::string healthReason;
+    if (!checkDeviceHealthy(&healthReason)) {
+        BOO_LOG_ERROR("D3D12", "beginFrame checkDeviceHealthy failed: " + healthReason);
+        return false;
+    }
+    if (impl_->occluded) {
+        if (impl_->swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
+            // Display is powered off / locked during non-minimized (--no-activate) execution.
+            // Pace gently at ~60 Hz while still executing and verifying real GPU frames via fence sync.
+            Sleep(16);
+        } else {
+            impl_->occluded = false;
+        }
+    }
+    if (impl_->waitableHandle) {
+        if (impl_->occluded) {
+            // Drain any signaled latency token without blocking if DWM VBlank is asleep while occluded.
+            (void)WaitForSingleObjectEx(impl_->waitableHandle, 0, FALSE);
+        } else {
+            const DWORD waitRes = WaitForSingleObjectEx(impl_->waitableHandle, 1000, FALSE);
+            if (waitRes != WAIT_OBJECT_0) {
+                BOO_LOG_WARN("D3D12", "beginFrame waitableHandle wait returned " + std::to_string(waitRes));
+                return false;
+            }
+        }
+    }
+
+    impl_->frameIndex = impl_->swapChain->GetCurrentBackBufferIndex();
+    const uint64_t requiredFence = impl_->frameFenceValues[impl_->frameIndex];
+    if (requiredFence > 0 && impl_->fence->GetCompletedValue() < requiredFence) {
+        if (SUCCEEDED(impl_->fence->SetEventOnCompletion(requiredFence, impl_->fenceEvent))) {
+            if (WaitForSingleObjectEx(impl_->fenceEvent, 2000, FALSE) != WAIT_OBJECT_0) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    // Read resolved 5-point GPU timestamps from this retired frame slot (zero GPU stall)
+    if (requiredFence > 0 && impl_->timestampReadback && impl_->gpuTimestampFreq > 0) {
+        const uint32_t slot = impl_->frameIndex;
+        const size_t base = static_cast<size_t>(slot) * kTimestampsPerFrame;
+        D3D12_RANGE readRange{
+            sizeof(uint64_t) * base,
+            sizeof(uint64_t) * (base + kTimestampsPerFrame)};
+        void* mapped = nullptr;
+        if (SUCCEEDED(impl_->timestampReadback->Map(0, &readRange, &mapped)) && mapped) {
+            const auto* stamps = reinterpret_cast<const uint64_t*>(mapped);
+            const uint64_t t0 = stamps[base + 0];
+            const uint64_t t1 = stamps[base + 1];
+            const uint64_t t2 = stamps[base + 2];
+            const uint64_t t3 = stamps[base + 3];
+            const uint64_t t4 = stamps[base + 4];
+            D3D12_RANGE emptyWrite{0, 0};
+            impl_->timestampReadback->Unmap(0, &emptyWrite);
+
+            const double invFreqMs = 1000.0 / static_cast<double>(impl_->gpuTimestampFreq);
+            const uint8_t mask = impl_->frameRecordedMask[slot];
+
+            GpuPassTimingsMs pt{};
+            if (t4 >= t0) {
+                pt.totalMs = static_cast<double>(t4 - t0) * invFreqMs;
+            }
+            if ((mask & (1u << 1)) != 0 && t1 >= t0) {
+                pt.sceneMs = static_cast<double>(t1 - t0) * invFreqMs;
+            }
+            if ((mask & (1u << 2)) != 0 && (mask & (1u << 1)) != 0 && t2 >= t1) {
+                pt.bloomMs = static_cast<double>(t2 - t1) * invFreqMs;
+            }
+            if ((mask & (1u << 3)) != 0 && (mask & (1u << 2)) != 0 && t3 >= t2) {
+                pt.compositeMs = static_cast<double>(t3 - t2) * invFreqMs;
+            }
+            if ((mask & (1u << 3)) != 0 && t4 >= t3) {
+                pt.presentPassMs = static_cast<double>(t4 - t3) * invFreqMs;
+            }
+            impl_->lastPassTimings = pt;
+        }
+    }
+
+    auto& alloc = impl_->commandAllocators[impl_->frameIndex];
+    if (FAILED(alloc->Reset())) return false;
+    if (FAILED(impl_->commandList->Reset(alloc.Get(), nullptr))) return false;
+
+    impl_->currentRecordedMask = 0;
+    if (impl_->timestampHeap) {
+        const UINT baseIdx = impl_->frameIndex * kTimestampsPerFrame;
+        impl_->commandList->EndQuery(impl_->timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, baseIdx + 0);
+    }
+
+    D3D12_RESOURCE_BARRIER toRt{};
+    toRt.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toRt.Transition.pResource   = impl_->renderTargets[impl_->frameIndex].Get();
+    toRt.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    toRt.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    toRt.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    impl_->commandList->ResourceBarrier(1, &toRt);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandle.ptr += static_cast<SIZE_T>(impl_->frameIndex) * impl_->rtvDescriptorSize;
+
+    // Pure matte black clear for clean 16:9 letterbox/pillarbox bars
+    const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    impl_->commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+    impl_->commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+    D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_), 0.0f, 1.0f};
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+    impl_->commandList->RSSetViewports(1, &vp);
+    impl_->commandList->RSSetScissorRects(1, &scissor);
+
+    impl_->frameOpen = true;
+    return true;
+}
+
+void D3D12Context::bindSwapchainRenderTarget() noexcept {
+    if (!impl_ || !impl_->frameOpen || !impl_->rtvHeap) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandle.ptr += static_cast<SIZE_T>(impl_->frameIndex) * impl_->rtvDescriptorSize;
+    impl_->commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+}
+
+void D3D12Context::writePassTimestamp(uint32_t passSlot1To3) noexcept {
+    if (!impl_ || !impl_->frameOpen || !impl_->timestampHeap) return;
+    if (passSlot1To3 < 1 || passSlot1To3 > 3) return;
+    const UINT idx = impl_->frameIndex * kTimestampsPerFrame + passSlot1To3;
+    impl_->commandList->EndQuery(impl_->timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx);
+    impl_->currentRecordedMask = static_cast<uint8_t>(impl_->currentRecordedMask | (1u << passSlot1To3));
+}
+
+bool D3D12Context::endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs) {
+    outLastCompletedGpuMs = 0.0;
+    if (!impl_ || !impl_->frameOpen) return false;
+    impl_->frameOpen = false;
+
+    D3D12_RESOURCE_BARRIER toPresent{};
+    toPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toPresent.Transition.pResource   = impl_->renderTargets[impl_->frameIndex].Get();
+    toPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    toPresent.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+    toPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    impl_->commandList->ResourceBarrier(1, &toPresent);
+
+    impl_->frameRecordedMask[impl_->frameIndex] = impl_->currentRecordedMask;
+    if (impl_->timestampHeap && impl_->timestampReadback) {
+        const UINT baseIdx = impl_->frameIndex * kTimestampsPerFrame;
+        // Record EndQuery for any unrecorded intermediate pass slots so ResolveQueryData(base, 5)
+        // never triggers RESOLVE_QUERY_INVALID_QUERY_STATE under D3D12 debug validation.
+        for (UINT s = 1; s <= 3; ++s) {
+            if ((impl_->currentRecordedMask & (1u << s)) == 0) {
+                impl_->commandList->EndQuery(impl_->timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, baseIdx + s);
+            }
+        }
+        impl_->commandList->EndQuery(impl_->timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, baseIdx + 4);
+        impl_->commandList->ResolveQueryData(
+            impl_->timestampHeap.Get(),
+            D3D12_QUERY_TYPE_TIMESTAMP,
+            baseIdx,
+            kTimestampsPerFrame,
+            impl_->timestampReadback.Get(),
+            sizeof(uint64_t) * baseIdx);
+    }
+
+    if (FAILED(impl_->commandList->Close())) {
+        return false;
+    }
+
+    ID3D12CommandList* lists[] = {impl_->commandList.Get()};
+    impl_->commandQueue->ExecuteCommandLists(1, lists);
+
+    LARGE_INTEGER t0{}, t1{}, qpf{};
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&t0);
+
+    const UINT syncInterval = vsync ? 1u : 0u;
+    const UINT presentFlags = (!vsync && impl_->allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    const HRESULT hr = impl_->swapChain->Present(syncInterval, presentFlags);
+
+    QueryPerformanceCounter(&t1);
+    const double presentWallMs =
+        (qpf.QuadPart > 0) ? (static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart)) : 0.0;
+    if (presentWallMs > 34.0) {
+        ++presentStallCount_;
+    }
+
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        const HRESULT reason = impl_->device->GetDeviceRemovedReason();
+        BOO_LOG_ERROR("D3D12", "DXGI Present reported device lost! GetDeviceRemovedReason=" + hrHex(reason));
+        ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+        if (SUCCEEDED(impl_->device.As(&dred))) {
+            D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+            D3D12_DRED_PAGE_FAULT_OUTPUT1 fault{};
+            if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+                uint32_t count = 0;
+                for (auto* node = crumbs.pHeadAutoBreadcrumbNode; node && count < 64; node = node->pNext, ++count)
+                    BOO_LOG_ERROR("DRED", "Command list progress " + std::to_string(node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0) + "/" + std::to_string(node->BreadcrumbCount));
+            }
+            if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&fault)))
+                BOO_LOG_ERROR("DRED", "Page-fault GPU VA: " + std::to_string(fault.PageFaultVA));
+        }
+        return false;
+    }
+    if (FAILED(hr)) {
+        BOO_LOG_ERROR("D3D12", "SwapChain::Present failed (" + hrHex(hr) + ")");
+        return false;
+    }
+
+    const uint64_t fenceVal = impl_->nextFenceValue++;
+    if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), fenceVal))) return false;
+    impl_->frameFenceValues[impl_->frameIndex] = fenceVal;
+    impl_->occluded = (hr == DXGI_STATUS_OCCLUDED);
+    ++presentCount_;
+
+    outLastCompletedGpuMs = impl_->lastPassTimings.totalMs;
+    return true;
+}
+
+bool D3D12Context::checkDeviceHealthy(std::string* outReason) const {
+    if (!impl_ || !impl_->device) {
+        if (outReason) *outReason = "D3D12 device not initialized";
+        return false;
+    }
+    if (impl_->synchronizationFailed) {
+        if (outReason) *outReason = "GPU synchronization failed";
+        return false;
+    }
+    const HRESULT reason = impl_->device->GetDeviceRemovedReason();
+    if (FAILED(reason)) {
+        if (outReason) *outReason = "Device removed (" + hrHex(reason) + ")";
+        return false;
+    }
+    return true;
+}
+
+uint64_t D3D12Context::queryEstimatedAppVramBytes() const noexcept {
+    if (!impl_ || !impl_->adapter3) return 0;
+    DXGI_QUERY_VIDEO_MEMORY_INFO memInfo{};
+    if (SUCCEEDED(impl_->adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo))) {
+        return memInfo.CurrentUsage;
+    }
+    return 0;
+}
+
+void* D3D12Context::deviceRaw() const noexcept {
+    return impl_ ? impl_->device.Get() : nullptr;
+}
+
+void* D3D12Context::commandQueueRaw() const noexcept {
+    return impl_ ? impl_->commandQueue.Get() : nullptr;
+}
+
+void* D3D12Context::commandListRaw() const noexcept {
+    return impl_ ? impl_->commandList.Get() : nullptr;
+}
+
+uint32_t D3D12Context::backBufferDxgiFormat() const noexcept {
+    return impl_ ? static_cast<uint32_t>(impl_->backBufferFormat) : static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
+}
+
+uint32_t D3D12Context::swapchainChannelBits() const noexcept {
+    if (impl_ && impl_->backBufferFormat == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        return 10u;
+    }
+    return 8u;
+}
+
+uint32_t D3D12Context::currentBackBufferIndex() const noexcept {
+    return impl_ ? impl_->frameIndex : 0u;
+}
+
+uint32_t D3D12Context::debugErrorCount() const {
+    if (!impl_ || !impl_->device) return 0;
+    ComPtr<ID3D12InfoQueue> queue;
+    if (FAILED(impl_->device.As(&queue))) return 0;
+    uint32_t count = 0;
+    for (UINT64 i = 0; i < queue->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
+        SIZE_T size = 0;
+        queue->GetMessage(i, nullptr, &size);
+        std::vector<uint8_t> bytes(size);
+        auto* msg = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+        if (SUCCEEDED(queue->GetMessage(i, msg, &size)) && msg->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+            ++count;
+            BOO_LOG_ERROR("D3D12Validation", msg->pDescription);
+        }
+    }
+    return count;
+}
+
+GpuPassTimingsMs D3D12Context::lastPassTimings() const noexcept {
+    return impl_ ? impl_->lastPassTimings : GpuPassTimingsMs{};
+}
+
+} // namespace boo

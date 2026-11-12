@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-solo-rt",
+  "duration_samples": 2640000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "mirror_intelligence_solo",
+      "start_sample": 0,
+      "end_sample": 2640000,
+      "visual": "mirror_orchid",
+      "preferred_engine": "RT",
+      "fallback_visual": "mirror_probes",
+      "audio_section": "crystal_percussion_pulses",
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "rt": [0, 2640000]
+  }
+}

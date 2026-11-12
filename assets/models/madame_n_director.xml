@@ -1,0 +1,350 @@
+<?xml version="1.0"?>
+<net name="madame_n_director_v1" version="11">
+	<layers>
+		<layer id="0" name="features" type="Parameter" version="opset1">
+			<data shape="1,16" element_type="f32" />
+			<output>
+				<port id="0" precision="FP32" names="features">
+					<dim>1</dim>
+					<dim>16</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="1" name="w1" type="Const" version="opset1">
+			<data element_type="f32" shape="16, 64" offset="0" size="4096" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>16</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="2" name="MatMul_6" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>16</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>16</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="3" name="b1" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 64" offset="4096" size="256" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="4" name="Add_7" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="5" name="h1_relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="6" name="w2" type="Const" version="opset1">
+			<data element_type="f32" shape="64, 32" offset="4352" size="8192" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>64</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="7" name="MatMul_13" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>32</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="8" name="b2" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 32" offset="12544" size="128" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="9" name="Add_14" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="10" name="h2_relu" type="ReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="11" name="wc" type="Const" version="opset1">
+			<data element_type="f32" shape="32, 5" offset="12672" size="640" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>32</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="12" name="MatMul_20" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>32</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="13" name="bc" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 5" offset="13312" size="20" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="14" name="Add_21" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="15" name="category_probs" type="SoftMax" version="opset8">
+			<data axis="1" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="16" name="wm" type="Const" version="opset1">
+			<data element_type="f32" shape="32, 5" offset="13332" size="640" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>32</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="17" name="MatMul_27" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>32</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="18" name="bm" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 5" offset="13972" size="20" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="19" name="Add_28" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="20" name="continuous_mood" type="Sigmoid" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="21" name="director_concat" type="Concat" version="opset1">
+			<data axis="1" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="director_out">
+					<dim>1</dim>
+					<dim>10</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="22" name="director_out" type="Result" version="opset1" output_names="director_out">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>10</dim>
+				</port>
+			</input>
+		</layer>
+	</layers>
+	<edges>
+		<edge from-layer="0" from-port="0" to-layer="2" to-port="0" />
+		<edge from-layer="1" from-port="0" to-layer="2" to-port="1" />
+		<edge from-layer="2" from-port="2" to-layer="4" to-port="0" />
+		<edge from-layer="3" from-port="0" to-layer="4" to-port="1" />
+		<edge from-layer="4" from-port="2" to-layer="5" to-port="0" />
+		<edge from-layer="5" from-port="1" to-layer="7" to-port="0" />
+		<edge from-layer="6" from-port="0" to-layer="7" to-port="1" />
+		<edge from-layer="7" from-port="2" to-layer="9" to-port="0" />
+		<edge from-layer="8" from-port="0" to-layer="9" to-port="1" />
+		<edge from-layer="9" from-port="2" to-layer="10" to-port="0" />
+		<edge from-layer="10" from-port="1" to-layer="12" to-port="0" />
+		<edge from-layer="10" from-port="1" to-layer="17" to-port="0" />
+		<edge from-layer="11" from-port="0" to-layer="12" to-port="1" />
+		<edge from-layer="12" from-port="2" to-layer="14" to-port="0" />
+		<edge from-layer="13" from-port="0" to-layer="14" to-port="1" />
+		<edge from-layer="14" from-port="2" to-layer="15" to-port="0" />
+		<edge from-layer="15" from-port="1" to-layer="21" to-port="0" />
+		<edge from-layer="16" from-port="0" to-layer="17" to-port="1" />
+		<edge from-layer="17" from-port="2" to-layer="19" to-port="0" />
+		<edge from-layer="18" from-port="0" to-layer="19" to-port="1" />
+		<edge from-layer="19" from-port="2" to-layer="20" to-port="0" />
+		<edge from-layer="20" from-port="1" to-layer="21" to-port="1" />
+		<edge from-layer="21" from-port="2" to-layer="22" to-port="0" />
+	</edges>
+	<rt_info>
+		<info name="OpenVINO Runtime" value="2026.4.1-22982-e213a147257-releases/2026/4" />
+	</rt_info>
+</net>

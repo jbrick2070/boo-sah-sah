@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "presets": [
+    {
+      "id": "safe",
+      "label": "Safe",
+      "render_width": 1280,
+      "render_height": 720,
+      "target_fps": 30,
+      "allow_dxr": false,
+      "allow_cuda": false,
+      "allow_tensor": false,
+      "allow_npu": false,
+      "rt_bounces": 0,
+      "particle_budget": 25000,
+      "tensor_resolution_divisor": 4,
+      "soft_vram_limit_mb": 4096
+    },
+    {
+      "id": "balanced",
+      "label": "Balanced",
+      "render_width": 1920,
+      "render_height": 1080,
+      "target_fps": 60,
+      "allow_dxr": true,
+      "allow_cuda": true,
+      "allow_tensor": true,
+      "allow_npu": true,
+      "rt_bounces": 1,
+      "particle_budget": 100000,
+      "tensor_resolution_divisor": 2,
+      "soft_vram_limit_mb": 12288
+    },
+    {
+      "id": "showcase",
+      "label": "Showcase",
+      "render_width": 2560,
+      "render_height": 1440,
+      "target_fps": 60,
+      "allow_dxr": true,
+      "allow_cuda": true,
+      "allow_tensor": true,
+      "allow_npu": true,
+      "rt_bounces": 2,
+      "particle_budget": 500000,
+      "tensor_resolution_divisor": 2,
+      "soft_vram_limit_mb": 14336
+    },
+    {
+      "id": "4k_experimental",
+      "label": "4K Experimental",
+      "render_width": 3840,
+      "render_height": 2160,
+      "target_fps": 60,
+      "allow_dxr": true,
+      "allow_cuda": true,
+      "allow_tensor": true,
+      "allow_npu": true,
+      "rt_bounces": 2,
+      "particle_budget": 1000000,
+      "tensor_resolution_divisor": 2,
+      "soft_vram_limit_mb": 14336
+    }
+  ]
+}

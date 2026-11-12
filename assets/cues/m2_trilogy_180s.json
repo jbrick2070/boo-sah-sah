@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-m2-trilogy-180s",
+  "duration_samples": 8640000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "shanghai_trestle",
+      "start_sample": 0,
+      "end_sample": 2880000,
+      "visual": "m2_shanghai_trestle_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m2_shanghai_trestle_raster",
+      "audio_section": "rail_minor_ninths",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "shenzhen_evtol",
+      "start_sample": 2880000,
+      "end_sample": 5760000,
+      "visual": "m2_shenzhen_evtol_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m2_shenzhen_evtol_raster",
+      "audio_section": "solar_aerial_harmonics",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "taipei_sanctuary",
+      "start_sample": 5760000,
+      "end_sample": 8640000,
+      "visual": "m2_taipei_sanctuary_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m2_taipei_sanctuary_raster",
+      "audio_section": "orchid_redemption_finale",
+      "reveal": "opening_scale_reveal",
+      "reveal_sample": 8064000,
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "rt": [
+      0,
+      2880000
+    ],
+    "tensor": [
+      2880000,
+      5760000
+    ],
+    "npu": [
+      5760000,
+      7200000
+    ],
+    "cuda": [
+      0,
+      2880000
+    ],
+    "finale": [
+      7824000,
+      8640000
+    ]
+  }
+}

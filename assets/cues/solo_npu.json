@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-solo-npu",
+  "duration_samples": 2160000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "madame_n_solo",
+      "start_sample": 0,
+      "end_sample": 2160000,
+      "visual": "madame_n_stage",
+      "preferred_engine": "NPU",
+      "fallback_visual": "madame_n_scripted",
+      "audio_section": "suspense_to_jazz_lounge",
+      "reveal": "midpoint_ecology_reveal",
+      "reveal_sample": 1200000,
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "npu": [0, 2160000]
+  }
+}

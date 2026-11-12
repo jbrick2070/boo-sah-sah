@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.bmesh binary
+*.bin binary
+*.mp4 binary
+*.cso binary
+*.png binary
+*.bmp binary
+assets/models/madame_n_director.xml binary

@@ -1,0 +1,10 @@
+build/
+out/
+.vs/
+.venv/
+*.user
+*.aps
+diagnostics/
+kibitz-runs/
+__pycache__/
+*.pyc

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-glass-orchid",
+  "duration_samples": 480000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "short_wrong_film",
+      "start_sample": 0,
+      "end_sample": 480000,
+      "visual": "intro_taipei_to_enamel",
+      "preferred_engine": "RT",
+      "fallback_visual": "intro_raster"
+    }
+  ]
+}

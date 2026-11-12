@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-glass-orchid",
+  "duration_samples": 17280000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "taipei_intro",
+      "start_sample": 0,
+      "end_sample": 2160000,
+      "visual": "intro_taipei_to_enamel",
+      "preferred_engine": "RT",
+      "fallback_visual": "intro_raster",
+      "audio_section": "orchestral_synth_noir_city_pop",
+      "reveal": "opening_scale_reveal",
+      "reveal_sample": 1728000,
+      "allow_director_modulation": true
+    },
+    {
+      "id": "mirror_intelligence",
+      "start_sample": 2160000,
+      "end_sample": 4800000,
+      "visual": "mirror_orchid",
+      "preferred_engine": "RT",
+      "fallback_visual": "mirror_probes",
+      "audio_section": "crystal_percussion_pulses",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "neural_velvet",
+      "start_sample": 4800000,
+      "end_sample": 7200000,
+      "visual": "neural_velvet_field",
+      "preferred_engine": "Tensor",
+      "fallback_visual": "neural_velvet_procedural",
+      "audio_section": "lush_harmonic_electronica",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "madame_n",
+      "start_sample": 7200000,
+      "end_sample": 9360000,
+      "visual": "madame_n_stage",
+      "preferred_engine": "NPU",
+      "fallback_visual": "madame_n_scripted",
+      "audio_section": "suspense_to_jazz_lounge",
+      "reveal": "midpoint_ecology_reveal",
+      "reveal_sample": 8400000,
+      "allow_director_modulation": true
+    },
+    {
+      "id": "particle_mutiny",
+      "start_sample": 9360000,
+      "end_sample": 11760000,
+      "visual": "particle_mutiny_cuda",
+      "preferred_engine": "CUDA",
+      "fallback_visual": "particle_mutiny_hlsl",
+      "audio_section": "jazz_funk_highlife_techno",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "signal_hijack",
+      "start_sample": 11760000,
+      "end_sample": 13200000,
+      "visual": "signal_hijack_nvenc",
+      "preferred_engine": "Codec",
+      "fallback_visual": "signal_hijack_shader",
+      "audio_section": "broken_beat_feedback_textures",
+      "allow_director_modulation": false
+    },
+    {
+      "id": "silicon_rebellion",
+      "start_sample": 13200000,
+      "end_sample": 17280000,
+      "visual": "silicon_rebellion_combined",
+      "preferred_engine": "Combined",
+      "fallback_visual": "silicon_rebellion_raster",
+      "audio_section": "grand_demoscene_finale",
+      "reveal": "final_everyday_care_reveal",
+      "reveal_sample": 16416000,
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "rt": [2160000, 4800000],
+    "tensor": [4800000, 7200000],
+    "npu": [7200000, 9360000],
+    "cuda": [9360000, 11760000],
+    "finale": [13200000, 17280000]
+  }
+}

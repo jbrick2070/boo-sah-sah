@@ -1,0 +1,61 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "x64-base-release",
+      "displayName": "Windows x64 Base-Only Release (M0 Default)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/x64-release",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BASE_ONLY": "ON",
+        "ENABLE_DXR": "ON",
+        "BOO_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "x64-base-debug",
+      "displayName": "Windows x64 Base-Only Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/x64-debug",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BASE_ONLY": "ON",
+        "ENABLE_DXR": "ON",
+        "BOO_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x64-base-release",
+      "configurePreset": "x64-base-release"
+    },
+    {
+      "name": "x64-base-debug",
+      "configurePreset": "x64-base-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "x64-base-release",
+      "configurePreset": "x64-base-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

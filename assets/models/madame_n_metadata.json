@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "model_id": "madame_n_director_v1",
+  "seed": 266203,
+  "architecture": "MLP 16 -> 64 (ReLU) -> 32 (ReLU) -> [Softmax(5), Sigmoid(5)]",
+  "input_name": "features",
+  "input_shape": [
+    1,
+    16
+  ],
+  "output_name": "director_out",
+  "output_shape": [
+    1,
+    10
+  ],
+  "categories": [
+    "Calm",
+    "Suspense",
+    "Bloom",
+    "Comic",
+    "Transition"
+  ],
+  "continuous_controls": [
+    "bloomStrength",
+    "irisAngle",
+    "lightTension",
+    "spectralShift",
+    "cutAccent"
+  ],
+  "training_category_accuracy": 1.0,
+  "training_mood_mse": 0.000157,
+  "xml_file": "assets/models/madame_n_director.xml",
+  "xml_sha256": "f919bc523849191bde20812297e40c0735a7685f57525f7d03ed4c3fd8f90aaf",
+  "bin_file": "assets/models/madame_n_director.bin",
+  "bin_sha256": "72f7826cf0c8feaffb5b1f462f4b329cfe9be64b522c2025e44d0639c007ccf1"
+}

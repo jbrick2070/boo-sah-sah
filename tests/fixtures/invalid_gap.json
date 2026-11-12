@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "film_id": "test-gap-film",
+  "duration_samples": 96000,
+  "sample_rate": 48000,
+  "seed": 1,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "act_a",
+      "start_sample": 0,
+      "end_sample": 40000,
+      "visual": "intro_raster",
+      "preferred_engine": "Raster",
+      "fallback_visual": "intro_raster"
+    },
+    {
+      "id": "act_b",
+      "start_sample": 48000,
+      "end_sample": 96000,
+      "visual": "intro_raster",
+      "preferred_engine": "Raster",
+      "fallback_visual": "intro_raster"
+    }
+  ]
+}

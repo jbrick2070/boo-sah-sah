@@ -1,0 +1,48 @@
+# BOO SAH SAH — The Glass Orchid Protocol
+# Default Runtime Configuration (Offline-First, Noninteractive)
+
+[app]
+title = "BOO SAH SAH — The Glass Orchid Protocol"
+edition = "family"
+playback_mode = "full"
+cue_file = "assets/cues/film_360s.json"
+manifest_file = "assets/manifest.json"
+presets_file = "config/quality_presets.json"
+loop = false
+
+[display]
+width = 1920
+height = 1080
+fullscreen = false
+vsync = true
+quality_preset = "balanced"
+show_overlay = true
+captions = true
+reduced_flash = false
+reduced_motion = false
+
+[audio]
+sample_rate = 48000
+mute = false
+master_volume = 0.25
+force_silent_clock = false
+
+[hardware]
+enable_signal_hijack = false
+disable_rt = false
+disable_cuda = false
+disable_tensor = false
+disable_npu = false
+disable_nvenc = false
+
+[integrations]
+enable_spout = false
+spout_sender_name = "BooSahSah_Clean"
+
+[media]
+input_file = ""
+camera_input = false
+
+[diagnostics]
+log_level = "info"
+log_file = ""

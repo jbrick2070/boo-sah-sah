@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-solo-tensor",
+  "duration_samples": 2400000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "neural_velvet_solo",
+      "start_sample": 0,
+      "end_sample": 2400000,
+      "visual": "neural_velvet_field",
+      "preferred_engine": "Tensor",
+      "fallback_visual": "neural_velvet_procedural",
+      "audio_section": "lush_harmonic_electronica",
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "tensor": [0, 2400000]
+  }
+}

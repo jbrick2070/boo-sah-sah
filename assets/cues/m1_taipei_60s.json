@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "film_id": "boo-sah-sah-m1-taipei-60s",
+  "duration_samples": 2880000,
+  "sample_rate": 48000,
+  "seed": 266203,
+  "edition": "family",
+  "scenes": [
+    {
+      "id": "taipei_rain_corridor",
+      "start_sample": 0,
+      "end_sample": 960000,
+      "visual": "m1_taipei_rain_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m1_taipei_rain_raster",
+      "audio_section": "taipei_rain_rhodes",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "enamel_monolith_ascent",
+      "start_sample": 960000,
+      "end_sample": 1920000,
+      "visual": "m1_enamel_ascent_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m1_enamel_ascent_raster",
+      "audio_section": "enamel_bass_ostinato",
+      "allow_director_modulation": true
+    },
+    {
+      "id": "glass_orchid_opening_reveal",
+      "start_sample": 1920000,
+      "end_sample": 2880000,
+      "visual": "m1_orchid_reveal_dxr",
+      "preferred_engine": "RT",
+      "fallback_visual": "m1_orchid_reveal_raster",
+      "audio_section": "orchid_crystal_reveal",
+      "reveal": "opening_scale_reveal",
+      "reveal_sample": 2160000,
+      "allow_director_modulation": true
+    }
+  ],
+  "solo_loops": {
+    "rt": [1920000, 2880000],
+    "tensor": [0, 960000],
+    "npu": [960000, 1920000],
+    "cuda": [1920000, 2880000],
+    "finale": [1920000, 2880000]
+  }
+}
