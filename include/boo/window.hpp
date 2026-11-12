@@ -53,6 +53,10 @@ enum class TransportCommand : uint8_t {
     HeroPreset4,
     HeroPreset5,
     HeroPreset6,
+    CycleAovMode,
+    ResetAovMode,
+    SpawnMarbles,
+    ClearMarbles,
     Quit
 };
 

@@ -111,9 +111,12 @@ struct SceneCue {
 };
 
 // Live "Explore" mode (NVIDIA-demo style): free-fly camera, interactive sun/time-of-day and
-// practical-lamp control, plus progressive path-traced accumulation while the view is still.
+// practical-lamp control, AOV buffer inspection, interactive ray-traced physics marbles, plus
+// NRD REBLUR motion denoising and NRD REFERENCE progressive accumulation while still.
 // Default-constructed (inactive) values leave the deterministic film output untouched.
 struct InteractiveView {
+    static constexpr uint32_t kMaxMarbles = 12;
+
     bool exploreActive = false;          // Active interactive Explore session
     float blendWeight = 0.0f;            // [0..1] camera blend (1=Explore, (0,1)=smooth cubic return to film)
     float eye[3]{0.0f, 0.0f, 0.0f};
@@ -130,6 +133,12 @@ struct InteractiveView {
     uint32_t accumFrame = 0;             // 0 = reset history this frame
     float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
     uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark
+    uint32_t aovMode = 0;                // 0 = Final, 1..7 = AOV buffer inspection modes
+    uint32_t marbleCount = 0;            // 0 = none (canonical), 1..kMaxMarbles = active physics spheres
+    float marblePosRad[kMaxMarbles][4]{};  // xyz = world position, w = sphere radius (m)
+    float marblePrevPos[kMaxMarbles][4]{}; // xyz = previous frame world position (for 3D motion vectors)
+    float marbleRotQuat[kMaxMarbles][4]{}; // xyzw = unit rotation quaternion for rolling grain/anisotropy
+    uint32_t marbleMat[kMaxMarbles]{};     // Material ID (3 crystal, 4 celadon, 35 amber, 8 gold, 23 nickel)
 };
 
 struct FrameContext {

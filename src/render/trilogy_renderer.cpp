@@ -38,6 +38,127 @@ void normalize(float v[3]) {float l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for
 void cross(const float a[3],const float b[3],float r[3]) {r[0]=a[1]*b[2]-a[2]*b[1];r[1]=a[2]*b[0]-a[0]*b[2];r[2]=a[0]*b[1]-a[1]*b[0];}
 bool isCutoutMaterial(uint32_t m) noexcept { return m == 29u || m == 36u; }
 
+uint16_t floatToHalfBits(float val) noexcept {
+    if (!std::isfinite(val)) return 0u;
+    val = std::clamp(val, -65504.0f, 65504.0f);
+    uint32_t bits = 0;
+    std::memcpy(&bits, &val, sizeof(bits));
+    const uint32_t sign = (bits >> 16u) & 0x8000u;
+    const int32_t exp32 = static_cast<int32_t>((bits >> 23u) & 0xFFu) - 127;
+    uint32_t mant = bits & 0x007FFFFFu;
+    if (exp32 < -24) return static_cast<uint16_t>(sign);
+    if (exp32 < -14) {
+        mant |= 0x00800000u;
+        const int32_t shift = -14 - exp32;
+        const uint32_t sub = (mant + (1u << (shift + 12))) >> (shift + 13);
+        return static_cast<uint16_t>(sign | (sub & 0x03FFu));
+    }
+    if (exp32 > 15) return static_cast<uint16_t>(sign | 0x7BFFu);
+    const uint32_t exp16 = static_cast<uint32_t>(exp32 + 15) << 10u;
+    const uint32_t mant16 = (mant + 0x00001000u) >> 13u;
+    return static_cast<uint16_t>(sign | (exp16 + mant16));
+}
+
+void packDrawMotionVectors(DrawConstants& dc, float mvX, float mvY, float mvZ) noexcept {
+    const uint16_t hx = floatToHalfBits(mvX);
+    const uint16_t hy = floatToHalfBits(mvY);
+    const uint16_t hz = floatToHalfBits(mvZ);
+    dc.part = (dc.part & 0xFFFFu) | (static_cast<uint32_t>(hx) << 16u);
+    dc.pad  = static_cast<uint32_t>(hy) | (static_cast<uint32_t>(hz) << 16u);
+}
+
+void buildColumnMajorCameraMatrices(
+    const float eye[3],
+    const float right[3],
+    const float up[3],
+    const float forward[3],
+    float fovY,
+    float aspect,
+    float outWorldToView[16],
+    float outViewToClip[16]) noexcept {
+    // Column-major LH WorldToView matching VSMain & NRD MathLib (m_ViewToWorld[3].xyz == eye)
+    const float tx = -(right[0] * eye[0] + right[1] * eye[1] + right[2] * eye[2]);
+    const float ty = -(up[0] * eye[0] + up[1] * eye[1] + up[2] * eye[2]);
+    const float tz = -(forward[0] * eye[0] + forward[1] * eye[1] + forward[2] * eye[2]);
+    outWorldToView[0]  = right[0]; outWorldToView[1]  = up[0]; outWorldToView[2]  = forward[0]; outWorldToView[3]  = 0.0f;
+    outWorldToView[4]  = right[1]; outWorldToView[5]  = up[1]; outWorldToView[6]  = forward[1]; outWorldToView[7]  = 0.0f;
+    outWorldToView[8]  = right[2]; outWorldToView[9]  = up[2]; outWorldToView[10] = forward[2]; outWorldToView[11] = 0.0f;
+    outWorldToView[12] = tx;       outWorldToView[13] = ty;    outWorldToView[14] = tz;         outWorldToView[15] = 1.0f;
+
+    // Column-major un-jittered LH D3D projection [0.1 .. 1000.0] matching VSMain o.pos
+    const float fy = 1.0f / std::tan(std::max(fovY * 0.5f, 0.05f));
+    constexpr float zNear = 0.1f;
+    constexpr float zFar = 1000.0f;
+    std::memset(outViewToClip, 0, sizeof(float) * 16);
+    outViewToClip[0]  = fy / std::max(aspect, 1e-4f);
+    outViewToClip[5]  = fy;
+    outViewToClip[10] = zFar / (zFar - zNear);
+    outViewToClip[11] = 1.0f;
+    outViewToClip[14] = -zNear * zFar / (zFar - zNear);
+}
+
+static constexpr std::array<uint32_t, 6> kMarbleTemplateMats = {3u, 4u, 35u, 8u, 23u, 31u};
+
+BmeshSubmesh appendSmoothSphereTemplate(
+    std::vector<BmeshVertex>& vertices,
+    std::vector<uint32_t>& indices,
+    uint32_t matId,
+    uint32_t partId) {
+    constexpr uint32_t kSlices = 48u;
+    constexpr uint32_t kStacks = 32u;
+    constexpr float kPi = 3.14159265358979323846f;
+    BmeshSubmesh sub{};
+    sub.firstVertex = static_cast<uint32_t>(vertices.size());
+    sub.firstIndex  = static_cast<uint32_t>(indices.size());
+    sub.material    = matId;
+    sub.part        = partId;
+
+    for (uint32_t st = 0; st <= kStacks; ++st) {
+        const float v = static_cast<float>(st) / static_cast<float>(kStacks);
+        const float theta = v * kPi;
+        const float stSin = std::sin(theta);
+        const float stCos = std::cos(theta);
+        for (uint32_t sl = 0; sl <= kSlices; ++sl) {
+            const float u = static_cast<float>(sl) / static_cast<float>(kSlices);
+            const float phi = u * (2.0f * kPi);
+            const float sp = std::sin(phi);
+            const float cp = std::cos(phi);
+            BmeshVertex vert{};
+            vert.positionMaterial[0] = stSin * cp;
+            vert.positionMaterial[1] = stCos;
+            vert.positionMaterial[2] = stSin * sp;
+            vert.positionMaterial[3] = static_cast<float>(matId);
+            vert.normalPart[0] = vert.positionMaterial[0];
+            vert.normalPart[1] = vert.positionMaterial[1];
+            vert.normalPart[2] = vert.positionMaterial[2];
+            vert.normalPart[3] = static_cast<float>(partId);
+            vert.uvThicknessRoughness[0] = u * 2.0f;
+            vert.uvThicknessRoughness[1] = v * 2.0f;
+            vert.uvThicknessRoughness[2] = 0.044f;
+            vert.uvThicknessRoughness[3] = (matId == 3u || matId == 4u || matId == 35u) ? 0.025f : 0.16f;
+            vert.tangentSign[0] = -sp;
+            vert.tangentSign[1] = 0.0f;
+            vert.tangentSign[2] = cp;
+            vert.tangentSign[3] = 1.0f;
+            vertices.push_back(vert);
+        }
+    }
+    sub.vertexCount = static_cast<uint32_t>(vertices.size()) - sub.firstVertex;
+
+    for (uint32_t st = 0; st < kStacks; ++st) {
+        for (uint32_t sl = 0; sl < kSlices; ++sl) {
+            const uint32_t i0 = sub.firstVertex + st * (kSlices + 1u) + sl;
+            const uint32_t i1 = i0 + 1u;
+            const uint32_t i2 = i0 + (kSlices + 1u);
+            const uint32_t i3 = i2 + 1u;
+            indices.push_back(i0); indices.push_back(i1); indices.push_back(i2);
+            indices.push_back(i1); indices.push_back(i3); indices.push_back(i2);
+        }
+    }
+    sub.indexCount = static_cast<uint32_t>(indices.size()) - sub.firstIndex;
+    return sub;
+}
+
 ComPtr<ID3D12Resource> uploadBtexArray(ID3D12Device* d, D3D12Context& ctx, const Btex& tex, std::string* err) {
     D3D12_HEAP_PROPERTIES defHp{}; defHp.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd{};
@@ -102,11 +223,16 @@ struct TrilogyMeshRenderer::Impl {
     ShowVisualMode visualMode=ShowVisualMode::M2Trilogy180s;
     struct Part {BmeshSubmesh sub;uint32_t kit;ComPtr<ID3D12Resource> blas;};
     std::vector<Part> parts;
+    std::array<Part,6> marbleTemplates{};
+    size_t maxTlasInstances=0;
     ComPtr<ID3D12Resource> vb,ib,scratch,tlas,tlasScratch,instances,depth;
     ComPtr<ID3D12Resource> albedoTex,normalTex,ormtTex,envIblTex,fallbackTensorTex;
+    ComPtr<ID3D12Resource> gbufNormRough,gbufDiffRadHit,gbufSpecRadHit,gbufModViewZ,nrdMv;
+    ComPtr<ID3D12Resource> nrdNormRough,nrdViewZ,nrdDiffIn,nrdSpecIn;
     ComPtr<ID3D12DescriptorHeap> rtv,dsv,srvHeap;
-    ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> depthOpaque,depthCutout,raster,rasterCutout,rt,rtCutout,sky;
+    ComPtr<ID3D12RootSignature> root,denoiseRoot,nrdPackRoot;
+    ComPtr<ID3D12PipelineState> depthOpaque,depthCutout,raster,rasterCutout,rt,rtCutout,sky,skyRt;
+    ComPtr<ID3D12PipelineState> denoiseResolve,nrdPackCs,nrdUnpackPs;
     std::array<ComPtr<ID3D12Resource>,4> counters,readbacks;
     ComPtr<ID3D12Resource> zero;
     std::array<bool,4> pending{};
@@ -114,6 +240,9 @@ struct TrilogyMeshRenderer::Impl {
     ComPtr<ID3D12Resource> accum;ComPtr<ID3D12RootSignature> accumRoot;ComPtr<ID3D12PipelineState> accumBlend,accumResolve;
     bool accumValid=false;
     NrdBridge nrd;
+    uint32_t reblurFrameCounter=0,denoiseMode=0;
+    bool reblurPrevValid=false,prevSunOverride=false,prevLampsOff=false;
+    float prevWorldToView[16]{},prevViewToClip[16]{},prevEye[3]{},prevForward[3]{},prevSunDir[3]{};
     uint32_t w=0,h=0,hits=0,queries=0,fallbacks=0;
     bool verified=false,rtReady=false;
     explicit Impl(D3D12Context& c):context(c),nrd(c){}
@@ -300,6 +429,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                 vertices.insert(vertices.end(),micro.vertices.begin(),micro.vertices.end());
             }
         }
+        for (size_t m = 0; m < kMarbleTemplateMats.size(); ++m) {
+            BmeshSubmesh sph = appendSmoothSphereTemplate(vertices, indices, kMarbleTemplateMats[m], 900u + static_cast<uint32_t>(m));
+            s.marbleTemplates[m] = Impl::Part{sph, 99u, {}};
+        }
         const size_t vbBytes = vertices.size() * sizeof(BmeshVertex);
         const size_t ibBytes = indices.size() * sizeof(uint32_t);
         auto vbUpload = buffer(d, vbBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -352,7 +485,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
 
         D3D12_DESCRIPTOR_HEAP_DESC shd{};
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        shd.NumDescriptors = 5 + 2 * 4; // + per-slot accumulation SRVs (hdr, history)
+        shd.NumDescriptors = 96; // 5 static + 4 slots * 20 per-pass denoise/pack/unpack/accum descriptors
         shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(d->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&s.srvHeap)));
         const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -427,7 +560,8 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         dp.PS={psDepthCut.data(),psDepthCut.size()};check(d->CreateGraphicsPipelineState(&dp,IID_PPV_ARGS(&s.depthCutout)));
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};pd.pRootSignature=s.root.Get();pd.VS={vs.data(),vs.size()};pd.PS={ps.data(),ps.size()};
-        pd.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;pd.BlendState.RenderTarget[1].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;pd.SampleMask=UINT_MAX;
+        pd.BlendState.IndependentBlendEnable=FALSE;
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;pd.SampleMask=UINT_MAX;
         pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;pd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;pd.RasterizerState.DepthClipEnable=TRUE;
         pd.DepthStencilState.DepthEnable=TRUE;pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_EQUAL;
         pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;pd.NumRenderTargets=2;pd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
@@ -436,46 +570,103 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};ComPtr<ID3D12Device5> d5;
         s.rtReady=!s.context.isWarp()&&SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,&options,sizeof(options)))&&options.RaytracingTier>=D3D12_RAYTRACING_TIER_1_1&&SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&d5)));
         if(s.rtReady) {
-            auto rps=shader("m2_mesh_rt_ps.cso");pd.PS={rps.data(),rps.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.rt)));
-            auto rpsCut=shader("m2_mesh_rt_cutout_ps.cso");pd.PS={rpsCut.data(),rpsCut.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.rtCutout)));
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pdRt=pd;
+            pdRt.NumRenderTargets=7;
+            pdRt.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pdRt.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
+            pdRt.RTVFormats[2]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pdRt.RTVFormats[3]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pdRt.RTVFormats[4]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pdRt.RTVFormats[5]=DXGI_FORMAT_R32G32B32A32_UINT;
+            pdRt.RTVFormats[6]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            auto rps=shader("m2_mesh_rt_ps.cso");pdRt.PS={rps.data(),rps.size()};check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rt)));
+            auto rpsCut=shader("m2_mesh_rt_cutout_ps.cso");pdRt.PS={rpsCut.data(),rpsCut.size()};check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rtCutout)));
+            auto skyRtPs=shader("m2_sky_rt_ps.cso");pdRt.VS={skyvs.data(),skyvs.size()};pdRt.PS={skyRtPs.data(),skyRtPs.size()};
+            pdRt.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pdRt.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.skyRt)));
         }
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.sky)));
+        const auto avs=shader("m2_accum_vs.cso");
         {
             // Accumulation root signature: one SRV table (t0, space1), pixel-only
             D3D12_DESCRIPTOR_RANGE ar{};ar.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ar.NumDescriptors=1;ar.BaseShaderRegister=0;ar.RegisterSpace=1;
             D3D12_ROOT_PARAMETER ap{};ap.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;ap.DescriptorTable={1,&ar};ap.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
             D3D12_ROOT_SIGNATURE_DESC ars{};ars.NumParameters=1;ars.pParameters=&ap;
             ComPtr<ID3DBlob> ab,ae;check(D3D12SerializeRootSignature(&ars,D3D_ROOT_SIGNATURE_VERSION_1,&ab,&ae));check(d->CreateRootSignature(0,ab->GetBufferPointer(),ab->GetBufferSize(),IID_PPV_ARGS(&s.accumRoot)));
-            const auto avs=shader("m2_accum_vs.cso"),abps=shader("m2_accum_blend_ps.cso"),arps=shader("m2_accum_resolve_ps.cso");
+            const auto abps=shader("m2_accum_blend_ps.cso"),arps=shader("m2_accum_resolve_ps.cso");
             D3D12_GRAPHICS_PIPELINE_STATE_DESC ad{};ad.pRootSignature=s.accumRoot.Get();ad.VS={avs.data(),avs.size()};ad.PS={abps.data(),abps.size()};ad.SampleMask=UINT_MAX;
             ad.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;ad.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;ad.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;ad.NumRenderTargets=1;ad.SampleDesc.Count=1;
             auto& bt=ad.BlendState.RenderTarget[0];bt.BlendEnable=TRUE;bt.SrcBlend=D3D12_BLEND_BLEND_FACTOR;bt.DestBlend=D3D12_BLEND_INV_BLEND_FACTOR;bt.BlendOp=D3D12_BLEND_OP_ADD;bt.SrcBlendAlpha=D3D12_BLEND_BLEND_FACTOR;bt.DestBlendAlpha=D3D12_BLEND_INV_BLEND_FACTOR;bt.BlendOpAlpha=D3D12_BLEND_OP_ADD;bt.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
             ad.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT;check(d->CreateGraphicsPipelineState(&ad,IID_PPV_ARGS(&s.accumBlend)));
             bt.BlendEnable=FALSE;ad.PS={arps.data(),arps.size()};ad.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;check(d->CreateGraphicsPipelineState(&ad,IID_PPV_ARGS(&s.accumResolve)));
         }
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=3;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
+        if (s.rtReady) {
+            // Denoise resolve + NRD unpack graphics root signature: b0(space1) 4 dwords + t0..t3(space1)
+            D3D12_DESCRIPTOR_RANGE dr{};dr.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;dr.NumDescriptors=4;dr.BaseShaderRegister=0;dr.RegisterSpace=1;
+            D3D12_ROOT_PARAMETER dp2[2]{};
+            dp2[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;dp2[0].Constants={0,1,4};dp2[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+            dp2[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;dp2[1].DescriptorTable={1,&dr};dp2[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC drs{};drs.NumParameters=2;drs.pParameters=dp2;
+            ComPtr<ID3DBlob> db,de;check(D3D12SerializeRootSignature(&drs,D3D_ROOT_SIGNATURE_VERSION_1,&db,&de));
+            check(d->CreateRootSignature(0,db->GetBufferPointer(),db->GetBufferSize(),IID_PPV_ARGS(&s.denoiseRoot)));
+
+            const auto denPs=shader("m2_denoise_resolve_ps.cso"),unpPs=shader("m2_nrd_unpack_ps.cso");
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC dd{};dd.pRootSignature=s.denoiseRoot.Get();dd.VS={avs.data(),avs.size()};dd.PS={denPs.data(),denPs.size()};dd.SampleMask=UINT_MAX;
+            dd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;dd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;dd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;dd.NumRenderTargets=1;dd.SampleDesc.Count=1;
+            auto& dbt=dd.BlendState.RenderTarget[0];
+            dbt.BlendEnable=TRUE;dbt.SrcBlend=D3D12_BLEND_ONE;dbt.DestBlend=D3D12_BLEND_ONE;dbt.BlendOp=D3D12_BLEND_OP_ADD;
+            dbt.SrcBlendAlpha=D3D12_BLEND_ZERO;dbt.DestBlendAlpha=D3D12_BLEND_ONE;dbt.BlendOpAlpha=D3D12_BLEND_OP_ADD;dbt.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
+            dd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            check(d->CreateGraphicsPipelineState(&dd,IID_PPV_ARGS(&s.denoiseResolve)));
+            dd.PS={unpPs.data(),unpPs.size()};
+            check(d->CreateGraphicsPipelineState(&dd,IID_PPV_ARGS(&s.nrdUnpackPs)));
+
+            // NRD REBLUR pack compute root signature: b0(space1) 4 dwords + t0..t3(space1) + u0..u3(space1)
+            D3D12_DESCRIPTOR_RANGE csSrv{};csSrv.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;csSrv.NumDescriptors=4;csSrv.BaseShaderRegister=0;csSrv.RegisterSpace=1;
+            D3D12_DESCRIPTOR_RANGE csUav{};csUav.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_UAV;csUav.NumDescriptors=4;csUav.BaseShaderRegister=0;csUav.RegisterSpace=1;
+            D3D12_ROOT_PARAMETER cp[3]{};
+            cp[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;cp[0].Constants={0,1,4};cp[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+            cp[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;cp[1].DescriptorTable={1,&csSrv};cp[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+            cp[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;cp[2].DescriptorTable={1,&csUav};cp[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_SIGNATURE_DESC crs{};crs.NumParameters=3;crs.pParameters=cp;
+            ComPtr<ID3DBlob> cb,ce;check(D3D12SerializeRootSignature(&crs,D3D_ROOT_SIGNATURE_VERSION_1,&cb,&ce));
+            check(d->CreateRootSignature(0,cb->GetBufferPointer(),cb->GetBufferSize(),IID_PPV_ARGS(&s.nrdPackRoot)));
+            const auto packCs=shader("m2_nrd_pack_cs.cso");
+            D3D12_COMPUTE_PIPELINE_STATE_DESC cpd{};cpd.pRootSignature=s.nrdPackRoot.Get();cpd.CS={packCs.data(),packCs.size()};
+            check(d->CreateComputePipelineState(&cpd,IID_PPV_ARGS(&s.nrdPackCs)));
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=8;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
         if(s.rtReady) {
-            const size_t count=s.parts.size();std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries(count);std::vector<D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS> inputs(count);uint64_t scratchBytes=256;
-            for(size_t i=0;i<count;++i) {
+            const size_t count=s.parts.size();
+            const size_t totalBlas=count+s.marbleTemplates.size();
+            s.maxTlasInstances=count+InteractiveView::kMaxMarbles;
+            std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries(totalBlas);
+            std::vector<D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS> inputs(totalBlas);
+            uint64_t scratchBytes=256;
+            for(size_t i=0;i<totalBlas;++i) {
+                Impl::Part& pRef = (i < count) ? s.parts[i] : s.marbleTemplates[i - count];
                 auto& g=geometries[i];g.Type=D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-                g.Flags=isCutoutMaterial(s.parts[i].sub.material)?D3D12_RAYTRACING_GEOMETRY_FLAG_NONE:D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+                g.Flags=isCutoutMaterial(pRef.sub.material)?D3D12_RAYTRACING_GEOMETRY_FLAG_NONE:D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
                 g.Triangles.VertexBuffer={s.vb->GetGPUVirtualAddress(),sizeof(BmeshVertex)};g.Triangles.VertexCount=static_cast<UINT>(vertices.size());g.Triangles.VertexFormat=DXGI_FORMAT_R32G32B32_FLOAT;
-                g.Triangles.IndexBuffer=s.ib->GetGPUVirtualAddress()+uint64_t(s.parts[i].sub.firstIndex)*4;g.Triangles.IndexCount=s.parts[i].sub.indexCount;g.Triangles.IndexFormat=DXGI_FORMAT_R32_UINT;
+                g.Triangles.IndexBuffer=s.ib->GetGPUVirtualAddress()+uint64_t(pRef.sub.firstIndex)*4;g.Triangles.IndexCount=pRef.sub.indexCount;g.Triangles.IndexFormat=DXGI_FORMAT_R32_UINT;
                 auto& in=inputs[i];in.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;in.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;in.NumDescs=1;in.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;in.pGeometryDescs=&g;
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};d5->GetRaytracingAccelerationStructurePrebuildInfo(&in,&pre);scratchBytes=std::max(scratchBytes,pre.ScratchDataSizeInBytes);
-                s.parts[i].blas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                pRef.blas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             }
             s.scratch=buffer(d,scratchBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};ti.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;ti.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;ti.NumDescs=static_cast<UINT>(count);ti.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};ti.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;ti.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;ti.NumDescs=static_cast<UINT>(s.maxTlasInstances);ti.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};d5->GetRaytracingAccelerationStructurePrebuildInfo(&ti,&pre);
             s.tlas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             s.tlasScratch=buffer(d,pre.ScratchDataSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            s.instances=buffer(d,count*sizeof(D3D12_RAYTRACING_INSTANCE_DESC)*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+            s.instances=buffer(d,s.maxTlasInstances*sizeof(D3D12_RAYTRACING_INSTANCE_DESC)*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
             if(!s.context.executeSingleCommandListAndWait([&](void* raw) {
                 ComPtr<ID3D12GraphicsCommandList4> cmd;check(static_cast<ID3D12GraphicsCommandList*>(raw)->QueryInterface(IID_PPV_ARGS(&cmd)));
-                for(size_t i=0;i<count;++i) {D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs=inputs[i];build.ScratchAccelerationStructureData=s.scratch->GetGPUVirtualAddress();build.DestAccelerationStructureData=s.parts[i].blas->GetGPUVirtualAddress();cmd->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd.Get(),s.scratch.Get());uav(cmd.Get(),s.parts[i].blas.Get());}
+                for(size_t i=0;i<totalBlas;++i) {
+                    Impl::Part& pRef = (i < count) ? s.parts[i] : s.marbleTemplates[i - count];
+                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs=inputs[i];build.ScratchAccelerationStructureData=s.scratch->GetGPUVirtualAddress();build.DestAccelerationStructureData=pRef.blas->GetGPUVirtualAddress();cmd->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd.Get(),s.scratch.Get());uav(cmd.Get(),pRef.blas.Get());
+                }
             },error))return false;
         }
         s.nrd.initialize(nullptr);
@@ -494,6 +685,41 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
         check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_DEPTH_WRITE,&clear,IID_PPV_ARGS(&depth)));s.depth=std::move(depth);d->CreateDepthStencilView(s.depth.Get(),nullptr,s.dsv->GetCPUDescriptorHandleForHeapStart());
         rd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;ComPtr<ID3D12Resource> acc;
         check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&acc)));s.accum=std::move(acc);s.accumValid=false;
+
+        if (s.rtReady) {
+            auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initState) {
+                D3D12_RESOURCE_DESC td = rd;
+                td.Format = fmt;
+                td.Flags = flags;
+                ComPtr<ID3D12Resource> tex;
+                check(d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, initState, nullptr, IID_PPV_ARGS(&tex)));
+                return tex;
+            };
+            s.gbufNormRough  = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            s.gbufDiffRadHit = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            s.gbufSpecRadHit = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            s.gbufModViewZ   = makeTex(DXGI_FORMAT_R32G32B32A32_UINT,  D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            s.nrdMv          = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            s.nrdNormRough   = makeTex(DXGI_FORMAT_R10G10B10A2_UNORM,  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            s.nrdViewZ       = makeTex(DXGI_FORMAT_R32_FLOAT,          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            s.nrdDiffIn      = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            s.nrdSpecIn      = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            // Contiguous RTV slots [2..6] match SV_Target2..SV_Target6; slot [7] holds s.accum
+            const UINT rtvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            auto rtvAt = [&](UINT idx) {
+                auto h = s.rtv->GetCPUDescriptorHandleForHeapStart();
+                h.ptr += SIZE_T(idx) * rtvInc;
+                return h;
+            };
+            d->CreateRenderTargetView(s.gbufNormRough.Get(),  nullptr, rtvAt(2u));
+            d->CreateRenderTargetView(s.gbufDiffRadHit.Get(), nullptr, rtvAt(3u));
+            d->CreateRenderTargetView(s.gbufSpecRadHit.Get(), nullptr, rtvAt(4u));
+            d->CreateRenderTargetView(s.gbufModViewZ.Get(),   nullptr, rtvAt(5u));
+            d->CreateRenderTargetView(s.nrdMv.Get(),          nullptr, rtvAt(6u));
+        }
+        s.reblurPrevValid=false;
         s.nrd.resize(width,height);
         s.w=width;s.h=height;return true;
     }catch(...) {return false;}
@@ -505,30 +731,99 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
 bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
-    const bool useRt=raytracing&&s.rtReady;
-    if(!useRt&&canonical)s.verified=false;
+    const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
+    if(!useRt&&canonical){s.verified=false;s.denoiseMode=0u;}
     const bool isM2=(s.visualMode==ShowVisualMode::M2Trilogy180s);
     const float filmTime=float(double(f.samplePosition)/f.sampleRate);
     const uint32_t act=isM2
         ? static_cast<uint32_t>(std::clamp<int64_t>(f.samplePosition/2880000,0,2))
         : ((s.visualMode==ShowVisualMode::FullFilm360s&&filmTime>=245.f&&filmTime<275.f)?1u:2u);
-    std::vector<DrawConstants> draws;std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst;
+
+    const InteractiveView& iv=f.interactive;
+    const uint32_t dynMarbles=std::min<uint32_t>(iv.marbleCount,InteractiveView::kMaxMarbles);
+
+    struct DrawEntry { DrawConstants dc; uint32_t indexCount; uint32_t material; uint32_t mask; };
+    std::vector<DrawEntry> drawList;
+    drawList.reserve(s.parts.size() + dynMarbles);
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst;
+    inst.reserve(s.parts.size() + dynMarbles);
+
     for(const auto& part:s.parts) {
-        auto draw=s.transform(part,f,camera);draws.push_back(draw);
+        auto draw=s.transform(part,f,camera);
         const bool active=isM2?(part.kit==act||(act==2&&part.kit>=2)):s.isPartActiveInShow(part,filmTime);
         const bool thinGlass=(part.sub.material==3||part.sub.material==4||part.sub.material==18||part.sub.material==21||part.sub.material==35||part.sub.material==40);
-        D3D12_RAYTRACING_INSTANCE_DESC id{};std::memcpy(id.Transform,draw.rows,48);id.InstanceID=part.sub.firstIndex;id.InstanceMask=active?(thinGlass?2u:1u):0u;id.Flags=D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;if(part.blas)id.AccelerationStructure=part.blas->GetGPUVirtualAddress();inst.push_back(id);
+        const uint32_t mask=active?(thinGlass?2u:1u):0u;
+        drawList.push_back({draw, part.sub.indexCount, part.sub.material, mask});
+        D3D12_RAYTRACING_INSTANCE_DESC id{};std::memcpy(id.Transform,draw.rows,48);id.InstanceID=part.sub.firstIndex;id.InstanceMask=mask;id.Flags=D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;if(part.blas)id.AccelerationStructure=part.blas->GetGPUVirtualAddress();inst.push_back(id);
     }
+
+    // Append dynamic rigid-body ray-traced physics marbles (with 3D rotation quaternion + world motion vectors!)
+    for (uint32_t m = 0; m < dynMarbles; ++m) {
+        const float rad = std::clamp(iv.marblePosRad[m][3], 0.005f, 0.25f);
+        const uint32_t reqMat = iv.marbleMat[m];
+        size_t tplIdx = 0;
+        for (size_t k = 0; k < kMarbleTemplateMats.size(); ++k) {
+            if (kMarbleTemplateMats[k] == reqMat) { tplIdx = k; break; }
+        }
+        const Impl::Part& tpl = s.marbleTemplates[tplIdx];
+        const float qx = iv.marbleRotQuat[m][0], qy = iv.marbleRotQuat[m][1], qz = iv.marbleRotQuat[m][2];
+        float qw = iv.marbleRotQuat[m][3];
+        const float qLen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+        const float invQ = (qLen2 > 1e-8f) ? (1.0f / std::sqrt(qLen2)) : 0.0f;
+        const float x = (qLen2 > 1e-8f) ? (qx * invQ) : 0.0f;
+        const float y = (qLen2 > 1e-8f) ? (qy * invQ) : 0.0f;
+        const float z = (qLen2 > 1e-8f) ? (qz * invQ) : 0.0f;
+        qw = (qLen2 > 1e-8f) ? (qw * invQ) : 1.0f;
+
+        DrawConstants dc{};
+        dc.rows[0]  = (1.0f - 2.0f * (y * y + z * z)) * rad;
+        dc.rows[1]  = (2.0f * (x * y - z * qw)) * rad;
+        dc.rows[2]  = (2.0f * (x * z + y * qw)) * rad;
+        dc.rows[3]  = iv.marblePosRad[m][0];
+        dc.rows[4]  = (2.0f * (x * y + z * qw)) * rad;
+        dc.rows[5]  = (1.0f - 2.0f * (x * x + z * z)) * rad;
+        dc.rows[6]  = (2.0f * (y * z - x * qw)) * rad;
+        dc.rows[7]  = iv.marblePosRad[m][1];
+        dc.rows[8]  = (2.0f * (x * z - y * qw)) * rad;
+        dc.rows[9]  = (2.0f * (y * z + x * qw)) * rad;
+        dc.rows[10] = (1.0f - 2.0f * (x * x + y * y)) * rad;
+        dc.rows[11] = iv.marblePosRad[m][2];
+        dc.first = tpl.sub.firstIndex;
+        dc.mat   = tpl.sub.material;
+        dc.part  = tpl.sub.part;
+        packDrawMotionVectors(
+            dc,
+            iv.marblePrevPos[m][0] - iv.marblePosRad[m][0],
+            iv.marblePrevPos[m][1] - iv.marblePosRad[m][1],
+            iv.marblePrevPos[m][2] - iv.marblePosRad[m][2]);
+
+        const bool thinGlass = (dc.mat == 3u || dc.mat == 4u || dc.mat == 35u);
+        const uint32_t mask = thinGlass ? 2u : 1u;
+        drawList.push_back({dc, tpl.sub.indexCount, dc.mat, mask});
+
+        D3D12_RAYTRACING_INSTANCE_DESC id{};
+        std::memcpy(id.Transform, dc.rows, 48);
+        id.InstanceID = tpl.sub.firstIndex;
+        id.InstanceMask = mask;
+        id.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+        if (tpl.blas) id.AccelerationStructure = tpl.blas->GetGPUVirtualAddress();
+        inst.push_back(id);
+    }
+
     if(useRt&&canonical) {
-        const size_t offset=slot*inst.size()*sizeof(inst[0]);upload(s.instances.Get(),inst.data(),inst.size()*sizeof(inst[0]),offset);
+        const size_t offset=(slot&3u)*s.maxTlasInstances*sizeof(inst[0]);
+        upload(s.instances.Get(),inst.data(),inst.size()*sizeof(inst[0]),offset);
         ComPtr<ID3D12GraphicsCommandList4> c4;check(cmd->QueryInterface(IID_PPV_ARGS(&c4)));
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;build.Inputs.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;build.Inputs.NumDescs=static_cast<UINT>(inst.size());build.Inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;build.Inputs.InstanceDescs=s.instances->GetGPUVirtualAddress()+offset;build.DestAccelerationStructureData=s.tlas->GetGPUVirtualAddress();build.ScratchAccelerationStructureData=s.tlasScratch->GetGPUVirtualAddress();uav(cmd,s.tlas.Get());uav(cmd,s.tlasScratch.Get());c4->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd,s.tlas.Get());
     }
     cmd->CopyBufferRegion(s.counters[slot].Get(),0,s.zero.Get(),0,8);transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);transition(cmd,dist,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    auto handle=s.rtv->GetCPUDescriptorHandleForHeapStart();d->CreateRenderTargetView(hdr,nullptr,handle);auto second=handle;second.ptr+=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);d->CreateRenderTargetView(dist,nullptr,second);
-    auto depthHandle=s.dsv->GetCPUDescriptorHandleForHeapStart();cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+    const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    auto handle=s.rtv->GetCPUDescriptorHandleForHeapStart();d->CreateRenderTargetView(hdr,nullptr,handle);auto second=handle;second.ptr+=rtvInc;d->CreateRenderTargetView(dist,nullptr,second);
+    auto depthHandle=s.dsv->GetCPUDescriptorHandleForHeapStart();cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
+    cmd->OMSetRenderTargets(useRt?7u:2u,&handle,TRUE,&depthHandle);
     D3D12_VIEWPORT vp{0,0,float(width),float(height),0,1};D3D12_RECT sc{0,0,LONG(width),LONG(height)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
+
     SceneConstants c{};std::copy_n(camera.eye,3,c.eye);c.fov=camera.fovYRadians;c.aspect=float(width)/float(height);for(int i=0;i<3;++i)c.forward[i]=camera.target[i]-camera.eye[i];normalize(c.forward);cross(camera.up,c.forward,c.right);normalize(c.right);cross(c.forward,c.right,c.up);c.time=filmTime;c.reveal=camera.revealOpen01;c.width=width;c.height=height;c.act=act;c.canonical=canonical?1u:0u;
     if(isM2) {
         c.day=act==1?1-std::clamp((c.time-72)/32,0.0f,1.0f):0;
@@ -545,86 +840,270 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         c.moodCut=isHijack?0.f:std::clamp(f.moodCutAccent,0.f,1.f);
     }
     c.pulse=camera.emissivePulse;
-    const InteractiveView& iv=f.interactive;
-    const bool accumulate=canonical&&iv.accumulate&&s.accum&&s.accumBlend&&s.w==width&&s.h==height;
+
+    const uint32_t curAov = std::min<uint32_t>(iv.aovMode, 7u);
+    const bool accumulate = canonical && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
+    const bool interactiveMotion = canonical && useRt && (curAov == 0u) && !accumulate &&
+                                   (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
+                                   s.nrd.isAvailable();
+    const bool splitDenoise = canonical && useRt && (curAov == 0u);
+
     if(iv.sunOverride){std::copy_n(iv.sunDir,3,c.sunDir);c.sunScale=iv.sunScale;c.interFlags|=1u;}
     if(iv.lampsOff)c.interFlags|=4u;
     if(iv.exploreActive)c.interFlags|=8u;
+    if(splitDenoise)c.interFlags|=16u;
+    c.interFlags |= (curAov << 8u);
+
+    float reblurJitterPx[2]{0.0f, 0.0f};
     if(accumulate){
         c.interFlags|=2u;c.accumFrame=iv.accumFrame;
-        // Halton(2,3) sub-pixel jitter converges to a supersampled, anti-aliased image while still
         const uint32_t k=(iv.accumFrame%64u)+1u;
         c.jitter[0]=(halton(k,2)-0.5f)*2.0f/float(width);c.jitter[1]=(halton(k,3)-0.5f)*2.0f/float(height);
+    } else if (interactiveMotion) {
+        c.interFlags|=32u;
+        c.accumFrame = ++s.reblurFrameCounter;
+        const uint32_t k = (c.accumFrame % 16u) + 1u;
+        reblurJitterPx[0] = halton(k, 2) - 0.5f;
+        reblurJitterPx[1] = halton(k, 3) - 0.5f;
+        c.jitter[0] = reblurJitterPx[0] * 2.0f / float(width);
+        c.jitter[1] = reblurJitterPx[1] * 2.0f / float(height);
     }
+
     (void)tensor;
     ID3D12DescriptorHeap* m2Heaps[] = {s.srvHeap.Get()};
     cmd->SetDescriptorHeaps(1, m2Heaps);
     cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,36,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,s.srvHeap->GetGPUDescriptorHandleForHeapStart());cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd->SetPipelineState(s.sky.Get());cmd->DrawInstanced(3,1,0,0);
+    cmd->SetPipelineState(useRt ? s.skyRt.Get() : s.sky.Get());cmd->DrawInstanced(3,1,0,0);
+
     // Hardware Z-Prepass eliminates all hidden-surface DXR ray-query & cutout overdraw across overlapping kits
     cmd->OMSetRenderTargets(0,nullptr,FALSE,&depthHandle);
     cmd->SetPipelineState(s.depthOpaque.Get());
     bool hasActiveCutout=false;
-    for(size_t i=0;i<s.parts.size();++i) {
-        if(!inst[i].InstanceMask) continue;
-        if(isCutoutMaterial(s.parts[i].sub.material)) { hasActiveCutout=true; continue; }
-        cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);
-        cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);
+    for(const auto& de : drawList) {
+        if(!de.mask) continue;
+        if(isCutoutMaterial(de.material)) { hasActiveCutout=true; continue; }
+        cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
+        cmd->DrawInstanced(de.indexCount,1,0,0);
     }
     if(hasActiveCutout) {
         cmd->SetPipelineState(s.depthCutout.Get());
-        for(size_t i=0;i<s.parts.size();++i) {
-            if(inst[i].InstanceMask&&isCutoutMaterial(s.parts[i].sub.material)) {
-                cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);
-                cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);
+        for(const auto& de : drawList) {
+            if(de.mask && isCutoutMaterial(de.material)) {
+                cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
+                cmd->DrawInstanced(de.indexCount,1,0,0);
             }
         }
     }
-    cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+    cmd->OMSetRenderTargets(useRt?7u:2u,&handle,TRUE,&depthHandle);
     cmd->SetPipelineState(useRt?s.rt.Get():s.raster.Get());
-    for(size_t i=0;i<s.parts.size();++i) {
-        if(!inst[i].InstanceMask||isCutoutMaterial(s.parts[i].sub.material)) continue;
-        cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);
-        cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);
+    for(const auto& de : drawList) {
+        if(!de.mask || isCutoutMaterial(de.material)) continue;
+        cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
+        cmd->DrawInstanced(de.indexCount,1,0,0);
     }
     if(hasActiveCutout) {
         cmd->SetPipelineState(useRt?s.rtCutout.Get():s.rasterCutout.Get());
-        for(size_t i=0;i<s.parts.size();++i) {
-            if(inst[i].InstanceMask&&isCutoutMaterial(s.parts[i].sub.material)) {
-                cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);
-                cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);
+        for(const auto& de : drawList) {
+            if(de.mask && isCutoutMaterial(de.material)) {
+                cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
+                cmd->DrawInstanced(de.indexCount,1,0,0);
             }
         }
     }
+
+    const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT slotBase = 5u + 20u * (slot & 3u);
+    auto cpuAt = [&](UINT i) { auto h = s.srvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(i) * srvInc; return h; };
+    auto gpuAt = [&](UINT i) { auto h = s.srvHeap->GetGPUDescriptorHandleForHeapStart(); h.ptr += UINT64(i) * srvInc; return h; };
+
+    auto runDeterministicSpatialResolve = [&](float spatialScale) {
+        transition(cmd, s.gbufNormRough.Get(),  D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd, s.gbufDiffRadHit.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd, s.gbufSpecRadHit.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd, s.gbufModViewZ.Get(),   D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        const UINT b = slotBase + 2u;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        d->CreateShaderResourceView(s.gbufNormRough.Get(),  &sd, cpuAt(b + 0u));
+        d->CreateShaderResourceView(s.gbufDiffRadHit.Get(), &sd, cpuAt(b + 1u));
+        d->CreateShaderResourceView(s.gbufSpecRadHit.Get(), &sd, cpuAt(b + 2u));
+        sd.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+        d->CreateShaderResourceView(s.gbufModViewZ.Get(),   &sd, cpuAt(b + 3u));
+
+        struct { uint32_t w, h; float scale; uint32_t flags; } rcb{width, height, spatialScale, 0u};
+        cmd->SetDescriptorHeaps(1, m2Heaps);
+        cmd->OMSetRenderTargets(1u, &handle, FALSE, nullptr);
+        cmd->SetGraphicsRootSignature(s.denoiseRoot.Get());
+        cmd->SetPipelineState(s.denoiseResolve.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->SetGraphicsRoot32BitConstants(0u, 4u, &rcb, 0u);
+        cmd->SetGraphicsRootDescriptorTable(1u, gpuAt(b));
+        cmd->DrawInstanced(3u, 1u, 0u, 0u);
+
+        transition(cmd, s.gbufNormRough.Get(),  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        transition(cmd, s.gbufDiffRadHit.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        transition(cmd, s.gbufSpecRadHit.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        transition(cmd, s.gbufModViewZ.Get(),   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    };
+
+    if (splitDenoise) {
+        bool reblurDone = false;
+        if (interactiveMotion) {
+            float curW2V[16]{}, curV2C[16]{};
+            buildColumnMajorCameraMatrices(c.eye, c.right, c.up, c.forward, c.fov, c.aspect, curW2V, curV2C);
+
+            const float dx = c.eye[0] - s.prevEye[0], dy = c.eye[1] - s.prevEye[1], dz = c.eye[2] - s.prevEye[2];
+            const float eyeJump2 = dx * dx + dy * dy + dz * dz;
+            const float fwdDot = c.forward[0] * s.prevForward[0] + c.forward[1] * s.prevForward[1] + c.forward[2] * s.prevForward[2];
+            float sunDot = 1.0f;
+            if (iv.sunOverride && s.prevSunOverride) {
+                sunDot = c.sunDir[0] * s.prevSunDir[0] + c.sunDir[1] * s.prevSunDir[1] + c.sunDir[2] * s.prevSunDir[2];
+            }
+            const bool resetHist = !s.reblurPrevValid || (eyeJump2 > 1.44f) || (fwdDot < 0.70f) ||
+                                   (iv.lampsOff != s.prevLampsOff) || (iv.sunOverride != s.prevSunOverride) || (sunDot < 0.94f);
+
+            const auto srvBoth = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            transition(cmd, s.gbufNormRough.Get(),  D3D12_RESOURCE_STATE_RENDER_TARGET, srvBoth);
+            transition(cmd, s.gbufDiffRadHit.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srvBoth);
+            transition(cmd, s.gbufSpecRadHit.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srvBoth);
+            transition(cmd, s.gbufModViewZ.Get(),   D3D12_RESOURCE_STATE_RENDER_TARGET, srvBoth);
+            transition(cmd, s.nrdMv.Get(),          D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+            const UINT pb = slotBase + 6u;
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MipLevels = 1;
+            sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            d->CreateShaderResourceView(s.gbufNormRough.Get(),  &sd, cpuAt(pb + 0u));
+            d->CreateShaderResourceView(s.gbufDiffRadHit.Get(), &sd, cpuAt(pb + 1u));
+            d->CreateShaderResourceView(s.gbufSpecRadHit.Get(), &sd, cpuAt(pb + 2u));
+            sd.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+            d->CreateShaderResourceView(s.gbufModViewZ.Get(),   &sd, cpuAt(pb + 3u));
+
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            ud.Format = DXGI_FORMAT_R10G10B10A2_UNORM; d->CreateUnorderedAccessView(s.nrdNormRough.Get(), nullptr, &ud, cpuAt(pb + 4u));
+            ud.Format = DXGI_FORMAT_R32_FLOAT;         d->CreateUnorderedAccessView(s.nrdViewZ.Get(),     nullptr, &ud, cpuAt(pb + 5u));
+            ud.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            d->CreateUnorderedAccessView(s.nrdDiffIn.Get(), nullptr, &ud, cpuAt(pb + 6u));
+            d->CreateUnorderedAccessView(s.nrdSpecIn.Get(), nullptr, &ud, cpuAt(pb + 7u));
+
+            const uint32_t packCb[4] = {width, height, 0u, 0u};
+            cmd->SetComputeRootSignature(s.nrdPackRoot.Get());
+            cmd->SetPipelineState(s.nrdPackCs.Get());
+            cmd->SetComputeRoot32BitConstants(0u, 4u, packCb, 0u);
+            cmd->SetComputeRootDescriptorTable(1u, gpuAt(pb));
+            cmd->SetComputeRootDescriptorTable(2u, gpuAt(pb + 4u));
+            cmd->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
+
+            transition(cmd, s.nrdNormRough.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            transition(cmd, s.nrdViewZ.Get(),     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            transition(cmd, s.nrdDiffIn.Get(),    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            transition(cmd, s.nrdSpecIn.Get(),    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+            NrdBridge::ReblurInputs rin{};
+            rin.inMv              = s.nrdMv.Get();
+            rin.inNormalRoughness = s.nrdNormRough.Get();
+            rin.inViewZ           = s.nrdViewZ.Get();
+            rin.inDiffRadHit      = s.nrdDiffIn.Get();
+            rin.inSpecRadHit      = s.nrdSpecIn.Get();
+            std::memcpy(rin.worldToView,     curW2V, sizeof(curW2V));
+            std::memcpy(rin.worldToViewPrev, resetHist ? curW2V : s.prevWorldToView, sizeof(curW2V));
+            std::memcpy(rin.viewToClip,      curV2C, sizeof(curV2C));
+            std::memcpy(rin.viewToClipPrev,  resetHist ? curV2C : s.prevViewToClip,  sizeof(curV2C));
+            rin.jitterPixels[0] = reblurJitterPx[0];
+            rin.jitterPixels[1] = reblurJitterPx[1];
+            rin.resetHistory    = resetHist;
+
+            const bool nrdOk = s.nrd.recordReblurMotion(cmd, width, height, slot, rin);
+            cmd->SetDescriptorHeaps(1, m2Heaps);
+
+            if (nrdOk && s.nrd.outDiffResourceRaw() && s.nrd.outSpecResourceRaw()) {
+                const UINT ub = slotBase + 14u;
+                sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                d->CreateShaderResourceView(static_cast<ID3D12Resource*>(s.nrd.outDiffResourceRaw()), &sd, cpuAt(ub + 0u));
+                d->CreateShaderResourceView(static_cast<ID3D12Resource*>(s.nrd.outSpecResourceRaw()), &sd, cpuAt(ub + 1u));
+                d->CreateShaderResourceView(s.gbufNormRough.Get(), &sd, cpuAt(ub + 2u));
+                sd.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+                d->CreateShaderResourceView(s.gbufModViewZ.Get(),  &sd, cpuAt(ub + 3u));
+
+                const uint32_t ucb[4] = {width, height, 0u, 0u};
+                cmd->OMSetRenderTargets(1u, &handle, FALSE, nullptr);
+                cmd->SetGraphicsRootSignature(s.denoiseRoot.Get());
+                cmd->SetPipelineState(s.nrdUnpackPs.Get());
+                cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                cmd->SetGraphicsRoot32BitConstants(0u, 4u, ucb, 0u);
+                cmd->SetGraphicsRootDescriptorTable(1u, gpuAt(ub));
+                cmd->DrawInstanced(3u, 1u, 0u, 0u);
+
+                std::memcpy(s.prevWorldToView, curW2V, sizeof(curW2V));
+                std::memcpy(s.prevViewToClip,  curV2C, sizeof(curV2C));
+                std::copy_n(c.eye, 3, s.prevEye);
+                std::copy_n(c.forward, 3, s.prevForward);
+                std::copy_n(c.sunDir, 3, s.prevSunDir);
+                s.prevSunOverride = iv.sunOverride;
+                s.prevLampsOff    = iv.lampsOff;
+                s.reblurPrevValid = true;
+                s.denoiseMode     = 1u;
+                reblurDone        = true;
+            }
+
+            transition(cmd, s.nrdNormRough.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(cmd, s.nrdViewZ.Get(),     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(cmd, s.nrdDiffIn.Get(),    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(cmd, s.nrdSpecIn.Get(),    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(cmd, s.nrdMv.Get(),        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transition(cmd, s.gbufNormRough.Get(),  srvBoth, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transition(cmd, s.gbufDiffRadHit.Get(), srvBoth, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transition(cmd, s.gbufSpecRadHit.Get(), srvBoth, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transition(cmd, s.gbufModViewZ.Get(),   srvBoth, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        } else if (canonical) {
+            s.reblurPrevValid = false;
+        }
+
+        if (!reblurDone) {
+            const float spatialScale = accumulate ? (1.0f / (1.0f + 0.35f * float(iv.accumFrame))) : 1.0f;
+            runDeterministicSpatialResolve(spatialScale);
+            if (canonical) s.denoiseMode = accumulate ? 2u : 0u;
+        }
+    } else if (canonical) {
+        s.reblurPrevValid = false;
+        s.denoiseMode = 0u;
+    }
+
     if(accumulate) {
         // Prefer NVIDIA NRD.dll dynamic DXIL compute sidecar; fall back cleanly to built-in HLSL accumulator
         const uint32_t kJ=(iv.accumFrame%64u)+1u;
         const float jitterPx[2]={halton(kJ,2)-0.5f,halton(kJ,3)-0.5f};
         const bool reset=(iv.accumFrame==0u)||!s.accumValid;
         const bool nrdRan=s.nrd.isAvailable()&&s.nrd.recordAccumulation(cmd,hdr,width,height,slot,reset?0u:iv.accumFrame,jitterPx);
+        cmd->SetDescriptorHeaps(1, m2Heaps);
         if(nrdRan) {
             s.accumValid=true;
+            s.denoiseMode=2u;
         } else {
-        const float wgt=reset?1.0f:1.0f/float(std::min<uint32_t>(iv.accumFrame,4095u)+1u);
-        const UINT inc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        const UINT base=5u+2u*(slot&3u);
-        auto cpuAt=[&](UINT i){auto h=s.srvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*inc;return h;};
-        auto gpuAt=[&](UINT i){auto h=s.srvHeap->GetGPUDescriptorHandleForHeapStart();h.ptr+=UINT64(i)*inc;return h;};
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};sv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;sv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
-        sv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d->CreateShaderResourceView(hdr,&sv,cpuAt(base));
-        sv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;d->CreateShaderResourceView(s.accum.Get(),&sv,cpuAt(base+1u));
-        auto accRtv=s.rtv->GetCPUDescriptorHandleForHeapStart();accRtv.ptr+=SIZE_T(2)*rtvInc;d->CreateRenderTargetView(s.accum.Get(),nullptr,accRtv);
-        transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmd->SetGraphicsRootSignature(s.accumRoot.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd->OMSetRenderTargets(1,&accRtv,FALSE,nullptr);const float bf[4]={wgt,wgt,wgt,wgt};cmd->OMSetBlendFactor(bf);
-        cmd->SetPipelineState(s.accumBlend.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base));cmd->DrawInstanced(3,1,0,0);
-        transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmd->OMSetRenderTargets(1,&handle,FALSE,nullptr);
-        cmd->SetPipelineState(s.accumResolve.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base+1u));cmd->DrawInstanced(3,1,0,0);
+            const float wgt=reset?1.0f:1.0f/float(std::min<uint32_t>(iv.accumFrame,4095u)+1u);
+            const UINT base=slotBase;
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};sv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;sv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
+            sv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d->CreateShaderResourceView(hdr,&sv,cpuAt(base));
+            sv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;d->CreateShaderResourceView(s.accum.Get(),&sv,cpuAt(base+1u));
+            auto accRtv=s.rtv->GetCPUDescriptorHandleForHeapStart();accRtv.ptr+=SIZE_T(7)*rtvInc;d->CreateRenderTargetView(s.accum.Get(),nullptr,accRtv);
+            transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->SetGraphicsRootSignature(s.accumRoot.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cmd->OMSetRenderTargets(1,&accRtv,FALSE,nullptr);const float bf[4]={wgt,wgt,wgt,wgt};cmd->OMSetBlendFactor(bf);
+            cmd->SetPipelineState(s.accumBlend.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base));cmd->DrawInstanced(3,1,0,0);
+            transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->OMSetRenderTargets(1,&handle,FALSE,nullptr);
+            cmd->SetPipelineState(s.accumResolve.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base+1u));cmd->DrawInstanced(3,1,0,0);
             s.accumValid=true;
+            s.denoiseMode=2u;
         }
     } else if(canonical) {
         s.accumValid=false;
@@ -637,6 +1116,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
 }
 bool TrilogyMeshRenderer::hardwareVerified() const {return impl_->verified;}
 bool TrilogyMeshRenderer::nrdActive() const {return impl_&&impl_->nrd.isAvailable();}
+uint32_t TrilogyMeshRenderer::activeDenoiseMode() const noexcept {return impl_?impl_->denoiseMode:0u;}
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}

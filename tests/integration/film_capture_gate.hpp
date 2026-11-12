@@ -589,6 +589,159 @@ bool testInteractiveShowcaseCaptureGate() {
         std::cout << "Captured Draggable RTX ON / Raster OFF Split-Screen Wipe\n" << std::flush;
     }
 
+    // 6. Interactive Marbles RTX Rigid-Body Physics Showcase in Superellipse Porcelain Basin (64 SPP NRD + Studio Bar)
+    {
+        auto evalBowlY = [](float x, float z) -> float {
+            const float ax = std::abs(x - (-0.180f)) / 0.268f;
+            const float az = std::abs(z - 6.245f) / 0.194f;
+            const float u = std::pow(std::pow(ax, 2.45f) + std::pow(az, 2.45f), 1.0f / 2.45f);
+            if (u <= 0.135f) return 3.575f;
+            if (u <= 0.160f) {
+                const float s = (u - 0.135f) / 0.025f;
+                return 3.575f * (1.0f - s) + 3.569f * s;
+            }
+            if (u <= 0.985f) {
+                const float t = std::clamp((u - 0.160f) / 0.825f, 0.0f, 1.0f);
+                return 3.569f + 0.114f * std::pow(t, 2.32f);
+            }
+            return 3.550f;
+        };
+
+        FrameContext mCtx = baseCtx;
+        mCtx.interactive.exploreActive = true;
+        mCtx.interactive.blendWeight = 1.0f;
+        mCtx.interactive.activePreset = 2u;
+        mCtx.interactive.eye[0] = 0.09f;     mCtx.interactive.eye[1] = 3.89f;    mCtx.interactive.eye[2] = 5.74f;
+        mCtx.interactive.target[0] = -0.15f; mCtx.interactive.target[1] = 3.63f; mCtx.interactive.target[2] = 6.27f;
+        mCtx.interactive.fovYRadians = 0.46f;
+        mCtx.interactive.marbleCount = 9u;
+
+        struct MarbleSpec { float x, z, r; uint32_t mat; };
+        static constexpr MarbleSpec kShowcaseMarbles[9] = {
+            {-0.245f, 6.215f, 0.0225f, 35u}, // Cognac-amber glass in basin
+            {-0.145f, 6.205f, 0.0210f,  4u}, // Celadon-jade glass in basin
+            {-0.195f, 6.275f, 0.0235f,  3u}, // Liuli crystal glass in basin
+            {-0.095f, 6.265f, 0.0195f,  8u}, // 24k brushed gold in basin
+            {-0.275f, 6.275f, 0.0200f, 23u}, // Brushed champagne nickel in basin
+            {-0.155f, 6.320f, 0.0190f, 31u}, // Honed Calacatta marble in basin
+            { 0.165f, 6.175f, 0.0225f, 35u}, // Cognac-amber marble on sunlit Calacatta vanity
+            { 0.235f, 6.145f, 0.0215f,  3u}, // Crystal caustic marble on sunlit Calacatta vanity
+            { 0.145f, 6.105f, 0.0205f,  4u}, // Celadon jade marble on sunlit Calacatta vanity
+        };
+        for (uint32_t i = 0; i < 9u; ++i) {
+            const float x = kShowcaseMarbles[i].x;
+            const float z = kShowcaseMarbles[i].z;
+            const float r = kShowcaseMarbles[i].r;
+            const float y = evalBowlY(x, z) + r;
+            mCtx.interactive.marblePosRad[i][0] = x;
+            mCtx.interactive.marblePosRad[i][1] = y;
+            mCtx.interactive.marblePosRad[i][2] = z;
+            mCtx.interactive.marblePosRad[i][3] = r;
+            mCtx.interactive.marblePrevPos[i][0] = x;
+            mCtx.interactive.marblePrevPos[i][1] = y;
+            mCtx.interactive.marblePrevPos[i][2] = z;
+            mCtx.interactive.marbleRotQuat[i][3] = 1.0f;
+            mCtx.interactive.marbleMat[i] = kShowcaseMarbles[i].mat;
+        }
+
+        std::vector<uint8_t> marblesClean, marblesPres, marblesReblurPres;
+        uint32_t w = 0, h = 0;
+
+        // Live Motion NRD::REBLUR_DIFFUSE_SPECULAR (4-frame temporal motion warmup -> RBLR Studio Bar badge!)
+        {
+            FrameContext reblurCtx = mCtx;
+            reblurCtx.interactive.eye[0] = 0.24f;     reblurCtx.interactive.eye[1] = 3.94f;    reblurCtx.interactive.eye[2] = 5.58f;
+            reblurCtx.interactive.target[0] = -0.06f; reblurCtx.interactive.target[1] = 3.63f; reblurCtx.interactive.target[2] = 6.24f;
+            reblurCtx.interactive.fovYRadians = 0.50f;
+            reblurCtx.interactive.accumulate = false;
+            for (uint32_t f = 0; f < 4u; ++f) {
+                reblurCtx.presentationFrame = f;
+                reblurCtx.interactive.accumFrame = f;
+                reblurCtx.interactive.eye[0] = 0.24f - 0.012f * static_cast<float>(f);
+                for (uint32_t i = 0; i < 9u; ++i) {
+                    const float baseX = kShowcaseMarbles[i].x;
+                    reblurCtx.interactive.marblePrevPos[i][0] = baseX + 0.008f * static_cast<float>(f);
+                    reblurCtx.interactive.marblePosRad[i][0]  = baseX + 0.008f * static_cast<float>(f + 1u);
+                }
+                if (f < 3u) {
+                    std::vector<uint8_t> tmp;
+                    BOO_CHECK(fx.renderHeadlessCanvasForTest(reblurCtx, tmp, w, h, &error));
+                } else {
+                    reblurCtx.showOverlay = true;
+                    reblurCtx.hudMode = 1u;
+                    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(reblurCtx, hud, 2560, 1440, marblesReblurPres, &error));
+                }
+            }
+            BOO_CHECK(writeCapturePng(outDir / "interactive_marbles_rtx_reblur_motion_studio.png", marblesReblurPres, 2560, 1440));
+            sheet.add(marblesReblurPres, 2560, 1440, "Live Motion NRD REBLUR [RBLR] | Rolling Marbles Cascade");
+        }
+
+        BOO_CHECK(renderConvergedView(mCtx, 64u, marblesClean, w, h));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_marbles_rtx_basin_64spp_clean.png", marblesClean, w, h));
+
+        mCtx.showOverlay = true;
+        mCtx.hudMode = 1u;
+        mCtx.interactive.accumulate = true;
+        mCtx.interactive.accumFrame = 63u;
+        mCtx.presentationFrame = 63u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(mCtx, hud, 2560, 1440, marblesPres, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_marbles_rtx_basin_64spp_studio.png", marblesPres, 2560, 1440));
+        sheet.add(marblesPres, 2560, 1440, "Interactive Marbles RTX [Y/M] | 64 SPP NRD + Caustics");
+        std::cout << "Captured Interactive Marbles RTX Basin & Countertop Showcase (REBLUR + 64 SPP NRD)\n" << std::flush;
+
+        // 7. Live Buffer / AOV Quad Inspection (World Normal | Indirect GI | Refl & Refr | DXR Ray Heatmap)
+        FrameContext aovBase = mCtx;
+        aovBase.showOverlay = true;
+        aovBase.hudMode = 1u;
+        aovBase.interactive.accumulate = false;
+        aovBase.interactive.accumFrame = 0u;
+        aovBase.presentationFrame = 0u;
+
+        std::vector<uint8_t> aovNorm, aovGi, aovRefl, aovHeat;
+        aovBase.interactive.aovMode = 2u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovBase, hud, 2560, 1440, aovNorm, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_aov_world_normal.png", aovNorm, 2560, 1440));
+
+        aovBase.interactive.aovMode = 5u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovBase, hud, 2560, 1440, aovGi, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_aov_indirect_gi.png", aovGi, 2560, 1440));
+
+        aovBase.interactive.aovMode = 6u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovBase, hud, 2560, 1440, aovRefl, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_aov_reflections_refraction.png", aovRefl, 2560, 1440));
+
+        aovBase.interactive.aovMode = 7u;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovBase, hud, 2560, 1440, aovHeat, &error));
+        BOO_CHECK(writeCapturePng(outDir / "interactive_aov_ray_heatmap.png", aovHeat, 2560, 1440));
+
+        // Compose 2x2 2560x1440 Live AOV Quad Inspection tile
+        std::vector<uint8_t> aovQuad(2560u * 1440u * 4u, 255u);
+        auto blitQuadrant = [&](const std::vector<uint8_t>& src, uint32_t qx, uint32_t qy) {
+            const uint32_t qw = 1280u, qh = 720u;
+            for (uint32_t y = 0; y < qh; ++y) {
+                for (uint32_t x = 0; x < qw; ++x) {
+                    const size_t s00 = ((y * 2u + 0u) * 2560u + (x * 2u + 0u)) * 4u;
+                    const size_t s10 = ((y * 2u + 0u) * 2560u + (x * 2u + 1u)) * 4u;
+                    const size_t s01 = ((y * 2u + 1u) * 2560u + (x * 2u + 0u)) * 4u;
+                    const size_t s11 = ((y * 2u + 1u) * 2560u + (x * 2u + 1u)) * 4u;
+                    const size_t dst = ((qy * qh + y) * 2560u + (qx * qw + x)) * 4u;
+                    for (uint32_t c = 0; c < 3u; ++c) {
+                        aovQuad[dst + c] = static_cast<uint8_t>(
+                            (uint32_t(src[s00 + c]) + uint32_t(src[s10 + c]) + uint32_t(src[s01 + c]) + uint32_t(src[s11 + c]) + 2u) >> 2u);
+                    }
+                    aovQuad[dst + 3u] = 255u;
+                }
+            }
+        };
+        blitQuadrant(aovNorm, 0u, 0u);
+        blitQuadrant(aovGi,   1u, 0u);
+        blitQuadrant(aovRefl, 0u, 1u);
+        blitQuadrant(aovHeat, 1u, 1u);
+        BOO_CHECK(writeCapturePng(outDir / "interactive_aov_quad_inspection.png", aovQuad, 2560, 1440));
+        sheet.add(aovQuad, 2560, 1440, "Live AOV Inspection [I/F9]: Normal | GI | Refl/Refr | Ray Heat");
+        std::cout << "Captured Live Buffer / AOV Inspection Quad (Normal, GI, Refl/Refr, Ray Heatmap)\n" << std::flush;
+    }
+
     BOO_CHECK(sheet.save(outDir / "interactive_showcase_montage.png", 2));
     report["complete"] = true;
     BOO_CHECK(writeFilmGateJson(outDir / "manifest.json", report));

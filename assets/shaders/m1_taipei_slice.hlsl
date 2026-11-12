@@ -1602,17 +1602,36 @@ SamplerState      gLinearClamp : register(s0);
 float4 PSCompositeCanvas(VSOut pin) : SV_Target
 {
     float3 hdr = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
-    float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+    float3 sdr;
+    if (gIsFirstDownsample != 0u)
+    {
+        if (gIsFirstDownsample == 1u)
+        {
+            sdr = linearToSrgbExact(saturate(hdr));
+        }
+        else if (gIsFirstDownsample == 2u || gIsFirstDownsample == 3u || gIsFirstDownsample >= 7u)
+        {
+            sdr = saturate(hdr);
+        }
+        else
+        {
+            sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(max(hdr, 0.0.xxx) * gPreExposure));
+        }
+    }
+    else
+    {
+        float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
 
-    float2 centered = (pin.uv - 0.5) * float2(1.7777778, 1.0);
-    float vignette = saturate(1.14 - gVignetteStrength * dot(centered, centered));
+        float2 centered = (pin.uv - 0.5) * float2(1.7777778, 1.0);
+        float vignette = saturate(1.14 - gVignetteStrength * dot(centered, centered));
 
-    // Restrained tinted anamorphic bloom streaks, purely spatial & sample-deterministic
-    float2 flareOffset = float2(gCanvasInvSize.x * 16.0, 0.0);
-    float3 flare = gBloomMip0.SampleLevel(gLinearClamp, pin.uv + flareOffset, 0.0).rgb * float3(0.55, 0.88, 1.0)
-                 + gBloomMip0.SampleLevel(gLinearClamp, pin.uv - flareOffset, 0.0).rgb * float3(1.0, 0.58, 0.86);
-    float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.018) * gPreExposure * vignette;
-    float3 sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
+        // Restrained tinted anamorphic bloom streaks, purely spatial & sample-deterministic
+        float2 flareOffset = float2(gCanvasInvSize.x * 16.0, 0.0);
+        float3 flare = gBloomMip0.SampleLevel(gLinearClamp, pin.uv + flareOffset, 0.0).rgb * float3(0.55, 0.88, 1.0)
+                     + gBloomMip0.SampleLevel(gLinearClamp, pin.uv - flareOffset, 0.0).rgb * float3(1.0, 0.58, 0.86);
+        float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.018) * gPreExposure * vignette;
+        sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
+    }
 
     // Sample-deterministic 10-bit Triangular-PDF IGN dither (zero dependency on presentationFrame!)
     float2 pixelXY = floor(pin.position.xy);
@@ -2720,14 +2739,18 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         sdr = lerp(sdr, colOrchid, rTxt);
     }
 
-    // Interactive NVIDIA RTX Showcase Studio Bar (Pass 4 only; shown in HUD modes 0/1/2 when Explore or lighting override is active)
-    if (showOverlay && (hudMode != 3u) && ((gInteractiveMeta.x & 7u) != 0u) && res.x >= 640.0 && res.y >= 300.0)
+    // Interactive NVIDIA RTX Showcase Studio Bar (Pass 4 only; shown in HUD modes 0/1/2 when Explore, lighting, AOV, or Marbles active)
+    const uint curAovMode   = (gInteractiveMeta.x >> 9u) & 7u;
+    const uint curDenMode   = (gInteractiveMeta.x >> 12u) & 3u;
+    const uint curMarbleCnt = (gInteractiveMeta.x >> 16u) & 0xFFu;
+    const bool studioActive = ((gInteractiveMeta.x & 7u) != 0u) || (curAovMode != 0u) || (curMarbleCnt != 0u);
+    if (showOverlay && (hudMode != 3u) && studioActive && res.x >= 640.0 && res.y >= 300.0)
     {
         const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
-        const float barMinX = (hudMode == 0u) ? max(0.5 * res.x - 174.0 * u, 326.0 * u) : (0.5 * res.x - 174.0 * u);
+        const float barMinX = (hudMode == 0u) ? max(0.5 * res.x - 216.0 * u, 322.0 * u) : (0.5 * res.x - 216.0 * u);
         const float barMinY = (hudMode == 2u) ? (res.y - 68.0 * u) : (14.0 * u);
         const float2 barMin  = float2(barMinX, barMinY);
-        const float2 barSize = float2(348.0 * u, 52.0 * u);
+        const float2 barSize = float2(432.0 * u, 52.0 * u);
 
         if (px.x >= barMin.x && px.x <= barMin.x + barSize.x &&
             px.y >= barMin.y && px.y <= barMin.y + barSize.y)
@@ -2738,6 +2761,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             const bool nrdOn    = (gInteractiveMeta.x & 8u) != 0u;
             const uint presetId = (gInteractiveMeta.x >> 4u) & 0xFu;
             const bool isAccum  = (gInteractiveMeta.x & 256u) != 0u;
+            const bool isReblur = (curDenMode == 1u);
             const uint sppCount = (uint)(clamp(gInteractiveState.w, 1.0, 9999.0) + 0.5);
 
             sdr = lerp(sdr, float3(0.015, 0.024, 0.046), 0.90);
@@ -2745,7 +2769,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                             (px.y - barMin.y < 1.5) || (barMin.y + barSize.y - px.y < 1.5);
             if (outerBdr) sdr = lerp(colJade, colOrchid, 0.35);
 
-            // Row 1: [EXPLOR]  [NRD/ACC + SPP]  [LAMP]  [WIPE]  [1][2][3][4][5][6]
+            // Row 1: [EXPLOR] [RBLR/NRD + SPP] [LAMP] [WIPE] [AOV] [MRBL] [1][2][3][4][5][6]
             const float r1MinY = barMin.y + 5.0 * u;
             const float r1MaxY = barMin.y + 23.0 * u;
 
@@ -2764,28 +2788,31 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 : sampleWord8(px, barMin + float2(10.0 * u, 9.5 * u), 1.35 * u, 83u, 84u, 85u, 68u, 73u, 79u, 32u, 32u);
             sdr = lerp(sdr, expC, tExp);
 
-            // 2. NRD / ACC denoiser + live SPP convergence readout
+            // 2. REBLUR / NRD / ACC denoiser + live SPP convergence readout
             float2 bSppMin = float2(barMin.x + 68.0 * u, r1MinY);
             float2 bSppMax = float2(barMin.x + 162.0 * u, r1MaxY);
-            float3 nrdC = nrdOn ? colJade : colCyan;
+            float3 nrdC = isReblur ? colCyan : (nrdOn ? colJade : colCyan);
+            bool denActive = isAccum || isReblur;
             if (px.x >= bSppMin.x && px.x <= bSppMax.x && px.y >= bSppMin.y && px.y <= bSppMax.y)
             {
-                sdr = lerp(sdr, nrdC * (isAccum ? 0.22 : 0.10), 0.85);
+                sdr = lerp(sdr, nrdC * (denActive ? 0.24 : 0.10), 0.85);
                 if ((px.x - bSppMin.x < 1.2) || (bSppMax.x - px.x < 1.2) || (px.y - bSppMin.y < 1.2) || (bSppMax.y - px.y < 1.2))
-                    sdr = nrdC * (isAccum ? 1.0 : 0.65);
+                    sdr = nrdC * (denActive ? 1.0 : 0.65);
             }
-            float tNrd = nrdOn
-                ? sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 78u, 82u, 68u, 32u)
-                : sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 65u, 67u, 67u, 32u);
-            float tSppNum = sampleUint4(px, barMin + float2(96.0 * u, 9.5 * u), 1.35 * u, sppCount);
-            float tSppLbl = sampleWord4(px, barMin + float2(128.0 * u, 9.5 * u), 1.35 * u, 83u, 80u, 80u, 32u);
+            float tNrd = isReblur
+                ? sampleWord4(px, barMin + float2(71.0 * u, 9.5 * u), 1.35 * u, 82u, 66u, 76u, 82u) // RBLR
+                : (nrdOn
+                    ? sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 78u, 82u, 68u, 32u)  // NRD
+                    : sampleWord4(px, barMin + float2(72.0 * u, 9.5 * u), 1.35 * u, 65u, 67u, 67u, 32u)); // ACC
+            float tSppNum = sampleUint4(px, barMin + float2(99.0 * u, 9.5 * u), 1.35 * u, sppCount);
+            float tSppLbl = sampleWord4(px, barMin + float2(130.0 * u, 9.5 * u), 1.35 * u, 83u, 80u, 80u, 32u);
             sdr = lerp(sdr, nrdC, tNrd);
             sdr = lerp(sdr, colEnamel, tSppNum);
-            sdr = lerp(sdr, isAccum ? colAmber : float3(0.58, 0.64, 0.72), tSppLbl);
+            sdr = lerp(sdr, isAccum ? colAmber : (isReblur ? colJade : float3(0.58, 0.64, 0.72)), tSppLbl);
 
             // 3. Practical LAMP [J] toggle pill
             float2 bLmpMin = float2(barMin.x + 166.0 * u, r1MinY);
-            float2 bLmpMax = float2(barMin.x + 208.0 * u, r1MaxY);
+            float2 bLmpMax = float2(barMin.x + 206.0 * u, r1MaxY);
             float3 lmpC = (!lampsOff) ? colAmber : float3(0.42, 0.46, 0.56);
             if (px.x >= bLmpMin.x && px.x <= bLmpMax.x && px.y >= bLmpMin.y && px.y <= bLmpMax.y)
             {
@@ -2793,12 +2820,12 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bLmpMin.x < 1.2) || (bLmpMax.x - px.x < 1.2) || (px.y - bLmpMin.y < 1.2) || (bLmpMax.y - px.y < 1.2))
                     sdr = lmpC;
             }
-            float tLmp = sampleWord4(px, barMin + float2(173.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
+            float tLmp = sampleWord4(px, barMin + float2(172.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
             sdr = lerp(sdr, lmpC, tLmp);
 
             // 4. RTX Split WIPE [H] toggle pill
-            float2 bWipMin = float2(barMin.x + 212.0 * u, r1MinY);
-            float2 bWipMax = float2(barMin.x + 254.0 * u, r1MaxY);
+            float2 bWipMin = float2(barMin.x + 210.0 * u, r1MinY);
+            float2 bWipMax = float2(barMin.x + 250.0 * u, r1MaxY);
             bool wipeOn = (hudMode == 2u);
             float3 wipC = wipeOn ? colOrchid : colCyan;
             if (px.x >= bWipMin.x && px.x <= bWipMax.x && px.y >= bWipMin.y && px.y <= bWipMax.y)
@@ -2807,15 +2834,43 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bWipMin.x < 1.2) || (bWipMax.x - px.x < 1.2) || (px.y - bWipMin.y < 1.2) || (bWipMax.y - px.y < 1.2))
                     sdr = wipC;
             }
-            float tWip = sampleWord4(px, barMin + float2(219.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
+            float tWip = sampleWord4(px, barMin + float2(216.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
             sdr = lerp(sdr, wipeOn ? colEnamel : wipC, tWip);
 
-            // 5. Six Hero Macro Camera Bookmarks [1..6] (F2..F7)
+            // 5. Buffer / AOV Inspection [I / F9] pill ("AOV" or "AOV1..7")
+            float2 bAovMin = float2(barMin.x + 254.0 * u, r1MinY);
+            float2 bAovMax = float2(barMin.x + 294.0 * u, r1MaxY);
+            bool aovOn = (curAovMode != 0u);
+            float3 aovC = aovOn ? colAmber : float3(0.56, 0.66, 0.78);
+            if (px.x >= bAovMin.x && px.x <= bAovMax.x && px.y >= bAovMin.y && px.y <= bAovMax.y)
+            {
+                sdr = lerp(sdr, aovC * (aovOn ? 0.32 : 0.14), 0.85);
+                if ((px.x - bAovMin.x < 1.2) || (bAovMax.x - px.x < 1.2) || (px.y - bAovMin.y < 1.2) || (bAovMax.y - px.y < 1.2))
+                    sdr = aovC;
+            }
+            float tAov = sampleWord4(px, barMin + float2(260.0 * u, 9.5 * u), 1.35 * u, 65u, 79u, 86u, aovOn ? (48u + curAovMode) : 32u);
+            sdr = lerp(sdr, aovOn ? colEnamel : aovC, tAov);
+
+            // 6. Marbles RTX Physics Cascade [Y / F10 / M] pill ("MRBL")
+            float2 bMrbMin = float2(barMin.x + 298.0 * u, r1MinY);
+            float2 bMrbMax = float2(barMin.x + 340.0 * u, r1MaxY);
+            bool mrbOn = (curMarbleCnt != 0u);
+            float3 mrbC = mrbOn ? colOrchid : colJade;
+            if (px.x >= bMrbMin.x && px.x <= bMrbMax.x && px.y >= bMrbMin.y && px.y <= bMrbMax.y)
+            {
+                sdr = lerp(sdr, mrbC * (mrbOn ? 0.32 : 0.16), 0.85);
+                if ((px.x - bMrbMin.x < 1.2) || (bMrbMax.x - px.x < 1.2) || (px.y - bMrbMin.y < 1.2) || (bMrbMax.y - px.y < 1.2))
+                    sdr = mrbC;
+            }
+            float tMrb = sampleWord4(px, barMin + float2(305.0 * u, 9.5 * u), 1.35 * u, 77u, 82u, 66u, 76u);
+            sdr = lerp(sdr, mrbOn ? colEnamel : mrbC, tMrb);
+
+            // 7. Six Hero Macro Camera Bookmarks [1..6] (F2..F7)
             [unroll]
             for (uint k = 0u; k < 6u; ++k)
             {
-                float2 cMin = float2(barMin.x + (258.0 + (float)k * 14.5) * u, r1MinY);
-                float2 cMax = cMin + float2(12.5 * u, 18.0 * u);
+                float2 cMin = float2(barMin.x + (344.0 + (float)k * 14.2) * u, r1MinY);
+                float2 cMax = cMin + float2(12.2 * u, 18.0 * u);
                 bool sel = (presetId == (k + 1u));
                 float3 cCol = sel ? colJade : float3(0.50, 0.58, 0.68);
                 if (px.x >= cMin.x && px.x <= cMax.x && px.y >= cMin.y && px.y <= cMax.y)
@@ -2824,7 +2879,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if ((px.x - cMin.x < 1.1) || (cMax.x - px.x < 1.1) || (px.y - cMin.y < 1.1) || (cMax.y - px.y < 1.1))
                         sdr = cCol;
                 }
-                float dMask = sampleGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
+                float dMask = sampleGlyph(px, cMin + float2(3.3 * u, 4.8 * u), 1.45 * u, 49u + k);
                 sdr = lerp(sdr, sel ? colEnamel : cCol, dMask);
             }
 
@@ -2833,7 +2888,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
 
             float2 sunMin  = barMin + float2(34.0 * u, 33.5 * u);
-            float2 sunSize = float2(118.0 * u, 8.0 * u);
+            float2 sunSize = float2(148.0 * u, 8.0 * u);
             float  sunVal  = saturate(gInteractiveState.y);
             float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 20u);
             float3 sunTint = lerp(float3(0.26, 0.42, 0.88), lerp(colAmber, colEnamel, smoothstep(0.45, 1.0, sunVal)), smoothstep(0.0, 0.55, sunVal));
@@ -2842,11 +2897,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (abs(px.x - sunThumbX) <= 2.4 * u && px.y >= sunMin.y - 2.5 * u && px.y <= sunMin.y + sunSize.y + 2.5 * u)
                 sdr = colEnamel;
 
-            float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 33.5 * u), 1.35 * u, 65u, 90u, 77u, 32u);
+            float tAzmLbl = sampleWord4(px, barMin + float2(190.0 * u, 33.5 * u), 1.35 * u, 65u, 90u, 77u, 32u);
             sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
 
-            float2 azmMin  = barMin + float2(186.0 * u, 33.5 * u);
-            float2 azmSize = float2(114.0 * u, 8.0 * u);
+            float2 azmMin  = barMin + float2(216.0 * u, 33.5 * u);
+            float2 azmSize = float2(148.0 * u, 8.0 * u);
             float  azmVal  = saturate(gInteractiveState.z);
             float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 20u);
             sdr = lerp(sdr, colCyan, azmBar * 0.90);
@@ -2854,9 +2909,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
                 sdr = colEnamel;
 
-            float2 bRstMin = barMin + float2(306.0 * u, 29.0 * u);
-            float2 bRstMax = bRstMin + float2(36.0 * u, 17.0 * u);
-            bool anyOvr = sunOvr || lampsOff;
+            float2 bRstMin = barMin + float2(372.0 * u, 29.0 * u);
+            float2 bRstMax = bRstMin + float2(52.0 * u, 17.0 * u);
+            bool anyOvr = sunOvr || lampsOff || (curAovMode != 0u) || (curMarbleCnt != 0u);
             float3 rstC = anyOvr ? colAmber : float3(0.42, 0.46, 0.56);
             if (px.x >= bRstMin.x && px.x <= bRstMax.x && px.y >= bRstMin.y && px.y <= bRstMax.y)
             {
@@ -2864,8 +2919,35 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bRstMin.x < 1.1) || (bRstMax.x - px.x < 1.1) || (px.y - bRstMin.y < 1.1) || (bRstMax.y - px.y < 1.1))
                     sdr = rstC;
             }
-            float tRst = sampleWord4(px, bRstMin + float2(8.0 * u, 4.5 * u), 1.35 * u, 82u, 83u, 84u, 32u);
+            float tRst = sampleWord4(px, bRstMin + float2(15.0 * u, 4.5 * u), 1.35 * u, 82u, 83u, 84u, 32u);
             sdr = lerp(sdr, rstC, tRst);
+        }
+
+        // Pass-4 AOV Buffer Inspection Pill Banner
+        if (curAovMode != 0u && hudMode != 2u)
+        {
+            float2 aovBoxSz  = float2(174.0 * u, 20.0 * u);
+            float2 aovBoxMin = float2(barMin.x + 0.5 * (barSize.x - aovBoxSz.x), barMin.y + barSize.y + 6.0 * u);
+            if (px.x >= aovBoxMin.x && px.x <= aovBoxMin.x + aovBoxSz.x &&
+                px.y >= aovBoxMin.y && px.y <= aovBoxMin.y + aovBoxSz.y)
+            {
+                sdr = lerp(sdr, float3(0.012, 0.020, 0.038), 0.90);
+                if ((px.x - aovBoxMin.x < 1.3) || (aovBoxMin.x + aovBoxSz.x - px.x < 1.3) ||
+                    (px.y - aovBoxMin.y < 1.3) || (aovBoxMin.y + aovBoxSz.y - px.y < 1.3))
+                    sdr = colAmber;
+                uint a0=65u, a1=79u, a2=86u, a3=58u;
+                uint b0=65u, b1=76u, b2=66u, b3=69u, b4=68u, b5=79u, b6=32u, b7=32u; // ALBEDO
+                if (curAovMode == 2u) { b0=78u; b1=79u; b2=82u; b3=77u; b4=65u; b5=76u; b6=32u; b7=32u; } // NORMAL
+                if (curAovMode == 3u) { b0=82u; b1=71u; b2=72u; b3=47u; b4=77u; b5=84u; b6=76u; b7=32u; } // RGH/MTL
+                if (curAovMode == 4u) { b0=68u; b1=73u; b2=82u; b3=69u; b4=67u; b5=84u; b6=32u; b7=32u; } // DIRECT
+                if (curAovMode == 5u) { b0=73u; b1=78u; b2=68u; b3=73u; b4=82u; b5=32u; b6=71u; b7=73u; } // INDIR GI
+                if (curAovMode == 6u) { b0=82u; b1=69u; b2=70u; b3=76u; b4=47u; b5=82u; b6=70u; b7=82u; } // REFL/RFR
+                if (curAovMode == 7u) { b0=82u; b1=65u; b2=89u; b3=32u; b4=72u; b5=69u; b6=65u; b7=84u; } // RAY HEAT
+                float tLbl = sampleWord4(px, aovBoxMin + float2(10.0 * u, 5.5 * u), 1.45 * u, a0, a1, a2, a3);
+                float tMod = sampleWord8(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, b0, b1, b2, b3, b4, b5, b6, b7);
+                sdr = lerp(sdr, colAmber, tLbl);
+                sdr = lerp(sdr, colEnamel, tMod);
+            }
         }
     }
 

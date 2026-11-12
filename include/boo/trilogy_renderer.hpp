@@ -17,6 +17,8 @@ public:
                 uint32_t slot, bool raytracing, bool canonical);
     bool hardwareVerified() const;
     bool nrdActive() const;
+    // 0 = Deterministic Spatial Cross-Bilateral, 1 = NRD REBLUR_DIFFUSE_SPECULAR Motion, 2 = NRD REFERENCE PT Accum
+    uint32_t activeDenoiseMode() const noexcept;
     uint32_t verifiedHits() const;
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;

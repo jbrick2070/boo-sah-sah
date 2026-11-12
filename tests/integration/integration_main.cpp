@@ -2143,7 +2143,104 @@ bool testInteractiveExploreLightingAndNrdConvergence() {
         BOO_CHECK(computeMeanAbsDiffRgb01(imgNightOn, imgNightOff) > 0.003);
     }
 
-    // 5. Return to Canonical Film Mode -> MUST match baseline frame bit-for-bit (`rgb10A == rgb10B`)!
+    // 5. Live Motion NRD::REBLUR_DIFFUSE_SPECULAR + Dynamic Ray-Traced Marbles RTX Physics Spheres
+    {
+        const bool hadNrdStationary = (!d3d.isWarp() && fx.activeDenoiseMode() == 2u);
+
+        FrameContext noMarblesCtx = macroCtx;
+        noMarblesCtx.interactive.accumulate = false;
+        noMarblesCtx.interactive.accumFrame = 0u;
+        noMarblesCtx.interactive.marbleCount = 0u;
+        std::vector<uint8_t> imgNoMarbles;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(noMarblesCtx, imgNoMarbles, cw, ch, &err));
+        BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+        if (hadNrdStationary) {
+            BOO_CHECK(fx.activeDenoiseMode() == 1u); // Seamless REBLUR motion denoiser engagement!
+        }
+
+        FrameContext marblesMotionCtx = noMarblesCtx;
+        marblesMotionCtx.interactive.marbleCount = 6u;
+        static constexpr uint32_t kTestMarbleMats[6] = {3u, 4u, 35u, 8u, 23u, 31u};
+        for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+            const float ang = static_cast<float>(mIdx) * 1.0471976f;
+            const float rad = 0.021f;
+            const float px = -0.180f + std::cos(ang) * 0.145f;
+            const float pz =  6.245f + std::sin(ang) * 0.105f;
+            const float py =  3.620f + rad;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][0] = px;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][1] = py;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][2] = pz;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][3] = rad;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][0] = px - 0.015f;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][1] = py;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][2] = pz - 0.010f;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][3] = 0.0f;
+            marblesMotionCtx.interactive.marbleRotQuat[mIdx][3] = 1.0f;
+            marblesMotionCtx.interactive.marbleMat[mIdx] = kTestMarbleMats[mIdx];
+        }
+
+        std::vector<uint8_t> imgMarblesMotion;
+        for (uint32_t f = 0; f < 4u; ++f) {
+            marblesMotionCtx.presentationFrame = 20u + f;
+            marblesMotionCtx.interactive.accumFrame = f;
+            marblesMotionCtx.interactive.eye[0] = 0.05f + 0.018f * static_cast<float>(f);
+            for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+                marblesMotionCtx.interactive.marblePrevPos[mIdx][0] = marblesMotionCtx.interactive.marblePosRad[mIdx][0];
+                marblesMotionCtx.interactive.marblePosRad[mIdx][0] += 0.012f;
+            }
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(marblesMotionCtx, imgMarblesMotion, cw, ch, &err));
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+            if (hadNrdStationary) {
+                BOO_CHECK(fx.activeDenoiseMode() == 1u);
+            }
+        }
+        BOO_CHECK(computeMeanAbsDiffRgb01(imgMarblesMotion, imgNoMarbles) > 0.004);
+
+        // Seamless hand-off back to NRD::REFERENCE when camera & marbles settle
+        FrameContext marblesSettled = marblesMotionCtx;
+        marblesSettled.interactive.accumulate = true;
+        marblesSettled.interactive.accumFrame = 0u;
+        for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+            marblesSettled.interactive.marblePrevPos[mIdx][0] = marblesSettled.interactive.marblePosRad[mIdx][0];
+        }
+        std::vector<uint8_t> imgMarblesRef;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(marblesSettled, imgMarblesRef, cw, ch, &err));
+        if (hadNrdStationary) {
+            BOO_CHECK(fx.activeDenoiseMode() == 2u);
+        }
+    }
+
+    // 6. 8-Mode Live Buffer / AOV Inspection (Base Color, Normal, ORM, Direct, GI, Refl/Refr, Ray Heatmap)
+    {
+        FrameContext aovCtx = macroCtx;
+        aovCtx.interactive.accumulate = false;
+        aovCtx.interactive.accumFrame = 0u;
+
+        std::array<std::vector<uint8_t>, 8> aovCanvases{};
+        for (uint32_t mode = 1u; mode <= 7u; ++mode) {
+            aovCtx.interactive.aovMode = mode;
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(aovCtx, aovCanvases[mode], cw, ch, &err));
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+            const auto mAov = computeRgba8LumaMetrics(aovCanvases[mode]);
+            BOO_CHECK(mAov.meanLuma > 0.008);
+        }
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[1], aovCanvases[2]) > 0.03);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[2], aovCanvases[3]) > 0.03);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[5], aovCanvases[6]) > 0.015);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[7], aovCanvases[1]) > 0.03);
+
+        // Verify Pass-4 AOV banner renders on presented output while keeping Pass-3 CanvasClean pure
+        aovCtx.showOverlay = true;
+        aovCtx.hudMode = 1u;
+        aovCtx.interactive.aovMode = 2u;
+        std::vector<uint8_t> aovPres, aovCleanAfterPres;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovCtx, hud, 960, 540, aovPres, &err));
+        BOO_CHECK(fx.readLastRenderedCanvasForTest(aovCleanAfterPres, cw, ch, &err));
+        BOO_CHECK(aovCleanAfterPres == aovCanvases[2]);
+        BOO_CHECK(aovPres != aovCleanAfterPres);
+    }
+
+    // 7. Return to Canonical Film Mode -> MUST match baseline frame bit-for-bit (`rgb10A == rgb10B`)!
     fx.resetTo(346.0);
     BOO_CHECK(fx.renderHeadlessCanvasForTest(canonicalCtx, baseB, cw, ch, &err, &rgb10B));
     BOO_CHECK(rgb10A == rgb10B && baseA == baseB);

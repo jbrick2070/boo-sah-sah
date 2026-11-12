@@ -219,6 +219,22 @@ struct InteractiveExploreController {
     bool lampsOff = false;
     float abSplitRatio = 0.50f;
     uint32_t activePreset = 0;
+    uint32_t aovMode = 0;
+
+    struct MarbleBody {
+        float pos[3]{0.0f, 0.0f, 0.0f};
+        float prevPos[3]{0.0f, 0.0f, 0.0f};
+        float vel[3]{0.0f, 0.0f, 0.0f};
+        float rotQuat[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        float radius = 0.020f;
+        uint32_t matId = 3u;
+        float restTimer = 0.0f;
+        bool active = false;
+    };
+    std::array<MarbleBody, boo::InteractiveView::kMaxMarbles> marbles{};
+    uint32_t marbleCount = 0;
+    uint32_t marbleSpawnGen = 0;
+    bool marblesMoving = false;
 
     uint32_t accumFrame = 0;
     bool hasPrevState = false;
@@ -275,6 +291,297 @@ struct InteractiveExploreController {
         BOO_LOG_INFO("Explore", "Interactive RTX Explore camera ENABLED [F] (WASDQE + Mouse + Wheel + Alt-Drag Sun + NRD PT)");
     }
 
+    void clearMarbles() noexcept {
+        for (auto& m : marbles) {
+            m = MarbleBody{};
+        }
+        marbleCount = 0u;
+        marblesMoving = false;
+        hasPrevState = false;
+    }
+
+    static float evalBasinU(float px, float pz) noexcept {
+        const float ax = std::abs(px + 0.180f) / 0.252f;
+        const float az = std::abs(pz - 6.245f) / 0.182f;
+        return std::pow(std::pow(ax, 2.38f) + std::pow(az, 2.38f), 1.0f / 2.38f);
+    }
+
+    static float evalCountertopHeight(float px, float pz) noexcept {
+        const float u = evalBasinU(px, pz);
+        if (u <= 0.135f) {
+            return 3.575f;
+        }
+        if (u <= 0.160f) {
+            const float s = (u - 0.135f) / 0.025f;
+            return 3.575f * (1.0f - s) + 3.569f * s;
+        }
+        if (u <= 0.985f) {
+            const float t = std::clamp((u - 0.160f) / 0.825f, 0.0f, 1.0f);
+            return 3.569f + 0.114f * std::pow(t, 2.32f);
+        }
+        if (u <= 1.065f) {
+            const float s = std::clamp((u - 0.985f) / 0.080f, 0.0f, 1.0f);
+            const float sm = s * s * (3.0f - 2.0f * s);
+            return 3.683f * (1.0f - sm) + 3.550f * sm;
+        }
+        return 3.550f;
+    }
+
+    void spawnMarbles(bool inDawnBathroom) noexcept {
+        static constexpr uint32_t kPalette[6] = {3u, 4u, 35u, 8u, 23u, 31u};
+        auto pcg01 = [](uint32_t& st) noexcept -> float {
+            st = st * 747796405u + 2891336453u;
+            uint32_t w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+            w = (w >> 22u) ^ w;
+            return static_cast<float>(w & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+        };
+        uint32_t rng = 0x9E3779B9u ^ (++marbleSpawnGen * 0x85EBCA6Bu);
+        marbleCount = 10u;
+        marblesMoving = true;
+        hasPrevState = false;
+
+        for (uint32_t i = 0; i < boo::InteractiveView::kMaxMarbles; ++i) {
+            MarbleBody& m = marbles[i];
+            m = MarbleBody{};
+            if (i >= marbleCount) continue;
+            m.active = true;
+            m.matId = kPalette[i % 6u];
+            m.radius = 0.0185f + 0.0050f * pcg01(rng);
+
+            if (inDawnBathroom) {
+                if (i < 6u) {
+                    // Orbital cascade into the superellipse porcelain vessel basin
+                    const float ang = static_cast<float>(i) * 1.0471976f + 0.28f * pcg01(rng);
+                    const float rFrac = 0.72f + 0.16f * pcg01(rng);
+                    m.pos[0] = -0.180f + std::cos(ang) * (0.252f * rFrac);
+                    m.pos[2] =  6.245f + std::sin(ang) * (0.182f * rFrac);
+                    m.pos[1] =  3.715f + 0.032f * static_cast<float>(i);
+                    const float spd = 0.62f + 0.28f * pcg01(rng);
+                    m.vel[0] = -std::sin(ang) * spd;
+                    m.vel[1] = -0.18f;
+                    m.vel[2] =  std::cos(ang) * (spd * 0.74f);
+                } else {
+                    // Countertop cascade banking across honed Calacatta marble around glass props
+                    const uint32_t k = i - 6u;
+                    const bool rightSide = (k % 2u) == 0u;
+                    m.pos[0] = rightSide ? (0.06f + 0.08f * static_cast<float>(k)) : (-0.48f - 0.06f * static_cast<float>(k));
+                    m.pos[2] = 6.38f - 0.05f * static_cast<float>(k);
+                    m.pos[1] = 3.635f + 0.035f * static_cast<float>(k);
+                    m.vel[0] = rightSide ? (0.34f + 0.14f * pcg01(rng)) : (0.42f + 0.15f * pcg01(rng));
+                    m.vel[1] = -0.22f;
+                    m.vel[2] = -0.52f - 0.22f * pcg01(rng);
+                }
+            } else {
+                const float cp = std::cos(pitch);
+                const float fwd[3] = {std::sin(yaw) * cp, std::sin(pitch), std::cos(yaw) * cp};
+                const float rgt[3] = {std::cos(yaw), 0.0f, -std::sin(yaw)};
+                const float spread = (static_cast<float>(i) - 4.5f) * 0.085f;
+                m.radius = 0.055f + 0.018f * pcg01(rng);
+                m.pos[0] = eye[0] + fwd[0] * 2.15f + rgt[0] * spread;
+                m.pos[1] = std::max(1.25f, eye[1] + fwd[1] * 1.4f + 0.35f + 0.09f * static_cast<float>(i));
+                m.pos[2] = eye[2] + fwd[2] * 2.15f + rgt[2] * spread;
+                m.vel[0] = fwd[0] * (1.25f + 0.35f * pcg01(rng)) + rgt[0] * (0.25f * (pcg01(rng) - 0.5f));
+                m.vel[1] = 0.45f;
+                m.vel[2] = fwd[2] * (1.25f + 0.35f * pcg01(rng)) + rgt[2] * (0.25f * (pcg01(rng) - 0.5f));
+            }
+            for (int c = 0; c < 3; ++c) m.prevPos[c] = m.pos[c];
+        }
+    }
+
+    void stepMarbles(float wallDt, bool inDawnBathroom) noexcept {
+        if (marbleCount == 0u) {
+            marblesMoving = false;
+            return;
+        }
+        for (uint32_t i = 0; i < marbleCount; ++i) {
+            for (int c = 0; c < 3; ++c) marbles[i].prevPos[c] = marbles[i].pos[c];
+        }
+
+        const float dt = std::clamp(wallDt, 0.001f, 0.033f) / 8.0f;
+        struct CylObs { float x, z, r; };
+        static constexpr CylObs kBathCyls[4] = {
+            {-0.180f, 6.472f, 0.030f},
+            { 0.240f, 6.320f, 0.045f},
+            { 0.395f, 6.250f, 0.046f},
+            {-0.590f, 6.265f, 0.116f}
+        };
+
+        for (uint32_t sub = 0; sub < 8u; ++sub) {
+            for (uint32_t i = 0; i < marbleCount; ++i) {
+                MarbleBody& m = marbles[i];
+                if (!m.active) continue;
+
+                m.vel[1] -= 9.81f * dt;
+                // Subtle air drag
+                const float airDamp = std::max(0.0f, 1.0f - 0.18f * dt);
+                m.vel[0] *= airDamp; m.vel[1] *= airDamp; m.vel[2] *= airDamp;
+
+                m.pos[0] += m.vel[0] * dt;
+                m.pos[1] += m.vel[1] * dt;
+                m.pos[2] += m.vel[2] * dt;
+
+                float supY = 0.0f;
+                float supN[3]{0.0f, 1.0f, 0.0f};
+                if (inDawnBathroom) {
+                    const bool onCounter = (m.pos[0] >= -0.895f && m.pos[0] <= 0.515f &&
+                                            m.pos[2] >=  5.990f && m.pos[2] <= 6.580f &&
+                                            m.pos[1] >=  3.505f);
+                    if (onCounter) {
+                        constexpr float eps = 0.004f;
+                        const float hC = evalCountertopHeight(m.pos[0], m.pos[2]);
+                        const float hx = (evalCountertopHeight(m.pos[0] + eps, m.pos[2]) - evalCountertopHeight(m.pos[0] - eps, m.pos[2])) / (2.0f * eps);
+                        const float hz = (evalCountertopHeight(m.pos[0], m.pos[2] + eps) - evalCountertopHeight(m.pos[0], m.pos[2] - eps)) / (2.0f * eps);
+                        const float invLen = 1.0f / std::sqrt(hx * hx + 1.0f + hz * hz);
+                        supN[0] = -hx * invLen;
+                        supN[1] =  1.0f * invLen;
+                        supN[2] = -hz * invLen;
+                        supY = hC + m.radius / std::max(0.35f, supN[1]);
+                    } else {
+                        supY = 2.650f + m.radius;
+                        // Floating walnut vanity front face deflection
+                        if (m.pos[0] >= -0.885f && m.pos[0] <= 0.505f &&
+                            m.pos[1] >=  2.960f && m.pos[1] <= 3.535f &&
+                            m.pos[2] >   6.010f - m.radius) {
+                            m.pos[2] = 6.010f - m.radius;
+                            if (m.vel[2] > 0.0f) m.vel[2] = -m.vel[2] * 0.52f;
+                        }
+                    }
+
+                    // Countertop cylindrical fixture & glass prop collisions
+                    if (m.pos[1] >= 3.52f && m.pos[1] <= 3.88f) {
+                        for (const auto& ob : kBathCyls) {
+                            const float dx = m.pos[0] - ob.x;
+                            const float dz = m.pos[2] - ob.z;
+                            const float minD = ob.r + m.radius;
+                            const float d2 = dx * dx + dz * dz;
+                            if (d2 < minD * minD && d2 > 1e-10f) {
+                                const float d = std::sqrt(d2);
+                                const float nx = dx / d, nz = dz / d;
+                                m.pos[0] = ob.x + nx * minD;
+                                m.pos[2] = ob.z + nz * minD;
+                                const float vn = m.vel[0] * nx + m.vel[2] * nz;
+                                if (vn < 0.0f) {
+                                    m.vel[0] -= 1.72f * vn * nx;
+                                    m.vel[2] -= 1.72f * vn * nz;
+                                }
+                            }
+                        }
+                    }
+
+                    // Bathroom architectural enclosure walls
+                    if (m.pos[2] > 6.555f - m.radius) { m.pos[2] = 6.555f - m.radius; if (m.vel[2] > 0.0f) m.vel[2] *= -0.62f; }
+                    if (m.pos[2] < 2.300f + m.radius) { m.pos[2] = 2.300f + m.radius; if (m.vel[2] < 0.0f) m.vel[2] *= -0.62f; }
+                    if (m.pos[0] < -2.440f + m.radius) { m.pos[0] = -2.440f + m.radius; if (m.vel[0] < 0.0f) m.vel[0] *= -0.62f; }
+                    if (m.pos[0] >  1.480f - m.radius) { m.pos[0] =  1.480f - m.radius; if (m.vel[0] > 0.0f) m.vel[0] *= -0.62f; }
+                } else {
+                    const bool onAltar = (std::abs(m.pos[0]) <= 0.58f && m.pos[2] >= 5.70f && m.pos[2] <= 6.86f && m.pos[1] >= 2.10f);
+                    supY = (onAltar ? 2.160f : 0.0f) + m.radius;
+                }
+
+                // Support contact resolution, glass-on-stone bounce, rolling friction & quaternion spin
+                bool inContact = false;
+                if (m.pos[1] <= supY) {
+                    m.pos[1] = supY;
+                    inContact = true;
+                    const float vn = m.vel[0] * supN[0] + m.vel[1] * supN[1] + m.vel[2] * supN[2];
+                    if (vn < 0.0f) {
+                        const float bounce = ( vn < -0.22f) ? 0.56f : 0.0f;
+                        m.vel[0] -= (1.0f + bounce) * vn * supN[0];
+                        m.vel[1] -= (1.0f + bounce) * vn * supN[1];
+                        m.vel[2] -= (1.0f + bounce) * vn * supN[2];
+                    }
+                    const float rollDrag = std::max(0.0f, 1.0f - 0.82f * dt);
+                    m.vel[0] *= rollDrag;
+                    m.vel[1] *= rollDrag;
+                    m.vel[2] *= rollDrag;
+                }
+
+                const float vDotN = m.vel[0] * supN[0] + m.vel[1] * supN[1] + m.vel[2] * supN[2];
+                const float vt[3] = {
+                    m.vel[0] - supN[0] * vDotN,
+                    m.vel[1] - supN[1] * vDotN,
+                    m.vel[2] - supN[2] * vDotN
+                };
+                const float spinScale = inContact ? (1.0f / std::max(0.008f, m.radius)) : (0.25f / std::max(0.008f, m.radius));
+                const float wx = (supN[1] * vt[2] - supN[2] * vt[1]) * spinScale;
+                const float wy = (supN[2] * vt[0] - supN[0] * vt[2]) * spinScale;
+                const float wz = (supN[0] * vt[1] - supN[1] * vt[0]) * spinScale;
+                const float qx = m.rotQuat[0], qy = m.rotQuat[1], qz = m.rotQuat[2], qw = m.rotQuat[3];
+                m.rotQuat[0] += 0.5f * ( wx * qw + wy * qz - wz * qy) * dt;
+                m.rotQuat[1] += 0.5f * (-wx * qz + wy * qw + wz * qx) * dt;
+                m.rotQuat[2] += 0.5f * ( wx * qy - wy * qx + wz * qw) * dt;
+                m.rotQuat[3] += 0.5f * (-wx * qx - wy * qy - wz * qz) * dt;
+                const float qNorm = 1.0f / std::max(1e-6f, std::sqrt(
+                    m.rotQuat[0] * m.rotQuat[0] + m.rotQuat[1] * m.rotQuat[1] +
+                    m.rotQuat[2] * m.rotQuat[2] + m.rotQuat[3] * m.rotQuat[3]));
+                for (int c = 0; c < 4; ++c) m.rotQuat[c] *= qNorm;
+            }
+
+            // Elastic sphere-sphere marble collisions
+            for (uint32_t i = 0; i < marbleCount; ++i) {
+                for (uint32_t j = i + 1u; j < marbleCount; ++j) {
+                    MarbleBody& a = marbles[i];
+                    MarbleBody& b = marbles[j];
+                    if (!a.active || !b.active) continue;
+                    const float dx = b.pos[0] - a.pos[0];
+                    const float dy = b.pos[1] - a.pos[1];
+                    const float dz = b.pos[2] - a.pos[2];
+                    const float minD = a.radius + b.radius;
+                    const float d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < minD * minD && d2 > 1e-12f) {
+                        const float d = std::sqrt(d2);
+                        const float nx = dx / d, ny = dy / d, nz = dz / d;
+                        const float pen = minD - d;
+                        const float ma = a.radius * a.radius * a.radius;
+                        const float mb = b.radius * b.radius * b.radius;
+                        const float invSum = 1.0f / std::max(1e-8f, ma + mb);
+                        a.pos[0] -= nx * pen * (mb * invSum);
+                        a.pos[1] -= ny * pen * (mb * invSum);
+                        a.pos[2] -= nz * pen * (mb * invSum);
+                        b.pos[0] += nx * pen * (ma * invSum);
+                        b.pos[1] += ny * pen * (ma * invSum);
+                        b.pos[2] += nz * pen * (ma * invSum);
+
+                        const float rvx = b.vel[0] - a.vel[0];
+                        const float rvy = b.vel[1] - a.vel[1];
+                        const float rvz = b.vel[2] - a.vel[2];
+                        const float vn = rvx * nx + rvy * ny + rvz * nz;
+                        if (vn < 0.0f) {
+                            constexpr float restitution = 0.82f;
+                            const float jImp = -(1.0f + restitution) * vn * (ma * mb * invSum);
+                            a.vel[0] -= (jImp / ma) * nx;
+                            a.vel[1] -= (jImp / ma) * ny;
+                            a.vel[2] -= (jImp / ma) * nz;
+                            b.vel[0] += (jImp / mb) * nx;
+                            b.vel[1] += (jImp / mb) * ny;
+                            b.vel[2] += (jImp / mb) * nz;
+                        }
+                    }
+                }
+            }
+        }
+
+        bool anyAwake = false;
+        for (uint32_t i = 0; i < marbleCount; ++i) {
+            MarbleBody& m = marbles[i];
+            if (!m.active) continue;
+            const float spd2 = m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2];
+            if (spd2 < 0.00025f) {
+                m.restTimer += wallDt;
+                if (m.restTimer > 0.32f) {
+                    m.vel[0] = m.vel[1] = m.vel[2] = 0.0f;
+                    for (int c = 0; c < 3; ++c) m.prevPos[c] = m.pos[c];
+                } else {
+                    anyAwake = true;
+                }
+            } else {
+                m.restTimer = 0.0f;
+                anyAwake = true;
+            }
+        }
+        marblesMoving = anyAwake;
+    }
+
     void exitExplore(
         boo::TimelineClock& clock,
         boo::AudioEngine& audio,
@@ -282,6 +589,8 @@ struct InteractiveExploreController {
         boo::AppWindow& window) {
         exploreActive = false;
         activePreset = 0;
+        aovMode = 0u;
+        clearMarbles();
         hasPrevState = false;
         window.setExploreKeyCapture(false);
         clock.resume();
@@ -406,6 +715,8 @@ struct InteractiveExploreController {
             if (pressed & 0x4000u) window.pushCommandFromWndProc(boo::TransportCommand::TogglePracticalLamps); // X
             if (pressed & 0x2000u) window.pushCommandFromWndProc(boo::TransportCommand::ToggleRtxSplitWipe);   // B
             if (pressed & 0x1000u) window.pushCommandFromWndProc(boo::TransportCommand::TogglePlayPause);      // A
+            if (pressed & 0x0200u) window.pushCommandFromWndProc(boo::TransportCommand::SpawnMarbles);         // RB -> Marbles
+            if (pressed & 0x0100u) window.pushCommandFromWndProc(boo::TransportCommand::CycleAovMode);         // LB -> AOV
             if (pressed & 0x0008u) { // DPad Right -> next hero preset
                 const uint32_t nxt = (activePreset % 6u) + 1u;
                 window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
@@ -446,11 +757,12 @@ struct InteractiveExploreController {
 
             // 2. Top/Bottom RTX Showcase Studio Bar buttons & sliders
             const bool barVisible = settings.showOverlay && (hudMode != 3u) &&
-                                    (exploreActive || sunOverride || lampsOff) && w >= 640.0f && h >= 300.0f;
+                                    (exploreActive || sunOverride || lampsOff || aovMode != 0u || marbleCount != 0u) &&
+                                    w >= 640.0f && h >= 300.0f;
             if (!consumed && barVisible) {
-                const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 174.0f * u, 326.0f * u) : (0.5f * w - 174.0f * u);
+                const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 216.0f * u, 322.0f * u) : (0.5f * w - 216.0f * u);
                 const float barMinY = (hudMode == 2u) ? (h - 68.0f * u) : (14.0f * u);
-                if (snap.mouseX >= barMinX && snap.mouseX <= barMinX + 348.0f * u &&
+                if (snap.mouseX >= barMinX && snap.mouseX <= barMinX + 432.0f * u &&
                     snap.mouseY >= barMinY && snap.mouseY <= barMinY + 52.0f * u) {
                     consumed = true;
                     const float rx = (snap.mouseX - barMinX) / u;
@@ -458,29 +770,33 @@ struct InteractiveExploreController {
                     if (ry >= 4.0f && ry <= 24.0f) {
                         if (rx >= 6.0f && rx <= 64.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ToggleExploreMode);
-                        } else if (rx >= 166.0f && rx <= 208.0f) {
+                        } else if (rx >= 166.0f && rx <= 206.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::TogglePracticalLamps);
-                        } else if (rx >= 212.0f && rx <= 254.0f) {
+                        } else if (rx >= 210.0f && rx <= 250.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ToggleRtxSplitWipe);
-                        } else if (rx >= 258.0f && rx <= 345.0f) {
-                            const uint32_t k = std::min<uint32_t>(5u, static_cast<uint32_t>((rx - 258.0f) / 14.5f));
+                        } else if (rx >= 254.0f && rx <= 294.0f) {
+                            window.pushCommandFromWndProc(snap.shiftDown ? boo::TransportCommand::ResetAovMode : boo::TransportCommand::CycleAovMode);
+                        } else if (rx >= 298.0f && rx <= 340.0f) {
+                            window.pushCommandFromWndProc(snap.shiftDown ? boo::TransportCommand::ClearMarbles : boo::TransportCommand::SpawnMarbles);
+                        } else if (rx >= 344.0f && rx <= 429.0f) {
+                            const uint32_t k = std::min<uint32_t>(5u, static_cast<uint32_t>((rx - 344.0f) / 14.2f));
                             window.pushCommandFromWndProc(static_cast<boo::TransportCommand>(
                                 static_cast<int>(boo::TransportCommand::HeroPreset1) + static_cast<int>(k)));
                         }
                     } else if (ry >= 27.0f && ry <= 48.0f) {
-                        if (rx >= 30.0f && rx <= 155.0f) {
+                        if (rx >= 30.0f && rx <= 185.0f) {
                             dragTarget = DragTarget::SunSlider;
                             sunOverride = true;
-                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
+                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (148.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 182.0f && rx <= 303.0f) {
+                        } else if (rx >= 212.0f && rx <= 367.0f) {
                             dragTarget = DragTarget::AzmSlider;
                             sunOverride = true;
-                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (114.0f * u), 0.0f, 1.0f);
+                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 216.0f * u)) / (148.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 305.0f && rx <= 344.0f) {
+                        } else if (rx >= 370.0f && rx <= 426.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ResetInteractiveLighting);
                         }
                     }
@@ -510,12 +826,12 @@ struct InteractiveExploreController {
 
         // Ongoing slider / split-curtain drag updates
         if (snap.lmbDown) {
-            const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 174.0f * u, 326.0f * u) : (0.5f * w - 174.0f * u);
+            const float barMinX = (hudMode == 0u) ? std::max(0.5f * w - 216.0f * u, 322.0f * u) : (0.5f * w - 216.0f * u);
             if (dragTarget == DragTarget::SplitCurtain) {
                 const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
                 abSplitRatio = std::clamp((snap.mouseX - lb.x) / std::max(1.0f, lb.width), 0.05f, 0.95f);
             } else if (dragTarget == DragTarget::SunSlider) {
-                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
+                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (148.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextEl - sunElevation01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunElevation01 = nextEl;
@@ -523,7 +839,7 @@ struct InteractiveExploreController {
                     hasPrevState = false;
                 }
             } else if (dragTarget == DragTarget::AzmSlider) {
-                const float nextAz = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (114.0f * u), 0.0f, 1.0f);
+                const float nextAz = std::clamp((snap.mouseX - (barMinX + 216.0f * u)) / (148.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextAz - sunAzimuth01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunAzimuth01 = nextAz;
@@ -651,6 +967,11 @@ struct InteractiveExploreController {
             cameraOrLightChanged = true;
         }
 
+        const bool inDawnBathroom = (showMode == boo::ShowVisualMode::FullFilm360s && ioCtx.filmTimeSeconds >= 335.5);
+        if (marbleCount > 0u) {
+            stepMarbles(wallDt, inDawnBathroom);
+        }
+
         const float smoothBlend = blendT * blendT * (3.0f - 2.0f * blendT);
         const float cp = std::cos(pitch);
         const float fwd[3] = {std::sin(yaw) * cp, std::sin(pitch), std::cos(yaw) * cp};
@@ -671,12 +992,25 @@ struct InteractiveExploreController {
         ioCtx.interactive.lampsOff = lampsOff;
         ioCtx.interactive.abSplitRatio = abSplitRatio;
         ioCtx.interactive.activePreset = activePreset;
+        ioCtx.interactive.aovMode = aovMode;
+        ioCtx.interactive.marbleCount = marbleCount;
+        for (uint32_t m = 0; m < marbleCount && m < boo::InteractiveView::kMaxMarbles; ++m) {
+            ioCtx.interactive.marblePosRad[m][0] = marbles[m].pos[0];
+            ioCtx.interactive.marblePosRad[m][1] = marbles[m].pos[1];
+            ioCtx.interactive.marblePosRad[m][2] = marbles[m].pos[2];
+            ioCtx.interactive.marblePosRad[m][3] = marbles[m].radius;
+            for (int c = 0; c < 3; ++c) ioCtx.interactive.marblePrevPos[m][c] = marbles[m].prevPos[c];
+            ioCtx.interactive.marblePrevPos[m][3] = 0.0f;
+            for (int c = 0; c < 4; ++c) ioCtx.interactive.marbleRotQuat[m][c] = marbles[m].rotQuat[c];
+            ioCtx.interactive.marbleMat[m] = marbles[m].matId;
+        }
 
-        // Progressive multi-sample path-tracing accumulation when interactive view is still & paused
-        const bool interactiveSession = exploreActive || sunOverride || lampsOff;
+        // Live NRD REBLUR motion denoising during flight/sun-scrub/rolling-marbles,
+        // handing off seamlessly to NRD REFERENCE progressive path-tracing (1->4096 SPP) when still!
+        const bool interactiveSession = exploreActive || sunOverride || lampsOff || (marbleCount > 0u);
+        const bool liveMotionActive = cameraOrLightChanged || marblesMoving;
         const bool sceneInvalidated =
             !hasPrevState ||
-            cameraOrLightChanged ||
             ioCtx.seeking ||
             !ioCtx.paused ||
             ioCtx.samplePosition != prevSamplePos ||
@@ -685,7 +1019,7 @@ struct InteractiveExploreController {
             settings.disableRT != prevDisableRt ||
             settings.edition != prevEdition;
 
-        if (interactiveSession && ioCtx.paused && !ioCtx.seeking && !settings.disableRT) {
+        if (interactiveSession && ioCtx.paused && !ioCtx.seeking && !settings.disableRT && (aovMode == 0u) && !liveMotionActive) {
             ioCtx.interactive.accumulate = true;
             if (sceneInvalidated) {
                 accumFrame = 0u;
@@ -1502,12 +1836,49 @@ int main(int argc, char** argv) {
                 case TransportCommand::ResetInteractiveLighting:
                     interactiveCtrl.sunOverride = false;
                     interactiveCtrl.lampsOff = false;
+                    interactiveCtrl.aovMode = 0u;
+                    interactiveCtrl.clearMarbles();
                     interactiveCtrl.sunElevation01 = 0.43f;
                     interactiveCtrl.sunAzimuth01 = 0.4125f;
                     interactiveCtrl.recomputeSunDir();
                     interactiveCtrl.abSplitRatio = 0.50f;
                     interactiveCtrl.hasPrevState = false;
-                    BOO_LOG_INFO("Explore", "Reset interactive sun, practical lamps & split curtain [F8]");
+                    BOO_LOG_INFO("Explore", "Reset interactive sun, practical lamps, AOVs, marbles & split curtain [F8]");
+                    break;
+                case TransportCommand::CycleAovMode: {
+                    static constexpr const char* kAovNames[8] = {
+                        "0: Final Rendered",
+                        "1: Base Color (Albedo)",
+                        "2: World Normal",
+                        "3: Roughness / Metallic / AO",
+                        "4: Direct + Caustics + RTXDI",
+                        "5: Indirect Diffuse GI",
+                        "6: Reflections & Dielectric Refraction",
+                        "7: DXR Ray Heatmap"
+                    };
+                    interactiveCtrl.aovMode = (interactiveCtrl.aovMode + 1u) % 8u;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Explore", std::string("Buffer / AOV Inspection [I / F9]: ") + kAovNames[interactiveCtrl.aovMode]);
+                    break;
+                }
+                case TransportCommand::ResetAovMode:
+                    interactiveCtrl.aovMode = 0u;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Explore", "Buffer / AOV Inspection [Shift+I]: 0: Final Rendered");
+                    break;
+                case TransportCommand::SpawnMarbles: {
+                    const ShowVisualMode curVis = resolveShowVisualMode(cueSheet, settings.playbackMode);
+                    if (!interactiveCtrl.exploreActive) {
+                        interactiveCtrl.enterExplore(curVis, clock, audio, audioClockReady, window, settings, 0.5f);
+                    }
+                    const bool inBath = (curVis == ShowVisualMode::FullFilm360s && clock.currentSeconds() >= 335.5);
+                    interactiveCtrl.spawnMarbles(inBath);
+                    BOO_LOG_INFO("Explore", "Spawned 10 ray-traced Marbles RTX rigid-body spheres [Y / F10 / M]");
+                    break;
+                }
+                case TransportCommand::ClearMarbles:
+                    interactiveCtrl.clearMarbles();
+                    BOO_LOG_INFO("Explore", "Cleared interactive physics marbles [Shift+Y]");
                     break;
                 case TransportCommand::HeroPreset1:
                 case TransportCommand::HeroPreset2:

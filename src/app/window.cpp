@@ -127,6 +127,14 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case VK_F6: self->pushCommandFromWndProc(TransportCommand::HeroPreset5); return 0;
                     case VK_F7: self->pushCommandFromWndProc(TransportCommand::HeroPreset6); return 0;
                     case VK_F8: self->pushCommandFromWndProc(TransportCommand::ResetInteractiveLighting); return 0;
+                    case 'I':
+                    case VK_F9:
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ResetAovMode : TransportCommand::CycleAovMode);
+                        return 0;
+                    case 'Y':
+                    case VK_F10:
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ClearMarbles : TransportCommand::SpawnMarbles);
+                        return 0;
                     case VK_DOWN:
                     case VK_OEM_MINUS: self->pushCommandFromWndProc(TransportCommand::VolumeDown); return 0;
                     case VK_UP:
@@ -139,7 +147,13 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case 'N':  self->pushCommandFromWndProc(TransportCommand::NextAct); return 0;
                     case 'P':   self->pushCommandFromWndProc(TransportCommand::PrevAct); return 0;
                     case 'L':       self->pushCommandFromWndProc(TransportCommand::ToggleLoop); return 0;
-                    case 'M':       self->pushCommandFromWndProc(TransportCommand::ToggleMute); return 0;
+                    case 'M':
+                        if (inExplore) {
+                            self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ClearMarbles : TransportCommand::SpawnMarbles);
+                        } else {
+                            self->pushCommandFromWndProc(TransportCommand::ToggleMute);
+                        }
+                        return 0;
                     case 'Q':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::CycleQualityPreset); return 0;
                     case 'E':       if (!inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleEdition); return 0;
                     case 'K':       self->pushCommandFromWndProc(TransportCommand::ToggleCaptions); return 0;

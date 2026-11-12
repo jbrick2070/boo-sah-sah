@@ -288,6 +288,9 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSSky -DM2_RT -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSAccum -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
@@ -297,6 +300,15 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSAccumResolve -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSDeterministicResolve -DBOO_DENOISE_RESOLVE=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSPackNrdReblur -DBOO_NRD_PACK_CS=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSUnpackNrdReblur -DBOO_NRD_UNPACK=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
 add_custom_target(boo_shaders DEPENDS
@@ -308,9 +320,13 @@ add_custom_target(boo_shaders DEPENDS
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
 
     "${M0_VS_CSO}"
     "${M0_PS_CSO}"

@@ -2867,6 +2867,10 @@ uint32_t M1TaipeiSliceEffect::lastVerifiedRayHits() const noexcept {
     return impl_ ? impl_->lastVerifiedHits : 0u;
 }
 
+uint32_t M1TaipeiSliceEffect::activeDenoiseMode() const noexcept {
+    return (impl_ && impl_->trilogyMesh) ? impl_->trilogyMesh->activeDenoiseMode() : 0u;
+}
+
 GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     const FrameContext& ctx,
     M1CameraState& outCam) const noexcept {
@@ -3029,15 +3033,18 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         cmd->OMSetRenderTargets(1, &rtvDst, FALSE, nullptr);
 
         const uint64_t sampleBucket = static_cast<uint64_t>(std::max<int64_t>(0, ctx.samplePosition) / 800LL);
+        const uint32_t curAov = std::min<uint32_t>(ctx.interactive.aovMode, 7u);
         GpuM1PostConstants pc{};
         pc.invSize[0] = 1.0f / static_cast<float>(canvasW);
         pc.invSize[1] = 1.0f / static_cast<float>(canvasH);
-        pc.scaleOrVignette = 0.24f;
+        pc.scaleOrVignette = (curAov != 0u) ? 0.0f : 0.24f;
+        pc.isFirstDownsample = curAov;
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
-        pc.bloomIntensity = 0.18f + 0.06f * revealOpen01;
-        if (visualMode == ShowVisualMode::SoloNPU ||
-            (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0)) {
+        pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * revealOpen01);
+        if (curAov == 0u &&
+            (visualMode == ShowVisualMode::SoloNPU ||
+             (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0))) {
             pc.bloomIntensity *= 0.85f + 0.30f * std::clamp(ctx.moodBloomStrength, 0.f, 1.f);
         }
 
@@ -3342,7 +3349,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                                   : LiveAcceleratorOrchestra::kSubParticleCount;
     }
 
-    {
+    if (ctx.interactive.aovMode == 0u) {
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHdr = rtvAt(0u);
         D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(canvasW), static_cast<float>(canvasH), 0.0f, 1.0f};
@@ -3584,6 +3591,10 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     const uint32_t accumSpp = ctx.interactive.accumulate ? (ctx.interactive.accumFrame + 1u) : 1u;
     pc.interactiveState[3] = static_cast<float>(std::min<uint32_t>(accumSpp, 9999u));
 
+    const uint32_t curAov = std::min<uint32_t>(ctx.interactive.aovMode, 7u);
+    const uint32_t denMode = trilogyMesh ? (trilogyMesh->activeDenoiseMode() & 0x3u) : 0u;
+    const uint32_t mrblCnt = std::min<uint32_t>(ctx.interactive.marbleCount, InteractiveView::kMaxMarbles);
+
     uint32_t interFlags = 0u;
     if (ctx.interactive.exploreActive)           interFlags |= (1u << 0u);
     if (ctx.interactive.sunOverride)             interFlags |= (1u << 1u);
@@ -3591,6 +3602,9 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (trilogyMesh && trilogyMesh->nrdActive()) interFlags |= (1u << 3u);
     interFlags |= ((ctx.interactive.activePreset & 0xFu) << 4u);
     if (ctx.interactive.accumulate)              interFlags |= (1u << 8u);
+    interFlags |= (curAov << 9u);
+    interFlags |= (denMode << 12u);
+    interFlags |= ((mrblCnt & 0xFFu) << 16u);
     pc.interactiveMeta[0] = interFlags;
 
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;

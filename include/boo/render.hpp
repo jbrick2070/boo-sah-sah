@@ -245,6 +245,7 @@ public:
     uint32_t canvasWidth() const noexcept;
     uint32_t canvasHeight() const noexcept;
     uint32_t lastVerifiedRayHits() const noexcept;
+    uint32_t activeDenoiseMode() const noexcept;
 
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(

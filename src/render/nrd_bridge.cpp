@@ -29,20 +29,46 @@ using Microsoft::WRL::ComPtr;
 DXGI_FORMAT toDxgiFormat(nrd::Format f) noexcept {
     switch (f) {
     case nrd::Format::R8_UNORM:             return DXGI_FORMAT_R8_UNORM;
+    case nrd::Format::R8_SNORM:             return DXGI_FORMAT_R8_SNORM;
+    case nrd::Format::R8_UINT:              return DXGI_FORMAT_R8_UINT;
+    case nrd::Format::R8_SINT:              return DXGI_FORMAT_R8_SINT;
     case nrd::Format::RG8_UNORM:            return DXGI_FORMAT_R8G8_UNORM;
+    case nrd::Format::RG8_SNORM:            return DXGI_FORMAT_R8G8_SNORM;
+    case nrd::Format::RG8_UINT:             return DXGI_FORMAT_R8G8_UINT;
+    case nrd::Format::RG8_SINT:             return DXGI_FORMAT_R8G8_SINT;
     case nrd::Format::RGBA8_UNORM:          return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case nrd::Format::RGBA8_SNORM:          return DXGI_FORMAT_R8G8B8A8_SNORM;
+    case nrd::Format::RGBA8_UINT:           return DXGI_FORMAT_R8G8B8A8_UINT;
+    case nrd::Format::RGBA8_SINT:           return DXGI_FORMAT_R8G8B8A8_SINT;
+    case nrd::Format::RGBA8_SRGB:           return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     case nrd::Format::R16_UNORM:            return DXGI_FORMAT_R16_UNORM;
+    case nrd::Format::R16_SNORM:            return DXGI_FORMAT_R16_SNORM;
+    case nrd::Format::R16_UINT:             return DXGI_FORMAT_R16_UINT;
+    case nrd::Format::R16_SINT:             return DXGI_FORMAT_R16_SINT;
     case nrd::Format::R16_SFLOAT:           return DXGI_FORMAT_R16_FLOAT;
+    case nrd::Format::RG16_UNORM:           return DXGI_FORMAT_R16G16_UNORM;
+    case nrd::Format::RG16_SNORM:           return DXGI_FORMAT_R16G16_SNORM;
+    case nrd::Format::RG16_UINT:            return DXGI_FORMAT_R16G16_UINT;
+    case nrd::Format::RG16_SINT:            return DXGI_FORMAT_R16G16_SINT;
     case nrd::Format::RG16_SFLOAT:          return DXGI_FORMAT_R16G16_FLOAT;
     case nrd::Format::RGBA16_UNORM:         return DXGI_FORMAT_R16G16B16A16_UNORM;
+    case nrd::Format::RGBA16_SNORM:         return DXGI_FORMAT_R16G16B16A16_SNORM;
+    case nrd::Format::RGBA16_UINT:          return DXGI_FORMAT_R16G16B16A16_UINT;
+    case nrd::Format::RGBA16_SINT:          return DXGI_FORMAT_R16G16B16A16_SINT;
     case nrd::Format::RGBA16_SFLOAT:        return DXGI_FORMAT_R16G16B16A16_FLOAT;
     case nrd::Format::R32_UINT:             return DXGI_FORMAT_R32_UINT;
+    case nrd::Format::R32_SINT:             return DXGI_FORMAT_R32_SINT;
     case nrd::Format::R32_SFLOAT:           return DXGI_FORMAT_R32_FLOAT;
+    case nrd::Format::RG32_UINT:            return DXGI_FORMAT_R32G32_UINT;
+    case nrd::Format::RG32_SINT:            return DXGI_FORMAT_R32G32_SINT;
     case nrd::Format::RG32_SFLOAT:          return DXGI_FORMAT_R32G32_FLOAT;
     case nrd::Format::RGBA32_UINT:          return DXGI_FORMAT_R32G32B32A32_UINT;
+    case nrd::Format::RGBA32_SINT:          return DXGI_FORMAT_R32G32B32A32_SINT;
     case nrd::Format::RGBA32_SFLOAT:        return DXGI_FORMAT_R32G32B32A32_FLOAT;
     case nrd::Format::R10_G10_B10_A2_UNORM: return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case nrd::Format::R10_G10_B10_A2_UINT:  return DXGI_FORMAT_R10G10B10A2_UINT;
     case nrd::Format::R11_G11_B10_UFLOAT:   return DXGI_FORMAT_R11G11B10_FLOAT;
+    case nrd::Format::R9_G9_B9_E5_UFLOAT:   return DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
     default:                                return DXGI_FORMAT_R16G16B16A16_FLOAT;
     }
 }
@@ -108,20 +134,24 @@ struct NrdBridge::Impl {
     std::vector<PoolTex> permanentPool;
     std::vector<PoolTex> transientPool;
     PoolTex outSignal;
+    PoolTex outDiff;
+    PoolTex outSpec;
 
     ComPtr<ID3D12DescriptorHeap> descHeap;
     ComPtr<ID3D12Resource> cbUpload;
     uint8_t* cbMapped = nullptr;
 
     static constexpr uint32_t kFrameSlots = 4;
-    static constexpr uint32_t kMaxDispatchesPerFrame = 8;
-    static constexpr uint32_t kDescPerDispatch = 8;
-    static constexpr uint32_t kCbStride = 256;
+    static constexpr uint32_t kMaxDispatchesPerFrame = 40;
+    static constexpr uint32_t kDescPerDispatch = 32;
+    uint32_t cbStride = 1024;
 
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t nrdFrameIndex = 0;
     float prevJitter[2]{0.0f, 0.0f};
+    bool refCleared = false;
+    bool reblurCleared = false;
     bool ready = false;
     std::string status = "NRD sidecar not initialized";
 
@@ -144,6 +174,8 @@ void NrdBridge::shutdown() noexcept {
     s.cbUpload.Reset();
     s.descHeap.Reset();
     s.outSignal = {};
+    s.outDiff = {};
+    s.outSpec = {};
     s.permanentPool.clear();
     s.transientPool.clear();
     s.pipelines.clear();
@@ -157,6 +189,8 @@ void NrdBridge::shutdown() noexcept {
         s.dll = nullptr;
     }
     s.ready = false;
+    s.refCleared = false;
+    s.reblurCleared = false;
     s.width = 0;
     s.height = 0;
 }
@@ -167,6 +201,14 @@ bool NrdBridge::isAvailable() const noexcept {
 
 const std::string& NrdBridge::statusString() const noexcept {
     return impl_->status;
+}
+
+void* NrdBridge::outDiffResourceRaw() const noexcept {
+    return (impl_ && impl_->outDiff.tex) ? impl_->outDiff.tex.Get() : nullptr;
+}
+
+void* NrdBridge::outSpecResourceRaw() const noexcept {
+    return (impl_ && impl_->outSpec.tex) ? impl_->outSpec.tex.Get() : nullptr;
 }
 
 bool NrdBridge::initialize(std::string* outReason) {
@@ -226,13 +268,16 @@ bool NrdBridge::initialize(std::string* outReason) {
         return false;
     }
 
-    const nrd::DenoiserDesc denDesc{0u, nrd::Denoiser::REFERENCE};
+    const nrd::DenoiserDesc denDescs[2] = {
+        {0u, nrd::Denoiser::REFERENCE},
+        {1u, nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR},
+    };
     nrd::InstanceCreationDesc createDesc{};
-    createDesc.denoisers = &denDesc;
-    createDesc.denoisersNum = 1u;
+    createDesc.denoisers = denDescs;
+    createDesc.denoisersNum = 2u;
 
     if (s.fnCreateInstance(createDesc, s.instance) != nrd::Result::SUCCESS || !s.instance) {
-        s.status = "NRD CreateInstance(REFERENCE) failed";
+        s.status = "NRD CreateInstance(REFERENCE + REBLUR_DIFFUSE_SPECULAR) failed";
         if (outReason) *outReason = s.status;
         shutdown();
         return false;
@@ -245,6 +290,7 @@ bool NrdBridge::initialize(std::string* outReason) {
         shutdown();
         return false;
     }
+    s.cbStride = (std::max<uint32_t>(256u, s.instDesc->constantBufferMaxDataSize) + 255u) & ~255u;
 
     auto* dev = static_cast<ID3D12Device*>(s.ctx.deviceRaw());
 
@@ -363,7 +409,7 @@ bool NrdBridge::initialize(std::string* outReason) {
     upHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC cbDesc{};
     cbDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    cbDesc.Width = Impl::kFrameSlots * Impl::kMaxDispatchesPerFrame * Impl::kCbStride;
+    cbDesc.Width = uint64_t(Impl::kFrameSlots) * Impl::kMaxDispatchesPerFrame * s.cbStride;
     cbDesc.Height = 1;
     cbDesc.DepthOrArraySize = 1;
     cbDesc.MipLevels = 1;
@@ -382,10 +428,22 @@ bool NrdBridge::initialize(std::string* outReason) {
     refSettings.maxAccumulatedFrameNum = nrd::REFERENCE_MAX_HISTORY_FRAME_NUM;
     s.fnSetDenoiserSettings(*s.instance, 0u, &refSettings);
 
+    nrd::ReblurSettings reblurSettings{};
+    reblurSettings.hitDistanceParameters = {3.0f, 0.1f, 20.0f};
+    reblurSettings.maxAccumulatedFrameNum = 28u;
+    reblurSettings.maxFastAccumulatedFrameNum = 6u;
+    reblurSettings.diffusePrepassBlurRadius = 24.0f;
+    reblurSettings.specularPrepassBlurRadius = 36.0f;
+    reblurSettings.minBlurRadius = 1.0f;
+    reblurSettings.maxBlurRadius = 26.0f;
+    reblurSettings.fastHistoryClampingSigmaScale = 1.75f;
+    reblurSettings.enableAntiFirefly = true;
+    s.fnSetDenoiserSettings(*s.instance, 1u, &reblurSettings);
+
     s.ready = true;
     s.status = "NVIDIA NRD v" + std::to_string(lib->versionMajor) + "." +
                std::to_string(lib->versionMinor) + "." + std::to_string(lib->versionBuild) +
-               " (NRD.dll dynamic DXIL compute)";
+               " (REBLUR_DIFFUSE_SPECULAR + REFERENCE DXIL compute)";
     BOO_LOG_INFO("NRD", "Loaded " + s.status);
     if (outReason) *outReason = s.status;
     return true;
@@ -394,7 +452,7 @@ bool NrdBridge::initialize(std::string* outReason) {
 bool NrdBridge::resize(uint32_t width, uint32_t height) {
     auto& s = *impl_;
     if (!s.ready || !s.instDesc || width == 0 || height == 0) return false;
-    if (s.width == width && s.height == height && s.outSignal.tex) return true;
+    if (s.width == width && s.height == height && s.outSignal.tex && s.outDiff.tex && s.outSpec.tex) return true;
 
     auto* dev = static_cast<ID3D12Device*>(s.ctx.deviceRaw());
     if (!dev) return false;
@@ -440,10 +498,14 @@ bool NrdBridge::resize(uint32_t width, uint32_t height) {
             return false;
         }
     }
-    if (!allocPoolTex(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, s.outSignal)) {
+    if (!allocPoolTex(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, s.outSignal) ||
+        !allocPoolTex(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, s.outDiff) ||
+        !allocPoolTex(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, s.outSpec)) {
         return false;
     }
 
+    s.refCleared = false;
+    s.reblurCleared = false;
     s.width = width;
     s.height = height;
     return true;
@@ -468,7 +530,6 @@ bool NrdBridge::recordAccumulation(
     auto* dev = static_cast<ID3D12Device*>(s.ctx.deviceRaw());
 
     nrd::CommonSettings cs{};
-    // Identity matrices keep m_WorldToClip == m_WorldToClipPrev while stationary; accumFrame == 0 triggers RESTART
     cs.viewToClipMatrix[0] = cs.viewToClipMatrix[5] = cs.viewToClipMatrix[10] = cs.viewToClipMatrix[15] = 1.0f;
     cs.viewToClipMatrixPrev[0] = cs.viewToClipMatrixPrev[5] = cs.viewToClipMatrixPrev[10] = cs.viewToClipMatrixPrev[15] = 1.0f;
     cs.worldToViewMatrix[0] = cs.worldToViewMatrix[5] = cs.worldToViewMatrix[10] = cs.worldToViewMatrix[15] = 1.0f;
@@ -482,7 +543,12 @@ bool NrdBridge::recordAccumulation(
     s.prevJitter[0] = cs.cameraJitter[0];
     s.prevJitter[1] = cs.cameraJitter[1];
     cs.frameIndex = ++s.nrdFrameIndex;
-    cs.accumulationMode = (accumFrame == 0u) ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    if (!s.refCleared) {
+        cs.accumulationMode = nrd::AccumulationMode::CLEAR_AND_RESTART;
+        s.refCleared = true;
+    } else {
+        cs.accumulationMode = (accumFrame == 0u) ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    }
 
     if (s.fnSetCommonSettings(*s.instance, cs) != nrd::Result::SUCCESS) {
         return false;
@@ -496,7 +562,6 @@ bool NrdBridge::recordAccumulation(
         return false;
     }
 
-    // Transition input HDR target from RENDER_TARGET -> NON_PIXEL_SHADER_RESOURCE
     transitionTex(cmd, hdr, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     ID3D12DescriptorHeap* heaps[] = {s.descHeap.Get()};
@@ -509,6 +574,7 @@ bool NrdBridge::recordAccumulation(
         const nrd::DispatchDesc& dd = dispatches[dIdx];
         if (dd.pipelineIndex >= s.pipelines.size()) continue;
         const PipelineEntry& pe = s.pipelines[dd.pipelineIndex];
+        if (pe.srvCount + pe.uavCount > Impl::kDescPerDispatch) return false;
 
         const uint32_t baseSlot = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * Impl::kDescPerDispatch;
         auto cpuAt = [&](uint32_t off) {
@@ -573,8 +639,8 @@ bool NrdBridge::recordAccumulation(
         cmd->SetPipelineState(pe.pso.Get());
 
         if (pe.hasCbv) {
-            const uint32_t cbOff = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * Impl::kCbStride;
-            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= Impl::kCbStride) {
+            const uint32_t cbOff = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
+            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride) {
                 std::memcpy(s.cbMapped + cbOff, dd.constantBufferData, dd.constantBufferDataSize);
             }
             cmd->SetComputeRootConstantBufferView(pe.cbvParamIdx, s.cbUpload->GetGPUVirtualAddress() + cbOff);
@@ -588,7 +654,6 @@ bool NrdBridge::recordAccumulation(
 
         cmd->Dispatch(dd.gridWidth, dd.gridHeight, 1u);
 
-        // UAV barriers on any storage textures written by this dispatch
         for (uint32_t r = 0; r < dd.resourcesNum; ++r) {
             if (dd.resources[r].descriptorType == nrd::DescriptorType::STORAGE_TEXTURE) {
                 ID3D12Resource* uavRes = nullptr;
@@ -605,7 +670,6 @@ bool NrdBridge::recordAccumulation(
         }
     }
 
-    // Copy denoised/accumulated OUT_SIGNAL back into `hdr` and restore RENDER_TARGET state
     transitionTex(cmd, s.outSignal.tex.Get(), s.outSignal.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     s.outSignal.state = D3D12_RESOURCE_STATE_COPY_SOURCE;
     transitionTex(cmd, hdr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -613,6 +677,228 @@ bool NrdBridge::recordAccumulation(
     transitionTex(cmd, hdr, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
     transitionTex(cmd, s.outSignal.tex.Get(), s.outSignal.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     s.outSignal.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    return true;
+}
+
+bool NrdBridge::recordReblurMotion(
+    void* commandListRaw,
+    uint32_t width,
+    uint32_t height,
+    uint32_t frameSlot,
+    const ReblurInputs& inputs) {
+    auto& s = *impl_;
+    if (!s.ready || !commandListRaw || !inputs.inMv || !inputs.inNormalRoughness ||
+        !inputs.inViewZ || !inputs.inDiffRadHit || !inputs.inSpecRadHit) {
+        return false;
+    }
+    if (s.width != width || s.height != height || !s.outDiff.tex || !s.outSpec.tex) {
+        if (!resize(width, height)) return false;
+    }
+
+    auto* cmd = static_cast<ID3D12GraphicsCommandList*>(commandListRaw);
+    auto* dev = static_cast<ID3D12Device*>(s.ctx.deviceRaw());
+    auto* inMv = static_cast<ID3D12Resource*>(inputs.inMv);
+    auto* inNormRough = static_cast<ID3D12Resource*>(inputs.inNormalRoughness);
+    auto* inViewZ = static_cast<ID3D12Resource*>(inputs.inViewZ);
+    auto* inDiff = static_cast<ID3D12Resource*>(inputs.inDiffRadHit);
+    auto* inSpec = static_cast<ID3D12Resource*>(inputs.inSpecRadHit);
+
+    nrd::CommonSettings cs{};
+    std::memcpy(cs.worldToViewMatrix, inputs.worldToView, sizeof(cs.worldToViewMatrix));
+    std::memcpy(cs.worldToViewMatrixPrev, inputs.worldToViewPrev, sizeof(cs.worldToViewMatrixPrev));
+    std::memcpy(cs.viewToClipMatrix, inputs.viewToClip, sizeof(cs.viewToClipMatrix));
+    std::memcpy(cs.viewToClipMatrixPrev, inputs.viewToClipPrev, sizeof(cs.viewToClipMatrixPrev));
+    cs.motionVectorScale[0] = 1.0f;
+    cs.motionVectorScale[1] = 1.0f;
+    cs.motionVectorScale[2] = 1.0f;
+    cs.isMotionVectorInWorldSpace = true;
+    cs.denoisingRange = 500.0f;
+    cs.disocclusionThreshold = 0.015f;
+    cs.resourceSize[0] = cs.resourceSizePrev[0] = cs.rectSize[0] = cs.rectSizePrev[0] = static_cast<uint16_t>(width);
+    cs.resourceSize[1] = cs.resourceSizePrev[1] = cs.rectSize[1] = cs.rectSizePrev[1] = static_cast<uint16_t>(height);
+    cs.cameraJitter[0] = std::clamp(inputs.jitterPixels[0], -0.5f, 0.5f);
+    cs.cameraJitter[1] = std::clamp(inputs.jitterPixels[1], -0.5f, 0.5f);
+    cs.cameraJitterPrev[0] = inputs.resetHistory ? cs.cameraJitter[0] : s.prevJitter[0];
+    cs.cameraJitterPrev[1] = inputs.resetHistory ? cs.cameraJitter[1] : s.prevJitter[1];
+    s.prevJitter[0] = cs.cameraJitter[0];
+    s.prevJitter[1] = cs.cameraJitter[1];
+    cs.frameIndex = ++s.nrdFrameIndex;
+    if (!s.reblurCleared) {
+        cs.accumulationMode = nrd::AccumulationMode::CLEAR_AND_RESTART;
+        s.reblurCleared = true;
+    } else {
+        cs.accumulationMode = inputs.resetHistory ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
+    }
+
+    if (s.fnSetCommonSettings(*s.instance, cs) != nrd::Result::SUCCESS) {
+        return false;
+    }
+
+    const nrd::Identifier id = 1u;
+    const nrd::DispatchDesc* dispatches = nullptr;
+    uint32_t dispatchNum = 0;
+    if (s.fnGetComputeDispatches(*s.instance, &id, 1u, dispatches, dispatchNum) != nrd::Result::SUCCESS ||
+        !dispatches || dispatchNum == 0 || dispatchNum > Impl::kMaxDispatchesPerFrame) {
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = {s.descHeap.Get()};
+    cmd->SetDescriptorHeaps(1u, heaps);
+
+    const UINT descInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const uint32_t slotIdx = frameSlot % Impl::kFrameSlots;
+    D3D12_RESOURCE_STATES mvState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    for (uint32_t dIdx = 0; dIdx < dispatchNum; ++dIdx) {
+        const nrd::DispatchDesc& dd = dispatches[dIdx];
+        if (dd.pipelineIndex >= s.pipelines.size()) continue;
+        const PipelineEntry& pe = s.pipelines[dd.pipelineIndex];
+        if (pe.srvCount + pe.uavCount > Impl::kDescPerDispatch) {
+            transitionTex(cmd, inMv, mvState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            return false;
+        }
+
+        const uint32_t baseSlot = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * Impl::kDescPerDispatch;
+        auto cpuAt = [&](uint32_t off) {
+            auto h = s.descHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(baseSlot + off) * descInc;
+            return h;
+        };
+        auto gpuAt = [&](uint32_t off) {
+            auto h = s.descHeap->GetGPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<UINT64>(baseSlot + off) * descInc;
+            return h;
+        };
+
+        uint32_t srvIdx = 0;
+        uint32_t uavIdx = 0;
+        for (uint32_t r = 0; r < dd.resourcesNum; ++r) {
+            const nrd::ResourceDesc& rd = dd.resources[r];
+            PoolTex* poolEntry = nullptr;
+            ID3D12Resource* resPtr = nullptr;
+            DXGI_FORMAT fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+            switch (rd.type) {
+            case nrd::ResourceType::IN_MV: {
+                resPtr = inMv;
+                fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                const D3D12_RESOURCE_STATES targetState =
+                    (rd.descriptorType == nrd::DescriptorType::TEXTURE)
+                        ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                        : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                transitionTex(cmd, inMv, mvState, targetState);
+                mvState = targetState;
+                break;
+            }
+            case nrd::ResourceType::IN_NORMAL_ROUGHNESS:
+                resPtr = inNormRough;
+                fmt = DXGI_FORMAT_R10G10B10A2_UNORM;
+                break;
+            case nrd::ResourceType::IN_VIEWZ:
+                resPtr = inViewZ;
+                fmt = DXGI_FORMAT_R32_FLOAT;
+                break;
+            case nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST:
+                resPtr = inDiff;
+                fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                break;
+            case nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST:
+                resPtr = inSpec;
+                fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                break;
+            case nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST:
+                poolEntry = &s.outDiff;
+                break;
+            case nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST:
+                poolEntry = &s.outSpec;
+                break;
+            case nrd::ResourceType::PERMANENT_POOL:
+                if (rd.indexInPool < s.permanentPool.size()) poolEntry = &s.permanentPool[rd.indexInPool];
+                break;
+            case nrd::ResourceType::TRANSIENT_POOL:
+                if (rd.indexInPool < s.transientPool.size()) poolEntry = &s.transientPool[rd.indexInPool];
+                break;
+            default:
+                break;
+            }
+
+            if (poolEntry) {
+                resPtr = poolEntry->tex.Get();
+                fmt = poolEntry->format;
+                const D3D12_RESOURCE_STATES targetState =
+                    (rd.descriptorType == nrd::DescriptorType::TEXTURE)
+                        ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                        : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                transitionTex(cmd, resPtr, poolEntry->state, targetState);
+                poolEntry->state = targetState;
+            }
+
+            if (!resPtr) {
+                transitionTex(cmd, inMv, mvState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                return false;
+            }
+
+            if (rd.descriptorType == nrd::DescriptorType::TEXTURE) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = fmt;
+                sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sd.Texture2D.MipLevels = 1;
+                dev->CreateShaderResourceView(resPtr, &sd, cpuAt(srvIdx++));
+            } else {
+                D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+                ud.Format = fmt;
+                ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                dev->CreateUnorderedAccessView(resPtr, nullptr, &ud, cpuAt(pe.srvCount + uavIdx++));
+            }
+        }
+
+        cmd->SetComputeRootSignature(pe.rootSig.Get());
+        cmd->SetPipelineState(pe.pso.Get());
+
+        if (pe.hasCbv) {
+            const uint32_t cbOff = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
+            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride) {
+                std::memcpy(s.cbMapped + cbOff, dd.constantBufferData, dd.constantBufferDataSize);
+            }
+            cmd->SetComputeRootConstantBufferView(pe.cbvParamIdx, s.cbUpload->GetGPUVirtualAddress() + cbOff);
+        }
+        if (pe.srvTableParamIdx >= 0) {
+            cmd->SetComputeRootDescriptorTable(static_cast<UINT>(pe.srvTableParamIdx), gpuAt(0u));
+        }
+        if (pe.uavTableParamIdx >= 0) {
+            cmd->SetComputeRootDescriptorTable(static_cast<UINT>(pe.uavTableParamIdx), gpuAt(pe.srvCount));
+        }
+
+        cmd->Dispatch(dd.gridWidth, dd.gridHeight, 1u);
+
+        for (uint32_t r = 0; r < dd.resourcesNum; ++r) {
+            if (dd.resources[r].descriptorType == nrd::DescriptorType::STORAGE_TEXTURE) {
+                ID3D12Resource* uavRes = nullptr;
+                switch (dd.resources[r].type) {
+                case nrd::ResourceType::IN_MV: uavRes = inMv; break;
+                case nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST: uavRes = s.outDiff.tex.Get(); break;
+                case nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST: uavRes = s.outSpec.tex.Get(); break;
+                case nrd::ResourceType::PERMANENT_POOL: uavRes = s.permanentPool[dd.resources[r].indexInPool].tex.Get(); break;
+                case nrd::ResourceType::TRANSIENT_POOL: uavRes = s.transientPool[dd.resources[r].indexInPool].tex.Get(); break;
+                default: break;
+                }
+                if (uavRes) {
+                    D3D12_RESOURCE_BARRIER ub{};
+                    ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    ub.UAV.pResource = uavRes;
+                    cmd->ResourceBarrier(1, &ub);
+                }
+            }
+        }
+    }
+
+    transitionTex(cmd, inMv, mvState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    transitionTex(cmd, s.outDiff.tex.Get(), s.outDiff.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    s.outDiff.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    transitionTex(cmd, s.outSpec.tex.Get(), s.outSpec.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    s.outSpec.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     return true;
 }
