@@ -122,7 +122,15 @@ struct SpoutSender::Impl {
     ComPtr<ID3D12PipelineState> blitPso;
     ComPtr<ID3D12DescriptorHeap> srvHeap;
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
-    void* cachedSrcResource = nullptr;
+    UINT srvDescriptorSize = 0;
+    ComPtr<ID3D12CommandQueue> publishQueue;
+    ComPtr<ID3D12Device5> removalDevice;
+    ComPtr<ID3D12Fence> publishFence;
+    HANDLE publishEvent = nullptr;
+    uint64_t nextPublishFence = 1;
+    uint64_t pendingPublishFence = 0;
+    bool accessOwned = false;
+    bool publishPending = false;
 
     HANDLE namesMutex = nullptr;
     HANDLE namesMap = nullptr;
@@ -138,6 +146,31 @@ struct SpoutSender::Impl {
     uint32_t height = 0;
     uint64_t publishedFrames = 0;
     bool active = false;
+
+    bool retirePublishedWork() noexcept {
+        if (!publishQueue || !publishFence || !publishEvent || !removalDevice ||
+            FAILED(removalDevice->GetDeviceRemovedReason())) return false;
+        if (!pendingPublishFence) {
+            const uint64_t value = nextPublishFence++;
+            if (FAILED(publishQueue->Signal(publishFence.Get(), value))) return false;
+            pendingPublishFence = value;
+        }
+        if (publishFence->GetCompletedValue() < pendingPublishFence &&
+            FAILED(publishFence->SetEventOnCompletion(pendingPublishFence, publishEvent))) return false;
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        for (;;) {
+            // A removed device completes fences with UINT64_MAX, not valid pixels.
+            if (FAILED(removalDevice->GetDeviceRemovedReason())) return false;
+            const uint64_t completed = publishFence->GetCompletedValue();
+            if (completed == UINT64_MAX) return false;
+            if (completed >= pendingPublishFence) return true;
+            if (GetTickCount64() >= deadline) return false;
+            // Keep the target across retries and check it after every wake. An
+            // event left by an earlier timeout cannot prove this work completed.
+            const DWORD wait = WaitForSingleObject(publishEvent, 20);
+            if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT) return false;
+        }
+    }
 
     bool ensureD3D12BlitPipeline(ID3D12Device* dev) {
         if (blitRootSig && blitPso && srvHeap && rtvHeap) {
@@ -212,13 +245,14 @@ struct SpoutSender::Impl {
         }
 
         D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc{};
-        srvHeapDesc.NumDescriptors = 1;
+        srvHeapDesc.NumDescriptors = D3D12Context::kFrameCount;
         srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(dev->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srvHeap)))) {
             statusReason = "Failed to create Spout2 SRV descriptor heap.";
             return false;
         }
+        srvDescriptorSize = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
         D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
         rtvHeapDesc.NumDescriptors = 1;
@@ -279,8 +313,13 @@ struct SpoutSender::Impl {
             accessMutex = CreateMutexA(nullptr, FALSE, accName.c_str());
         }
 
-        const bool locked = namesMutex && (WaitForSingleObject(namesMutex, 50) == WAIT_OBJECT_0 ||
-                                           WaitForSingleObject(namesMutex, 0) == WAIT_ABANDONED);
+        const DWORD lockResult = namesMutex ? WaitForSingleObject(namesMutex, 50) : WAIT_FAILED;
+        const bool locked = lockResult == WAIT_OBJECT_0 || lockResult == WAIT_ABANDONED;
+        if (!locked || !accessMutex) {
+            if (locked) ReleaseMutex(namesMutex);
+            statusReason = "Spout sender registration mutex unavailable.";
+            return false;
+        }
 
         if (!namesMap) {
             namesMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, "SpoutSenderNames");
@@ -347,7 +386,9 @@ struct SpoutSender::Impl {
     }
 
     void unregisterSenderFromGlobalList() noexcept {
-        const bool locked = namesMutex && (WaitForSingleObject(namesMutex, 50) == WAIT_OBJECT_0);
+        const DWORD lockResult = namesMutex ? WaitForSingleObject(namesMutex, 50) : WAIT_FAILED;
+        const bool locked = lockResult == WAIT_OBJECT_0 || lockResult == WAIT_ABANDONED;
+        if (!locked) return;
         if (namesMap) {
             if (void* view = MapViewOfFile(namesMap, FILE_MAP_ALL_ACCESS, 0, 0, 0)) {
                 MEMORY_BASIC_INFORMATION mbi{};
@@ -361,7 +402,7 @@ struct SpoutSender::Impl {
                     const char* slot = base + i * kSpoutNameSlotBytes;
                     if (slot[0] == '\0') break;
                     if (std::strncmp(slot, senderName.c_str(), kSpoutNameSlotBytes - 1) != 0) {
-                        remaining.emplace_back(slot);
+                        remaining.emplace_back(slot, strnlen_s(slot, kSpoutNameSlotBytes));
                     }
                 }
                 std::memset(base, 0, slotCount * kSpoutNameSlotBytes);
@@ -464,9 +505,19 @@ bool SpoutSender::initialize(
     }
 
     auto* d3d12Dev = static_cast<ID3D12Device*>(d3d.deviceRaw());
-    if (!d3d12Dev) {
+    if (!d3d12Dev || !d3d.checkDeviceHealthy()) {
         impl_->statusReason = "D3D12 device is null.";
         if (outReason) *outReason = impl_->statusReason;
+        return false;
+    }
+    impl_->publishQueue = static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw());
+    impl_->publishEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!impl_->publishQueue || !impl_->publishEvent ||
+        FAILED(d3d12Dev->QueryInterface(IID_PPV_ARGS(&impl_->removalDevice))) ||
+        FAILED(d3d12Dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&impl_->publishFence)))) {
+        impl_->statusReason = "Unable to create Spout GPU completion fence.";
+        if (outReason) *outReason = impl_->statusReason;
+        shutdown();
         return false;
     }
 
@@ -530,7 +581,7 @@ bool SpoutSender::initialize(
     }
 
     if (!impl_->ensureD3D12BlitPipeline(d3d12Dev) ||
-        !impl_->allocateSharedTexture(d3d12Dev, std::max(16u, initialWidth), std::max(16u, initialHeight))) {
+        !impl_->allocateSharedTexture(d3d12Dev, std::max(1u, initialWidth), std::max(1u, initialHeight))) {
         if (outReason) *outReason = impl_->statusReason;
         const std::string keepReason = impl_->statusReason;
         shutdown();
@@ -554,33 +605,41 @@ bool SpoutSender::recordCleanPublish(
     if (!impl_ || !impl_->active || !cmdListRaw || !canvasCleanResourceRaw || canvasWidth == 0 || canvasHeight == 0) {
         return false;
     }
+    if (!completePublish() || !d3d.checkDeviceHealthy()) return false;
+    const DWORD accessResult = WaitForSingleObject(impl_->accessMutex, 0);
+    if (accessResult != WAIT_OBJECT_0 && accessResult != WAIT_ABANDONED) return false;
+    impl_->accessOwned = true;
 
     auto* dev = static_cast<ID3D12Device*>(d3d.deviceRaw());
     auto* cmd = static_cast<ID3D12GraphicsCommandList*>(cmdListRaw);
     auto* srcRes = static_cast<ID3D12Resource*>(canvasCleanResourceRaw);
     if (!dev || !cmd || !srcRes) {
+        completePublish();
         return false;
     }
 
     if (canvasWidth != impl_->width || canvasHeight != impl_->height) {
-        d3d.waitForGpu();
-        if (!impl_->allocateSharedTexture(dev, canvasWidth, canvasHeight)) {
+        if (!d3d.waitForGpu() || !impl_->allocateSharedTexture(dev, canvasWidth, canvasHeight)) {
             BOO_LOG_WARN("Spout", "Disabling Spout2 sender after resize failure: " + impl_->statusReason);
             impl_->active = false;
+            completePublish();
             return false;
         }
-        impl_->cachedSrcResource = nullptr;
     }
 
-    if (impl_->cachedSrcResource != canvasCleanResourceRaw) {
+    // beginFrame has retired this slot; source addresses may be reused after a
+    // preset change, so always write the retired slot instead of pointer caching.
+    const UINT descriptorOffset = d3d.currentBackBufferIndex() * impl_->srvDescriptorSize;
+    {
         const D3D12_RESOURCE_DESC srcDesc = srcRes->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = srcDesc.Format;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        dev->CreateShaderResourceView(srcRes, &srvDesc, impl_->srvHeap->GetCPUDescriptorHandleForHeapStart());
-        impl_->cachedSrcResource = canvasCleanResourceRaw;
+        auto handle = impl_->srvHeap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += descriptorOffset;
+        dev->CreateShaderResourceView(srcRes, &srvDesc, handle);
     }
 
     D3D12_RESOURCE_BARRIER toRtv{};
@@ -602,7 +661,9 @@ bool SpoutSender::recordCleanPublish(
     cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(impl_->blitRootSig.Get());
     cmd->SetPipelineState(impl_->blitPso.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, impl_->srvHeap->GetGPUDescriptorHandleForHeapStart());
+    auto gpuHandle = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    gpuHandle.ptr += descriptorOffset;
+    cmd->SetGraphicsRootDescriptorTable(0, gpuHandle);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
 
@@ -614,12 +675,41 @@ bool SpoutSender::recordCleanPublish(
     toCommon.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
     cmd->ResourceBarrier(1, &toCommon);
 
-    ++impl_->publishedFrames;
+    impl_->publishPending = true;
     return true;
+}
+
+bool SpoutSender::completePublish() noexcept {
+    if (!impl_) return true;
+    bool ok = true;
+    if (impl_->publishPending) {
+        ok = impl_->retirePublishedWork();
+        if (ok) ++impl_->publishedFrames;
+        else {
+            impl_->active = false;
+            impl_->statusReason = "Spout GPU publication did not retire; graphics recovery required.";
+            // Timeout does not mean completion. Keep both the resources and the
+            // receiver mutex until recovery drains or removes the actual device.
+            if (impl_->removalDevice && SUCCEEDED(impl_->removalDevice->GetDeviceRemovedReason())) return false;
+        }
+        impl_->publishPending = false;
+        impl_->pendingPublishFence = 0;
+    }
+    if (impl_->accessOwned) {
+        ReleaseMutex(impl_->accessMutex);
+        impl_->accessOwned = false;
+    }
+    return ok;
 }
 
 void SpoutSender::shutdown() noexcept {
     if (!impl_) return;
+    if (!completePublish() && impl_->publishPending && impl_->removalDevice) {
+        // Standalone owners may shut down without the application's recovery path.
+        // Cancellation is preferable to releasing shared textures still in flight.
+        impl_->removalDevice->RemoveDevice();
+        completePublish();
+    }
     if (impl_->namesMap || impl_->activeNameMap) {
         impl_->unregisterSenderFromGlobalList();
     }
@@ -657,7 +747,13 @@ void SpoutSender::shutdown() noexcept {
     impl_->d3d11Context.Reset();
     impl_->d3d11Device.Reset();
     impl_->shareHandle = nullptr;
-    impl_->cachedSrcResource = nullptr;
+    impl_->publishFence.Reset();
+    impl_->publishQueue.Reset();
+    impl_->removalDevice.Reset();
+    if (impl_->publishEvent) {
+        CloseHandle(impl_->publishEvent);
+        impl_->publishEvent = nullptr;
+    }
 
     if (impl_->d3d11Module) {
         FreeLibrary(impl_->d3d11Module);

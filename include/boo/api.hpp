@@ -125,6 +125,8 @@ struct FrameContext {
     float moodIrisAngle = 0.5f;
     float moodIntensity = 0.5f;
     float moodPaletteAccent = 0.5f;
+    float moodBloomStrength = 0.35f;
+    float moodCutAccent = 0.0f;
     Edition edition = Edition::Family;
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     uint32_t hudMode = 0; // Full, compact, A/B, off

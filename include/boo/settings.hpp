@@ -67,6 +67,7 @@ struct AppSettings {
     bool injectAudioFail = false;
     bool injectVramPressure = false;
     bool injectNpuTimeout = false;
+    bool injectDeviceLost = false;
     bool enableD3DDebug = false;
 
     // Optional live-show integrations (Milestone M8 Spout2 clean sender & M9 Opt-In Media Ingest)

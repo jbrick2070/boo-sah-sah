@@ -25,6 +25,8 @@ There is no gameplay, score, combat, free camera, or interactive task—sit back
 ### Single-File Windows Installer (`BooSahSah-Setup-win64.exe`)
 Run `BooSahSah-Setup-win64.exe` (`build\dist\BooSahSah-Setup-win64.exe`) to install **BOO SAH SAH** (`boo_sah_sah.exe`) into `%LOCALAPPDATA%\Programs\BooSahSah` (per-user install, no administrator UAC prompt required, optional Start Menu & Desktop shortcuts, clean uninstallation via Windows **Installed Apps** or `Uninstall-BooSahSah.exe`). Silent installation is also supported (`BooSahSah-Setup-win64.exe --silent`).
 
+Close BOO SAH SAH before upgrading. Setup rejects a running app or locked files and keeps your existing configuration by default. To restore packaged settings, clear **Keep existing config overrides when upgrading**, or use `--replace-config` for a silent install. Cancel remains available during installation; it waits for the current operation to finish before restoring previous files. No separate Visual C++ runtime installation is needed.
+
 ### Direct / CLI Launch
 Double-click `boo_sah_sah.exe` or launch from PowerShell:
 
@@ -80,6 +82,8 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `F12` | Save clean 8-bit `.bmp` frame + `.json` timing metadata into `diagnostics/captures/` |
 | `Esc` | Clean shutdown |
 
+Edition changes crossfade the score's voices. The seven acts now include dedicated enamel cathedral, microbial sanctuary, and dawn alcove geometry. Act cards pair Chinese numerals 一–七 with Roman numbers; the original title lettering also includes 台北.
+
 ---
 
 ## 4. Truth in Advertising: Understanding Engine Badges
@@ -90,6 +94,8 @@ BOO SAH SAH enforces strict separation between hardware capability detection and
 - **Cyan `SUB` (`Substituted`)**: An honest fallback is rendering the effect (`SM 6.0 Raster`, `8.2K HLSL Compute Particles`, `Scalar HLSL Field`, OpenVINO `CPU` / `ScriptedDirector`, or `SHADER SIGNAL` 8x8 macroblock quantization). Substitutes are **never** labeled as hardware-accelerated.
 - **Amber `DEG` (`Degraded`)**: A hardware path timed out or missed verification (e.g., `--inject-npu-timeout`) and failed over smoothly without stalling the film.
 - **Slate `OFF` (`Unavailable` / Standby)**: Optional module idle or hardware absent.
+
+Glass uses one geometry refraction ray plus an approximation for colored environment dispersion. The raster substitute keeps the film visually coherent, but geometry reflections can differ from DXR. Neither path claims multi-bounce spectral rendering.
 
 ---
 
@@ -103,7 +109,7 @@ Enable clean GPU texture sharing via `--enable-spout` (or press `[O]` at runtime
 
 - Publishes an adapter-matched `DXGI_FORMAT_B8G8R8A8_UNORM` shared texture strictly from Pass-3 `CanvasClean` (`16:9` tonemapped sRGB).
 - **Zero UI Contamination**: Diagnostic HUD panels, lower-third captions, A/B split-screen overlays, and `LIVE CAMERA` indicators are composited exclusively in Pass 4 onto the local window swapchain and **never** appear in the Spout2 feed.
-- If no Spout2 receiver (OBS Spout2 Source / Resolume Avenue & Arena) is open, playback continues with zero blocking or frame drops.
+- A Spout2 receiver (OBS Spout2 Source / Resolume Avenue & Arena) is optional. See the [quality report](quality_upgrade_report.md) for measured lifecycle behavior and limitations.
 
 ---
 
@@ -135,3 +141,19 @@ By default, BOO SAH SAH never accesses user media files, cameras, or microphones
   - `[K]` / `--captions` toggles high-contrast lower-third captions for all narrative beats.
 - **Diagnostics & Reproducible Benchmarks**:
   - Diagnostic JSON/CSV files are written **only** when explicitly requested via `--export-diagnostics <path>`, `--export-bench <path>`, `--export-bench-csv <path>`, or `boo_bench.exe`.
+
+### Automated film review
+
+From the repository root, these optional checks save their results without activating a window:
+
+```powershell
+# Both editions, hardware solos, and narrative cards: 68 native 1440p images and four montages
+./build/x64-release/boo_integration_tests.exe --film-captures --no-activate --capture-dir diagnostics/film-quality
+
+# 224 stress iterations; receipt saved to diagnostics/film-stress/stress.json
+./build/x64-release/boo_integration_tests.exe --film-stress --no-activate --capture-dir diagnostics/film-stress
+```
+
+Open `manifest.json` beside the captures for per-frame results. Add `--require-debug-layer` to either command for strict D3D12 warning validation; this fails if Windows Graphics Tools is missing. Without that component, a successful run records warning validation as unavailable. All automated application and integration-test launches must include `--no-activate`.
+
+If graphics fail during playback, the app makes one recovery attempt while keeping its place in the film. The diagnostic option `--inject-device-lost` simulates a fault after GPU work has drained. It tests teardown and recreation, not a physical GPU reset or real driver TDR. For current measurements, hardware details, and limitations, read the [Film Quality & Robustness Report](quality_upgrade_report.md).

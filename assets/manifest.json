@@ -9,7 +9,8 @@
       "kind": "shader",
       "provenance": "Original M0 procedural HLSL shader authored for BOO SAH SAH",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "cb8f3b5cc5c2084bea981feffa57856d52fccf39bede3b9015ba81368759904b"
     },
     {
       "id": "shader_m0_benchmarks",
@@ -17,7 +18,8 @@
       "kind": "shader",
       "provenance": "Original M0 ad-hoc DXR 1.1 and HLSL compute benchmark kernels authored for BOO SAH SAH",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "75bb66688816178a1edbb700a8a1bcc8e8ef21b8133941b34475f06db334110d"
     },
     {
       "id": "shader_m1_taipei_slice",
@@ -25,7 +27,8 @@
       "kind": "shader",
       "provenance": "Original M1 4-pass DXR 1.1 RayQuery + Raster + Dual-Kawase HDR Bloom + ACES + Letterbox HUD shader suite",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "28f9c00eabfd061de0c11ed997dc3b8ae482b5dd8422caf45113633501bcc32a"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -33,7 +36,8 @@
       "kind": "cue_sheet",
       "provenance": "Original M1 60-second (2,880,000-sample @ 48 kHz) Taipei to Glass Orchid vertical slice cue schedule",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "928f83b699b9536578e81dd6a9006696fafd7f1e0537fb32a8f54f0563d16ba7"
     },
     {
       "id": "cue_film_360s",
@@ -41,7 +45,8 @@
       "kind": "cue_sheet",
       "provenance": "Original 360-second (17,280,000-sample @ 48 kHz) master timeline cue schedule per SPEC_v4",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "7f5a6d0d3921a3c3dd74383aa29b8c30392ad17985cb36d462912ab1cd14552f"
     },
     {
       "id": "cue_solo_rt",
@@ -49,7 +54,8 @@
       "kind": "cue_sheet",
       "provenance": "Original RT Solo loop cue schedule",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "0a87da3ab67811ae8a48c81fb1430ed68eb5d76a9363db9ccb0f29462d430e10"
     },
     {
       "id": "cue_solo_tensor",
@@ -57,7 +63,8 @@
       "kind": "cue_sheet",
       "provenance": "Original Tensor Solo loop cue schedule",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "dc8ddfaae6bb1be4d77951877cf7f92fe0148aa353a33857e3ad5e704c2b1d6e"
     },
     {
       "id": "cue_solo_npu",
@@ -65,7 +72,8 @@
       "kind": "cue_sheet",
       "provenance": "Original NPU Solo loop cue schedule",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "f8c9de225f78ab43267dac76e2f2a04dcfd52825b125ac093e16d660b6fb0166"
     },
     {
       "id": "cue_solo_cuda",
@@ -73,7 +81,8 @@
       "kind": "cue_sheet",
       "provenance": "Original CUDA Solo loop cue schedule",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "2668472a5a633ac15a39d089844583d75ce1bf9ea5979bcc6425c01b54613aca"
     },
     {
       "id": "cue_m2_trilogy_180s",
@@ -81,7 +90,8 @@
       "kind": "cue_sheet",
       "provenance": "Original project-authored M2 trilogy",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "eb34d51a382f9513ae43e8b37eea00f0bee68da0ac554cbc6c19e656aaa812f7"
     },
     {
       "id": "shader_m2_mesh",
@@ -89,7 +99,35 @@
       "kind": "shader",
       "provenance": "Original project-authored M2 trilogy",
       "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "attribution_required": false,
+      "sha256": "c61f8ff94a0390cae6fd4e9af8d5a96200010b2c11abff9231825d3e248809fb"
+    },
+    {
+      "id": "model_madame_n_director_xml",
+      "path": "assets/models/madame_n_director.xml",
+      "kind": "model",
+      "provenance": "Original compact 16->64->32->(5+5) OpenVINO IR stage-director MLP generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "f919bc523849191bde20812297e40c0735a7685f57525f7d03ed4c3fd8f90aaf"
+    },
+    {
+      "id": "model_madame_n_director_bin",
+      "path": "assets/models/madame_n_director.bin",
+      "kind": "model",
+      "provenance": "Original FP32 OpenVINO IR weights generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "72f7826cf0c8feaffb5b1f462f4b329cfe9be64b522c2025e44d0639c007ccf1"
+    },
+    {
+      "id": "model_madame_n_metadata",
+      "path": "assets/models/madame_n_metadata.json",
+      "kind": "metadata",
+      "provenance": "Model contract and SHA-256 verification metadata generated by tools/gen_madame_n_model.py",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "5bab6511d60471864047d77bbec3537ff8b0db89103eaefaf297cf95a800cd28"
     },
     {
       "id": "mesh_shanghai_trestle",
@@ -128,30 +166,31 @@
       "sha256": "5c98c7077ab39399e4015b59b504eea8f22af2980a8dcae2d9154f8f1238eb7e"
     },
     {
-      "id": "model_madame_n_director_xml",
-      "path": "assets/models/madame_n_director.xml",
-      "kind": "model",
-      "provenance": "Original compact 16->64->32->(5+5) OpenVINO IR stage-director MLP generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
-      "license": "Proprietary / Project First-Party",
+      "id": "mesh_enamel_cathedral",
+      "path": "assets/meshes/enamel_cathedral.bmesh",
+      "kind": "mesh",
+      "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "license": "CC0-1.0",
       "attribution_required": false,
-      "sha256": "f919bc523849191bde20812297e40c0735a7685f57525f7d03ed4c3fd8f90aaf"
+      "sha256": "2a6e2f7e071dc32aa364f098998251ef48a57a895692428e05b21708dc473b00"
     },
     {
-      "id": "model_madame_n_director_bin",
-      "path": "assets/models/madame_n_director.bin",
-      "kind": "model",
-      "provenance": "Original FP32 OpenVINO IR weights generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
-      "license": "Proprietary / Project First-Party",
+      "id": "mesh_microbial_sanctuary",
+      "path": "assets/meshes/microbial_sanctuary.bmesh",
+      "kind": "mesh",
+      "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "license": "CC0-1.0",
       "attribution_required": false,
-      "sha256": "72f7826cf0c8feaffb5b1f462f4b329cfe9be64b522c2025e44d0639c007ccf1"
+      "sha256": "63e4ab453bb1a47a6197e92018a981f7677795ab96a705d4c61b2bd1b9ffe9ad"
     },
     {
-      "id": "model_madame_n_metadata",
-      "path": "assets/models/madame_n_metadata.json",
-      "kind": "metadata",
-      "provenance": "Model contract and SHA-256 verification metadata generated by tools/gen_madame_n_model.py",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false
+      "id": "mesh_dawn_alcove",
+      "path": "assets/meshes/dawn_alcove.bmesh",
+      "kind": "mesh",
+      "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "license": "CC0-1.0",
+      "attribution_required": false,
+      "sha256": "e6b2291d3793a67c6131e42f5ae9b6f1dde9b7808674c36e13c3c5a757a6ddb1"
     }
   ],
   "visual_presets": [

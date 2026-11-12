@@ -2,6 +2,24 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## [Unreleased] — Film Quality & Robustness
+
+### Added
+- Seven-mesh scene pipeline, with new original `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove` geometry alongside the four city/orchid assets.
+- First-party capsule-SDF presentation lettering: 60 vector glyphs including Latin text, 台北, and Chinese numerals 一–七 paired with Roman act numbers. No external font binary is required.
+- Title and act motifs relocate below the right benchmark card in full telemetry mode, keeping the statistics panels clear; two extra layout captures cover this placement.
+- Opt-in `boo_integration_tests --film-captures --no-activate --capture-dir <directory>` gate producing 68 native 2560×1440 captures, four montages, and a manifest across both editions, solos, and narrative cards. Checks include seek repeatability, finite HDR output, RT attribution, and clean-feed isolation.
+- Opt-in `--film-stress --no-activate --capture-dir <directory>` gate with 224 default iterations, audio/memory/lifecycle measurements, and a synthetic graphics recovery receipt. `--require-debug-layer` fails when the D3D12 debug layer is unavailable; ordinary receipts explicitly distinguish unavailable warning validation from a clean debug run.
+- Release and Debug Windows CI for native builds, CPU tests, cue/manifest validation, import audits, and installer lifecycle checks.
+
+### Changed
+- Glass shading uses single-ray geometry refraction with environment dispersion approximated separately. Raster presentation remains cohesive but does not reproduce full DXR geometry reflection or multi-bounce spectral transport.
+- Score modulation uses integrated oscillator phase, with edition voice crossfades for smoother transitions and late seeks.
+- Graphics recovery is limited to one teardown/recreation attempt. `--inject-device-lost` introduces a synthetic fault only after GPU work drains; it is not a physical TDR test.
+- Native Win32/LZMS installation runs on a worker thread with cooperative Cancel and rollback. Existing configuration is preserved by default (`--replace-config` opts into packaged defaults), running apps and locked destinations are rejected, and native uninstallation remains available. App and installer use the static MSVC runtime.
+
+Measured verification and hardware-specific limitations are recorded in the [Film Quality & Robustness Report](docs/quality_upgrade_report.md). Feature entries above describe implementation, not a claim that every hardware or debug-layer gate has passed.
+
 ## [1.0.0 — Milestone M10] — Portable Release & Complete Hardware Orchestra
 ### Added
 - **M10 Single-App Native Installer & Portable Release**: Added `tools/installer/setup_main.cpp` (`boo_installer_stub.exe`, native Win32 + inbox `cabinet.dll` LZMS self-extracting installer/uninstaller) and `scripts/package_release.ps1` producing a single-file Windows installer `BooSahSah-Setup-win64.exe` (~`12.1 MB`) plus companion `boo-sah-sah-win64-portable.zip` around the unified single application executable `boo_sah_sah.exe` (`--validate-cues`, `--bench`, compiled `.cso` shaders, `.bmesh` geometry, `madame_n` IR model, compact `openvino\` NPU runtime sidecar, cues, configs, `USER_GUIDE.md`, `LICENSES.md`, `CHANGELOG.md`). Updated `scripts/run_smoke.ps1` with automatic `dumpbin.exe` discovery and full M0–M10 verification gates.

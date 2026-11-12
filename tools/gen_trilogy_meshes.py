@@ -1080,6 +1080,143 @@ def orchid():
             bud_rad.append(max(0.004, bud_len * 0.36 * prof))
         closed_tube('crystal_bud_%d' % b_idx, bud_pts, bud_rad, 4, 0, n_ring=24, rough=.055, thick=.055, flute_amp=0.075, flute_freq=3)
 
+def vessel(name, center, profile, mat, part, scale_xy=(1., 1.), rough=.24):
+    """Closed lathed cross-section: real inner wall, rolled lip and underside, no pole degeneracy."""
+    cx, cy, cz = center
+    n = 48
+    verts = [(cx + r * math.cos(j * TAU / n) * scale_xy[0],
+              cy + r * math.sin(j * TAU / n) * scale_xy[1], cz + h)
+             for r, h in profile for j in range(n)]
+    faces = []
+    for k in range(len(profile)):
+        nk = (k + 1) % len(profile)
+        for j in range(n):
+            nj = (j + 1) % n
+            faces.append((k*n+j, k*n+nj, nk*n+nj, nk*n+j))
+    return mesh(name, verts, faces, mat, part, smooth=True, rough=rough, thick=.08)
+
+def enamel_cathedral():
+    """Architectural mineral vault, optical stelae and woven neural canopy; engine parts 200..219."""
+    # A procession of double-curved ribs, each planted in its own mineral/titanium shoe.
+    # World coordinates after export: ground y=2.65, orchid at (0,5.85,5.5).
+    for k, a in enumerate((-2.28, -1.68, -1.08, -.46, .46, 1.08, 1.68, 2.28)):
+        x, y = 4.45*math.sin(a), 5.5+4.45*math.cos(a)
+        part = 200+k
+        box('titanium_foot', (x,y,2.78), (.74,.78,.26), 23, part, bevel=.09, rough=.34)
+        pts = [(x*(1-.29*t), 5.5+(y-5.5)*(1-.29*t), 2.85+5.8*t)
+               for t in [j/24 for j in range(25)]]
+        closed_tube('brushed_vault_rib', pts, [.085+.025*math.sin(j/24*math.pi) for j in range(25)],
+                    23, part, n_ring=10, rough=.34, thick=.12, flute_amp=.08)
+        # Narrow inward-facing optical panel with a physically closed thin shell.
+        def optical(u,v,aa=a,xx=x,yy=y):
+            width=.34*(.88+.12*math.sin(u*math.pi))
+            bend=.16*v*v
+            return (xx+width*v*math.cos(aa)-bend*math.sin(aa),
+                    yy-width*v*math.sin(aa)-bend*math.cos(aa),3.0+4.9*u),.045
+        closed_blade('optical_stela',22,10,optical,12,part,rough=.15)
+        torus('foot_collar',(x,y,2.94),.27,.025,8,part,seg=32,rough=.28)
+
+    for k,a in enumerate((-2.12,-1.30,-.53,.53,1.30,2.12)):
+        part=210+k
+        # Fluted hexagonal hydroxyapatite prisms splay inward to form an open crown.
+        for j in range(3):
+            aa=a+(j-1)*.092
+            pts=[];rad=[]
+            for n in range(25):
+                t=n/24
+                r=5.1-.95*math.sin(t*math.pi*.74)
+                pts.append((r*math.sin(aa),5.5+r*math.cos(aa),2.68+5.7*t))
+                rad.append(.19*(1-.58*t)+.035*math.sin(t*math.pi))
+            closed_tube('enamel_prism',pts,rad,20,part,n_ring=6,rough=.22,thick=.16,flute_amp=.05)
+        vessel('prism_plinth',(5.1*math.sin(a),5.5+5.1*math.cos(a),2.66),
+               [(.16,0),(.60,0),(.63,.12),(.52,.24),(.16,.24)],24,part,rough=.38)
+
+    for k in range(4):
+        # Woven, twisted lamellae; distinct silhouette from the cathedral ribs.
+        def ribbon(u,v,kk=k):
+            return ((u-.5)*9.2,4.0+kk*1.55+v*.32*math.cos(u*math.pi),
+                    3.0+5.4*math.sin(math.pi*u)+.22*math.sin(u*TAU+kk)+v*.34*math.sin(u*math.pi)), .035
+        closed_blade('neural_lamella',32,8,ribbon,21,216+k,rough=.20)
+
+def microbial_sanctuary():
+    """Terraced celadon vessels and branching bioluminescent garden; no sterilization metaphor."""
+    # Four botanical proscenium branches use local coordinates for bounded iris articulation.
+    for k in range(4):
+        a=.18+k*.91
+        pts=[]
+        for j in range(24):
+            t=j/23
+            r=2.3+.28*math.sin(math.pi*t)
+            pts.append((r*math.cos(a+t*.72),-.10+.08*math.sin(t*math.pi),r*math.sin(a+t*.72)))
+        closed_tube('botanical_iris',pts,[.032]*24,8,220+k,n_ring=8,rough=.28,thick=.04)
+        for j in (5,10,15,20):
+            x,y,z=pts[j]
+            sphere('dew_node',(x,y,z),(.065,.07,.10),22,220+k,seg=12,rings=6,rough=.20)
+
+    for k,(x,y) in enumerate(((-2.85,4.65),(2.85,4.65),(-3.75,7.0),(3.75,7.0))):
+        part=224+k
+        for level in range(3):
+            radius=1.02-level*.20
+            h=2.66+level*.24
+            vessel('garden_terrace',(x,y,h),[(.10,0),(radius,0),(radius+.035,.10),
+                   (radius,.18),(radius-.12,.19),(radius-.16,.10),(.10,.10)],24,part,rough=.34)
+        vessel('celadon_vessel',(x,y,3.30),[(.10,0),(.42,0),(.69,.55),(.70,.62),
+               (.61,.64),(.58,.54),(.32,.13),(.10,.13)],25,part,rough=.23)
+        torus('vessel_rim',(x,y,3.91),.65,.022,8,part,seg=40,rough=.32)
+        for b in range(5):
+            a=b*TAU/5+k*.47
+            reach=.48+.11*(b%3)
+            pts=[(x+math.cos(a)*reach*t, y+math.sin(a)*reach*t,
+                  3.64+1.15*t-.22*t*t) for t in [j/12 for j in range(13)]]
+            closed_tube('living_branch',pts,[.027-.015*j/12 for j in range(13)],10,part,n_ring=8,rough=.42)
+            for leaf in (0,1):
+                bx,by,bz=pts[7+leaf*4]
+                def blade(u,v,xx=bx,yy=by,zz=bz,aa=a+leaf*.8):
+                    width=.02+.20*math.sin(math.pi*u)**.75
+                    return (xx+math.cos(aa)*u*.58-math.sin(aa)*width*v,
+                            yy+math.sin(aa)*u*.58+math.cos(aa)*width*v,
+                            zz+.30*math.sin(u*math.pi*.8)+.08*v*v),.024
+                closed_blade('symbiotic_frond',12,6,blade,22,part,rough=.34)
+            sphere('luminous_seed',pts[-1],(.065,.07,.10),22,part,seg=12,rings=8,rough=.25)
+
+def dawn_alcove():
+    """An ordinary morning, composed as architecture: bevelled mirror, ceramic basin, brush and plant."""
+    # Large quiet left wall for Pass-4 typography, warm indirect architectural edges.
+    box('alcove_back_wall',(0,9.8,6.0),(15,.24,7),24,235,bevel=.10,rough=.68)
+    box('alcove_left_return',(-6.8,6.9,5.4),(.24,6.0,6.0),24,235,bevel=.08,rough=.62)
+    box('warm_reveal',(-6.55,9.58,6.0),(.055,.03,6.4),15,235,rough=.46)
+    box('floating_oak_vanity',(1.4,6.95,3.30),(6.2,2.6,.42),26,231,bevel=.12,rough=.42)
+    box('ceramic_worktop',(1.4,6.95,3.57),(6.32,2.65,.14),24,231,bevel=.08,rough=.28)
+    # Elliptical mirror with a bevelled titanium back and subtle champagne border.
+    back=sphere('mirror_back',(1.55,9.47,6.05),(2.06,.11,2.43),23,230,seg=64,rings=32,rough=.32)
+    sphere('bevelled_mirror',(1.55,9.33,6.05),(1.98,.045,2.35),12,230,seg=64,rings=32,rough=.055)
+    ring=torus('mirror_champagne_edge',(1.55,9.36,6.05),2.0,.035,8,230,seg=80,rough=.28)
+    ring.rotation_euler.x=math.pi/2;ring.scale.y=1.18
+    vessel('ceramic_basin',(1.45,6.65,3.65),[(.11,0),(.58,0),(1.18,.20),(1.48,.56),
+           (1.48,.66),(1.40,.70),(1.31,.59),(1.08,.28),(.40,.11),(.11,.11)],24,232,(1.18,.72),rough=.20)
+    torus('basin_drain',(1.45,6.65,3.78),.115,.028,23,232,seg=24,rough=.30)
+    # Bent faucet tube uses the same closed surface pipeline as botanical stems.
+    pts=[(1.45,8.0,3.65),(1.45,8.0,4.1),(1.45,8.0,4.55),(1.45,7.85,4.74),
+         (1.45,7.60,4.74),(1.45,7.36,4.61)]
+    closed_tube('brushed_faucet',pts,[.065]*len(pts),23,232,n_ring=16,rough=.30,thick=.08)
+    vessel('brush_cup',(3.72,7.15,3.65),[(.06,0),(.25,0),(.29,.67),(.25,.70),
+           (.21,.64),(.19,.10),(.06,.10)],25,233,rough=.27)
+    closed_tube('toothbrush_handle',[(3.73,7.15,3.85),(3.76,7.15,4.55),(3.78,7.15,5.10)],
+                [.055,.065,.08],24,233,n_ring=12,rough=.27)
+    box('brush_head',(3.78,7.10,5.15),(.18,.13,.42),25,233,bevel=.06,rough=.28)
+    for row in range(5):
+        for col in range(3):
+            rod('bristle_tuft',(3.73+col*.05,7.02,5.0+row*.072),(3.73+col*.05,6.88,5.0+row*.072),
+                .014,11,233,verts=6,rough=.5)
+    vessel('morning_planter',(-1.20,7.30,3.65),[(.08,0),(.30,0),(.38,.55),(.33,.60),(.27,.52),(.20,.1),(.08,.1)],25,234)
+    for k in range(5):
+        a=k*TAU/5
+        def leaf(u,v,aa=a):
+            w=.02+.14*math.sin(u*math.pi)
+            return (-1.20+.65*u*math.cos(aa)-w*v*math.sin(aa),
+                    7.30+.65*u*math.sin(aa)+w*v*math.cos(aa),4.13+.72*math.sin(u*math.pi*.75)),.018
+        closed_blade('morning_leaf',14,6,leaf,10,234,rough=.5)
+
 def export(name):
     groups=defaultdict(lambda: ([],[])); bad=0; tris=0
     deps=bpy.context.evaluated_depsgraph_get()
@@ -1153,7 +1290,8 @@ def export(name):
     return dict(name=name,vertices=len(verts),triangles=tris,submeshes=len(table),nonmanifold_edges=bad,aabb=[lo,hi],sha256=hashlib.sha256(data).hexdigest())
 
 reports=[]
-for name,fn in [('shanghai_trestle',shanghai),('shenzhen_evtol',shenzhen),('taipei_101_hero',taipei),('glass_orchid_hero',orchid)]:
+for name,fn in [('shanghai_trestle',shanghai),('shenzhen_evtol',shenzhen),('taipei_101_hero',taipei),('glass_orchid_hero',orchid),
+                ('enamel_cathedral',enamel_cathedral),('microbial_sanctuary',microbial_sanctuary),('dawn_alcove',dawn_alcove)]:
     bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False);objects=[];serial=0
     fn();reports.append(export(name))
 atomic(OUT/'generation_report.json',(json.dumps(dict(blender=bpy.app.version_string,assets=reports),indent=2)+'\n').encode())

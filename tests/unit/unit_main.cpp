@@ -757,6 +757,31 @@ bool testMadameNModelManifestAndAsyncFallback() {
     return true;
 }
 
+bool testLateFilmEditionSeekAudioContinuity() {
+    // Regression for absolute-time frequency interpolation: the prior score
+    // chirped at late seeks while the Family/Midnight blend changed every sample.
+    boo::AudioSynthesizer48k synth;
+    synth.setDurationSamples(17280000);
+    synth.reset(0, 0);
+    std::array<float, 2048> pcm{};
+    float previous[2]{}, maxStep=0;
+    constexpr int seconds[]={18,95,145,175,225,255,318};
+    for(uint32_t iteration=0;iteration<224;++iteration) {
+        synth.setEdition((iteration&1u)?boo::Edition::Midnight:boo::Edition::Family);
+        synth.seekTo(uint64_t(seconds[(iteration*3u)%7u])*48000+(iteration%11u)*800);
+        const auto count=96u+(iteration%8u)*128u;
+        synth.renderFrames(pcm.data(),count,iteration%19u==0u,iteration%23u==0u,1.f);
+        for(uint32_t f=0;f<count;++f)for(size_t c=0;c<2;++c) {
+            const float sample=pcm[f*2u+c];
+            BOO_CHECK(std::isfinite(sample));
+            maxStep=std::max(maxStep,std::abs(sample-previous[c]));previous[c]=sample;
+        }
+    }
+    std::cout << "Late-film seek/edition maximum audio step: " << maxStep << '\n';
+    BOO_CHECK(maxStep<.010f);
+    return true;
+}
+
 bool testFullFilm360sScoreCaptionsAndEditions() {
     using namespace boo;
 
@@ -944,6 +969,7 @@ int main() {
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);
     runTest("FullFilm360sScoreCaptionsAndEditions", testFullFilm360sScoreCaptionsAndEditions);
+    runTest("LateFilmEditionSeekAudioContinuity", testLateFilmEditionSeekAudioContinuity);
     runTest("MediaPrivacyRedactionAndFaultFallback", testMediaPrivacyRedactionAndFaultFallback);
     runTest("JsonParserAndSerializer", testJsonParserAndSerializer);
     runTest("ProductionCueSheetsAndManifest", testProductionCueSheetsAndManifest);

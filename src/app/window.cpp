@@ -46,7 +46,9 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_DPICHANGED: {
-            if (!self->isFullscreen() && lParam != 0) {
+            if (self->isFullscreen()) {
+                self->fitFullscreenToMonitor();
+            } else if (lParam != 0) {
                 const auto* suggested = reinterpret_cast<const RECT*>(lParam);
                 SetWindowPos(
                     hwnd,
@@ -59,6 +61,12 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_DISPLAYCHANGE:
+            if (self->isFullscreen()) self->fitFullscreenToMonitor();
+            break;
+        case WM_PAINT:
+            if (self->paintGraphicsFailureFromWndProc()) return 0;
+            break;
         case WM_SYSKEYDOWN: {
             if (wParam == VK_RETURN && (lParam & (1 << 29)) && !(lParam & 0x40000000)) {
                 self->pushCommandFromWndProc(TransportCommand::ToggleFullscreen);
@@ -121,6 +129,7 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            self->onDestroyedFromWndProc();
             PostQuitMessage(0);
             return 0;
         default:
@@ -142,6 +151,10 @@ bool AppWindow::create(
     uint32_t clientHeight,
     bool fullscreen,
     bool noActivate) {
+    if (hwnd_) return false;
+    fullscreen_ = minimized_ = resized_ = false;
+    commandQueue_.clear();
+    graphicsFailureText_.clear();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     const HINSTANCE hInst = GetModuleHandleW(nullptr);
@@ -151,6 +164,8 @@ bool AppWindow::create(
     wc.lpfnWndProc = mainWindowProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
+    wc.hIconSm = wc.hIcon;
     wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = kWindowClassName;
     RegisterClassExW(&wc);
@@ -161,8 +176,8 @@ bool AppWindow::create(
     const uint32_t workW = static_cast<uint32_t>(std::max<LONG>(640, workArea.right - workArea.left));
     const uint32_t workH = static_cast<uint32_t>(std::max<LONG>(480, workArea.bottom - workArea.top));
 
-    clientWidth_  = std::min(clientWidth,  workW > 64 ? workW - 64 : workW);
-    clientHeight_ = std::min(clientHeight, workH > 64 ? workH - 64 : workH);
+    clientWidth_  = std::clamp(clientWidth, 1u, workW > 64 ? workW - 64 : workW);
+    clientHeight_ = std::clamp(clientHeight, 1u, workH > 64 ? workH - 64 : workH);
 
     const DWORD style = WS_OVERLAPPEDWINDOW;
     const DWORD exStyle = noActivate ? WS_EX_NOACTIVATE : 0;
@@ -258,20 +273,8 @@ void AppWindow::toggleBorderlessFullscreen() {
         windowedRect_[2] = r.right;
         windowedRect_[3] = r.bottom;
 
-        HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi{};
-        mi.cbSize = sizeof(mi);
-        GetMonitorInfoW(mon, &mi);
-
         SetWindowLongPtrW(hwnd_, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-        SetWindowPos(
-            hwnd_,
-            HWND_TOP,
-            mi.rcMonitor.left,
-            mi.rcMonitor.top,
-            mi.rcMonitor.right - mi.rcMonitor.left,
-            mi.rcMonitor.bottom - mi.rcMonitor.top,
-            SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        fitFullscreenToMonitor();
     } else {
         SetWindowLongPtrW(hwnd_, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
         SetWindowPos(
@@ -283,6 +286,44 @@ void AppWindow::toggleBorderlessFullscreen() {
             windowedRect_[3] - windowedRect_[1],
             SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
     }
+}
+
+void AppWindow::fitFullscreenToMonitor() {
+    if (!hwnd_ || !fullscreen_) return;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi)) return;
+    SetWindowPos(hwnd_, nullptr, mi.rcMonitor.left, mi.rcMonitor.top,
+                 mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+}
+
+void AppWindow::showGraphicsFailure(const std::string& reason) {
+    graphicsFailureText_ = L"BOO SAH SAH\n\nGraphics playback could not be restored.\n"
+                           L"The audio and timeline remain available. Close the show and restart to retry.\n\n" +
+                           utf8ToWide(reason);
+    if (hwnd_) {
+        InvalidateRect(hwnd_, nullptr, TRUE);
+        UpdateWindow(hwnd_);
+    }
+}
+
+bool AppWindow::paintGraphicsFailureFromWndProc() {
+    if (!hwnd_ || graphicsFailureText_.empty()) return false;
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(hwnd_, &ps);
+    RECT r{};
+    GetClientRect(hwnd_, &r);
+    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    const int inset = MulDiv(24, static_cast<int>(GetDpiForWindow(hwnd_)), 96);
+    InflateRect(&r, -inset, -inset);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(235, 240, 240));
+    auto oldFont = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+    DrawTextW(dc, graphicsFailureText_.c_str(), -1, &r, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+    EndPaint(hwnd_, &ps);
+    return true;
 }
 
 bool AppWindow::consumeResizeFlag() noexcept {

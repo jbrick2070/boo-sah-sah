@@ -362,7 +362,7 @@ void AudioSynthesizer48k::evaluateVoiceSample(
         const double padFam = 0.095 * sine(146.832) + 0.068 * sine(184.997) + 0.062 * sine(220.000) + 0.048 * sine(277.183) + 0.040 * sine(329.628);
         const double padMid = 0.098 * sine(123.471) + 0.072 * sine(146.832) + 0.060 * sine(184.997) + 0.050 * sine(220.000) + 0.042 * sine(277.183);
         const double act0 = (padFam * famMix + padMid * midMix) * (0.72 + 0.28 * sine(0.5))
-                          + 0.055 * sine(73.416 * famMix + 61.735 * midMix) * (0.55 + 0.45 * sine(1.5))
+                          + 0.055 * (sine(73.416) * famMix + sine(61.735) * midMix) * (0.55 + 0.45 * sine(1.5))
                           + rev0 * (0.045 * sine(587.330) + 0.032 * sine(880.000))
                           + static_cast<double>(v.rainLp) * 0.014 * (1.0 - fade((u - 32.0) / 8.0));
 
@@ -370,21 +370,26 @@ void AudioSynthesizer48k::evaluateVoiceSample(
         const double bellGate = std::pow(0.5 + 0.5 * sine(3.0), 4.0);
         const double pulseGate = std::pow(0.5 + 0.5 * sine(2.0), 3.0);
         const double act1 = pulseGate * (0.085 * sine(110.000) + 0.045 * sine(220.000))
-                          + bellGate * (0.048 * sine(880.000) + 0.036 * sine(1108.731 * famMix + 1046.502 * midMix) + 0.024 * sine(1318.510))
-                          + 0.042 * sine(277.183 * famMix + 261.626 * midMix);
+                          + bellGate * (0.048 * sine(880.000) + 0.036 * (sine(1108.731) * famMix + sine(1046.502) * midMix) + 0.024 * sine(1318.510))
+                          + 0.042 * (sine(277.183) * famMix + sine(261.626) * midMix);
 
         // Act 2 [100..150s): Neural Velvet lush harmonic electronica
         const double swell2 = 0.65 + 0.35 * sine(0.25);
-        const double act2 = (0.090 * sine(97.999) + 0.072 * sine(195.998) + 0.058 * sine(246.942 * famMix + 233.082 * midMix)
+        const double act2 = (0.090 * sine(97.999) + 0.072 * sine(195.998) + 0.058 * (sine(246.942) * famMix + sine(233.082) * midMix)
                            + 0.048 * sine(293.665) + 0.036 * sine(369.994) + 0.025 * sine(587.330)) * swell2;
 
         // Act 3 [150..195s): Madame N suspense -> warm jazz-lounge bloom across 175.0s midpoint_ecology_reveal
         const double jazzMorph = fade((u - 169.0) / 8.0);
         const double rev1 = std::exp(-std::pow((u - 175.0) / 4.5, 2.0));
-        const double walkStep = 0.5 + 0.5 * sine(1.75);
-        const double susp3 = 0.088 * sine(82.407) + 0.052 * sine(123.471) + 0.036 * sine(246.942 + 0.8 * sine(3.5));
-        const double jazzFam = 0.092 * sine(97.999 + 12.0 * walkStep) + 0.068 * sine(195.998) + 0.055 * sine(246.942) + 0.046 * sine(369.994) + 0.034 * sine(440.000);
-        const double jazzMid = 0.094 * sine(92.499 + 10.0 * walkStep) + 0.070 * sine(184.997) + 0.056 * sine(220.000) + 0.048 * sine(329.628) + 0.036 * sine(415.305);
+        // Integrate sinusoidal frequency modulation analytically. Multiplying a
+        // time-varying frequency by absolute film time makes late seeks produce
+        // ultrasonic phase slopes, and edition interpolation produces clicks.
+        const auto fm = [&](double carrier, double depth, double rate) noexcept {
+            return std::sin(kTwoPi * carrier * t - (depth / rate) * std::cos(kTwoPi * rate * t));
+        };
+        const double susp3 = 0.088 * sine(82.407) + 0.052 * sine(123.471) + 0.036 * fm(246.942, 0.8, 3.5);
+        const double jazzFam = 0.092 * fm(103.999, 6.0, 1.75) + 0.068 * sine(195.998) + 0.055 * sine(246.942) + 0.046 * sine(369.994) + 0.034 * sine(440.000);
+        const double jazzMid = 0.094 * fm(97.499, 5.0, 1.75) + 0.070 * sine(184.997) + 0.056 * sine(220.000) + 0.048 * sine(329.628) + 0.036 * sine(415.305);
         const double act3 = susp3 * (1.0 - jazzMorph)
                           + (jazzFam * famMix + jazzMid * midMix) * jazzMorph
                           + rev1 * (0.038 * sine(739.989) + 0.026 * sine(987.767));
@@ -395,7 +400,7 @@ void AudioSynthesizer48k::evaluateVoiceSample(
         const double funkGate = std::pow(0.5 + 0.5 * sine(2.5), 3.0);
         const double polyGate = std::pow(0.5 + 0.5 * std::sin(kTwoPi * 3.75 * t + 0.8), 4.0);
         const double techKick = std::pow(0.5 + 0.5 * sine(2.2), 6.0);
-        const double funk4 = funkGate * (0.105 * sine(73.416) + 0.062 * sine(146.832)) + 0.048 * sine(293.665 * famMix + 261.626 * midMix);
+        const double funk4 = funkGate * (0.105 * sine(73.416) + 0.062 * sine(146.832)) + 0.048 * (sine(293.665) * famMix + sine(261.626) * midMix);
         const double high4 = 0.085 * sine(97.999) + polyGate * (0.056 * sine(587.330) + 0.042 * sine(783.991) + 0.030 * sine(987.767));
         const double tech4 = techKick * 0.125 * sine(65.406) + 0.064 * sine(130.813) + polyGate * 0.046 * sine(523.251);
         const double act4 = funk4 * (1.0 - hlMorph) + high4 * hlMorph * (1.0 - tcMorph) + tech4 * tcMorph;
@@ -414,7 +419,7 @@ void AudioSynthesizer48k::evaluateVoiceSample(
         const double tuttiDrive = std::pow(0.5 + 0.5 * sine(2.0), 3.0);
         const double tutti6 = 0.105 * sine(73.416) * (0.65 + 0.35 * tuttiDrive)
                             + 0.074 * sine(146.832) + 0.062 * sine(220.000)
-                            + 0.054 * sine(277.183 * famMix + 261.626 * midMix)
+                            + 0.054 * (sine(277.183) * famMix + sine(261.626) * midMix)
                             + 0.046 * sine(440.000) + bellGate * 0.038 * sine(880.000);
         const double dawn6  = (0.088 * sine(146.832) + 0.066 * sine(184.997) + 0.058 * sine(220.000) + 0.046 * sine(293.665))
                             * (1.0 - 0.32 * cardHold)

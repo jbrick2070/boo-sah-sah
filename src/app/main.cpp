@@ -588,6 +588,14 @@ int main(int argc, char** argv) {
     bool appliedBenchBadges = false;
     bool running = true;
     bool recoveryAttempted = false;
+    bool graphicsUnavailable = false;
+    bool deviceLostInjected = false;
+    uint64_t retiredPresentCount = 0;
+    uint64_t retiredPresentStalls = 0;
+    uint32_t deviceRecoverySuccesses = 0;
+    uint32_t retiredDebugErrors = 0;
+    uint32_t retiredDebugWarnings = 0;
+    bool debugLayerWasActive = d3d.debugLayerActive();
     bool audioEndpointFailed = false;
     uint32_t audioEndpointMigrations = 0;
     int runtimeExitCode = 0;
@@ -596,6 +604,60 @@ int main(int argc, char** argv) {
     std::array<float, 16> recentGpuMs{};
     uint32_t hudMode = settings.showOverlay ? 0u : 3u;
     AbCompareEngine abCompareEngine = AbCompareEngine::RT;
+
+    // One recovery policy covers loss during resize, fence waits, resource sync,
+    // and Present. The 48 kHz transport is deliberately never stopped or rebased.
+    auto recoverGraphics = [&](const std::string& cause) {
+        const bool mayRecover = !recoveryAttempted;
+        recoveryAttempted = true;
+        BOO_LOG_WARN("D3D12", "Graphics lifecycle failure: " + cause);
+        benchCancel.store(true, std::memory_order_release);
+        if (benchThread.joinable()) benchThread.join();
+        benchCompleted.store(false, std::memory_order_release);
+        retiredPresentCount += d3d.presentCount();
+        retiredPresentStalls += d3d.presentStallCount();
+        retiredDebugErrors += d3d.debugErrorCount();
+        retiredDebugWarnings += d3d.debugWarningCount();
+        // Retire resources before release on non-removal failures as well.
+        d3d.retireGpuForShutdown();
+        spoutSender.shutdown();
+        liveM1Ptr = nullptr;
+        orchestrator.shutdown();
+        d3d.shutdown();
+        std::string recoveryError = mayRecover ? std::string{} : "The single graphics recovery attempt was already used.";
+        if (mayRecover) {
+            BOO_LOG_WARN("D3D12", "Attempting single D3D12 device recovery with bounded fence waits...");
+            const auto spec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
+            if (d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(),
+                               settings.forceWarp, settings.enableD3DDebug, &recoveryError)) {
+                liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, spec, orchestrator);
+                const auto result = orchestrator.initializeEffects(false);
+                if (result.status != BackendStatus::Faulted && result.status != BackendStatus::Unavailable &&
+                    d3d.checkDeviceHealthy(&recoveryError)) {
+                    orchestrator.setAbCompareEngine(abCompareEngine);
+                    orchestrator.setCodecSignalHijackActive(settings.enableSignalHijack);
+                    orchestrator.resetTo(clock.currentSeconds());
+                    lastActIdx = SIZE_MAX;
+                    if (settings.enableSpout && liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
+                        spoutSender.initialize(d3d, settings.spoutSenderName, liveM1Ptr->canvasWidth(), liveM1Ptr->canvasHeight());
+                    }
+                    BOO_LOG_INFO("D3D12", "Device recovery completed; sample timeline preserved.");
+                    ++deviceRecoverySuccesses;
+                    debugLayerWasActive = debugLayerWasActive && d3d.debugLayerActive();
+                    return;
+                }
+                if (recoveryError.empty()) recoveryError = "Neither primary nor safe graphics could initialize.";
+            }
+        }
+        d3d.retireGpuForShutdown();
+        liveM1Ptr = nullptr;
+        orchestrator.shutdown();
+        d3d.shutdown();
+        graphicsUnavailable = true;
+        runtimeExitCode = 1;
+        BOO_LOG_ERROR("D3D12", "Graphics recovery unsuccessful: " + recoveryError);
+        window.showGraphicsFailure(recoveryError);
+    };
 
     while (running && window.pumpMessages()) {
         const auto cpuFrameT0 = std::chrono::steady_clock::now();
@@ -838,11 +900,15 @@ int main(int argc, char** argv) {
         }
 
         // Exact [G1.2] pre-frame sequencing: swapchain resize -> clock -> scene boundary -> quality ladder -> canvas sync
-        if (window.consumeResizeFlag()) {
+        if (!graphicsUnavailable && settings.injectDeviceLost && !deviceLostInjected && d3d.presentCount() >= 2) {
+            deviceLostInjected = d3d.injectDeviceLostForTest();
+        }
+        if (!graphicsUnavailable && !d3d.checkDeviceHealthy(&d3dInitErr)) {
+            recoverGraphics(d3dInitErr);
+        }
+        if (window.consumeResizeFlag() && !graphicsUnavailable && !window.isMinimized()) {
             if (!d3d.resize(window.clientWidth(), window.clientHeight())) {
-                BOO_LOG_ERROR("D3D12", "Resize failed; stopping before using invalid backbuffers.");
-                runtimeExitCode = 1;
-                break;
+                recoverGraphics("Swapchain resize failed.");
             }
         }
 
@@ -893,7 +959,10 @@ int main(int argc, char** argv) {
         const QualityPresetSpec activeSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
         const bool allowImmediateCanvasResize =
             manualPresetChanged || sceneChanged || qualityLadder.memoryPressureActive();
-        orchestrator.syncPresetBeforeFrame(activeSpec, allowImmediateCanvasResize, tick.filmTimeSeconds);
+        if (!graphicsUnavailable) {
+            orchestrator.syncPresetBeforeFrame(activeSpec, allowImmediateCanvasResize, tick.filmTimeSeconds);
+            if (!d3d.checkDeviceHealthy(&d3dInitErr)) recoverGraphics(d3dInitErr);
+        }
         asyncDirector.setDisableNpu(settings.disableNPU || !activeSpec.allowNpu);
 
         const double cueSpan = std::max(1.0, static_cast<double>(activeCue.endSample - activeCue.startSample));
@@ -937,16 +1006,18 @@ int main(int argc, char** argv) {
             ? sampleDirector.evaluate(deterministicCtx, &activeCue)
             : asyncMood;
         fctx.moodIrisAngle = mood.irisAngle;
+        fctx.moodBloomStrength = mood.bloomStrength;
+        fctx.moodCutAccent = mood.cutAccent;
         fctx.moodIntensity = mood.lightTension;
         fctx.moodPaletteAccent = mood.spectralShift;
 
-        if (captureRequested) {
+        if (captureRequested && !graphicsUnavailable) {
             captureRequested = false;
             std::string captureError;
             if (!orchestrator.captureClean(fctx, "diagnostics/captures", &captureError))
                 BOO_LOG_WARN("Capture", captureError);
         }
-        if (!window.isMinimized()) {
+        if (!window.isMinimized() && !graphicsUnavailable) {
             HudTelemetrySnapshot hud{};
             hud.filmTimeSeconds = tick.filmTimeSeconds;
             hud.durationSeconds = TimelineClock::samplesToSeconds(cueSheet.durationSamples, cueSheet.sampleRate);
@@ -1017,29 +1088,10 @@ int main(int argc, char** argv) {
                         liveM1Ptr->canvasHeight());
                 }
                 double completedGpuMs = 0.0;
-                if (!d3d.endFrameAndPresent(settings.vsync, completedGpuMs)) {
-                    // Section 8.2 + [G3.3]: Bounded single D3D12 teardown/recreate on device lost
-                    if (recoveryAttempted) { runtimeExitCode = 1; break; }
-                    recoveryAttempted = true;
-                    BOO_LOG_WARN("D3D12", "Attempting single bounded D3D12 device recovery...");
-                    benchCancel.store(true, std::memory_order_release);
-                    if (benchThread.joinable()) benchThread.join();
-                    benchCompleted.store(false, std::memory_order_release);
-                    spoutSender.shutdown();
-                    orchestrator.shutdown();
-                    d3d.shutdown();
-                    if (!d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(),
-                                        settings.forceWarp, false, &d3dInitErr)) {
-                        BOO_LOG_ERROR("D3D12", "D3D12 recovery unsuccessful: " + d3dInitErr);
-                        runtimeExitCode = 1;
-                        break;
-                    }
-                    liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, activeSpec, orchestrator);
-                    orchestrator.initializeEffects(false);
-                    orchestrator.setAbCompareEngine(abCompareEngine);
-                    if (settings.enableSpout && liveM1Ptr) {
-                        spoutSender.initialize(d3d, settings.spoutSenderName, liveM1Ptr->canvasWidth(), liveM1Ptr->canvasHeight());
-                    }
+                const bool presented = d3d.endFrameAndPresent(settings.vsync, completedGpuMs);
+                const bool published = spoutSender.completePublish();
+                if (!presented || !published) {
+                    recoverGraphics(presented ? "Spout GPU publication did not retire." : "Frame submission or Present failed.");
                 } else if (completedGpuMs > 0.0) {
                     lastGpuMs = completedGpuMs;
                     std::move(recentGpuMs.begin() + 1, recentGpuMs.end(), recentGpuMs.begin());
@@ -1049,9 +1101,7 @@ int main(int argc, char** argv) {
                     }
                 }
             } else if (!d3d.checkDeviceHealthy(&d3dInitErr)) {
-                BOO_LOG_ERROR("D3D12", d3dInitErr);
-                runtimeExitCode = 1;
-                break;
+                recoverGraphics(d3dInitErr);
             }
         } else {
             Sleep(16);
@@ -1112,8 +1162,16 @@ int main(int argc, char** argv) {
     summary.audioPresentedSamples48k = audio.presentedFrames48k();
     summary.audioBufferLatencyMs = audio.estimatedBufferLatencyMs();
     summary.audioEndpointMigrations = audioEndpointMigrations;
-    summary.renderedFrames = d3d.presentCount();
-    summary.presentStalls = d3d.presentStallCount();
+    summary.renderedFrames = retiredPresentCount + d3d.presentCount();
+    summary.presentStalls = retiredPresentStalls + d3d.presentStallCount();
+    d3d.waitForGpu();
+    summary.deviceRecoveryAttempts = recoveryAttempted ? 1u : 0u;
+    summary.deviceRecoverySuccesses = deviceRecoverySuccesses;
+    summary.deviceLostInjected = deviceLostInjected;
+    summary.graphicsUnavailable = graphicsUnavailable;
+    summary.d3dDebugLayerActive = debugLayerWasActive;
+    summary.d3dDebugErrors = retiredDebugErrors + d3d.debugErrorCount();
+    summary.d3dDebugWarnings = retiredDebugWarnings + d3d.debugWarningCount();
     summary.startSample = initialSample;
     summary.finalSample = clock.currentSample();
     summary.wallElapsedSeconds = totalWallSec;
@@ -1167,8 +1225,8 @@ int main(int argc, char** argv) {
             " s (GPU p50=" + std::to_string(summary.gpuFrameStats.p50Ms).substr(0, 5) +
             " ms, p95=" + std::to_string(summary.gpuFrameStats.p95Ms).substr(0, 5) + " ms).");
 
-    d3d.waitForGpu();
-    if (settings.enableD3DDebug && d3d.debugErrorCount() != 0) runtimeExitCode = 1;
+    d3d.retireGpuForShutdown();
+    if (settings.enableD3DDebug && (summary.d3dDebugErrors != 0 || summary.d3dDebugWarnings != 0)) runtimeExitCode = 1;
     mediaIngest.shutdown();
     spoutSender.shutdown();
     clock.shutdown();

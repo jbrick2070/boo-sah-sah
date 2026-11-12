@@ -21,6 +21,11 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <wrl/client.h>
+#include <wincodec.h>
+#include <psapi.h>
+#include <charconv>
+#include <iomanip>
+#include <sstream>
 
 #include <algorithm>
 #include <cmath>
@@ -1575,6 +1580,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(spout.publishedFrameCount() == 1ULL);
 
     // Open independent D3D11 receiver device on matching LUID & read shared Spout2 texture
@@ -1651,6 +1657,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(readReceiverRgba(rxFromHudOff));
     BOO_CHECK(rxFromHudOn == rxFromHudOff);
 
@@ -1663,6 +1670,28 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    // Force a real publication fence timeout without hanging/resetting hardware.
+    // Its GPU queue wait is released from the CPU once receiver exclusion is checked.
+    Microsoft::WRL::ComPtr<ID3D12Fence> publicationGate;
+    BOO_CHECK(SUCCEEDED(static_cast<ID3D12Device*>(d3d.deviceRaw())->CreateFence(
+        0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&publicationGate))));
+    HANDLE receiverMutex = OpenMutexA(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE,
+        (testName + "_SpoutAccessMutex").c_str());
+    BOO_CHECK(receiverMutex != nullptr);
+    BOO_CHECK(SUCCEEDED(static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw())->Wait(publicationGate.Get(), 1)));
+    const bool timedOut = !spout.completePublish();
+    const uint64_t countAfterTimeout = spout.publishedFrameCount();
+    DWORD receiverWait = WAIT_FAILED;
+    std::thread receiverAttempt([&] {
+        receiverWait = WaitForSingleObject(receiverMutex, 20);
+        if (receiverWait == WAIT_OBJECT_0 || receiverWait == WAIT_ABANDONED) ReleaseMutex(receiverMutex);
+    });
+    receiverAttempt.join();
+    const HRESULT released = publicationGate->Signal(1);
+    CloseHandle(receiverMutex);
+    BOO_CHECK(SUCCEEDED(released));
+    BOO_CHECK(timedOut && countAfterTimeout == 2 && receiverWait == WAIT_TIMEOUT);
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(readReceiverRgba(rxFromAct3));
     BOO_CHECK(rxFromAct3 != rxFromHudOn);
     BOO_CHECK(spout.publishedFrameCount() == 3ULL);
@@ -1960,14 +1989,78 @@ bool testSignalHijackMediaIngestCameraPrivacyAndFallback() {
     return true;
 }
 
+#include "film_capture_gate.hpp"
+#include "film_stress_gate.hpp"
+
 } // namespace
+
+bool testQuarantinedGpuRetirement() {
+    using Microsoft::WRL::ComPtr;
+    boo::D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 64, 64, true, true, &error));
+    auto* device = static_cast<ID3D12Device*>(d3d.deviceRaw());
+    auto* queue = static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw());
+    ComPtr<ID3D12Fence> gate, marker;
+    BOO_CHECK(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))));
+    BOO_CHECK(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))));
+    BOO_CHECK(SUCCEEDED(queue->Wait(gate.Get(), 1)));
+    BOO_CHECK(SUCCEEDED(queue->Signal(marker.Get(), 1)));
+    BOO_CHECK(d3d.injectSynchronizationFailureForTest());
+    BOO_CHECK(!d3d.checkDeviceHealthy() && !d3d.waitForGpu());
+    BOO_CHECK(marker->GetCompletedValue() == 0);
+    // A healthy queue is deliberately blocked. Teardown must drain it despite
+    // quarantine, and must not mistake the failure flag for retirement.
+    std::thread releaseGate([gate] { Sleep(50); gate->Signal(1); });
+    const bool drained = d3d.retireGpuForShutdown();
+    releaseGate.join();
+    BOO_CHECK(drained && marker->GetCompletedValue() == 1);
+    BOO_CHECK(SUCCEEDED(device->GetDeviceRemovedReason()));
+    BOO_CHECK(!d3d.checkDeviceHealthy()); // Drain never un-quarantines allocators.
+    BOO_CHECK(d3d.retireGpuForShutdown()); // Idempotent.
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
 
 int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
-    if(argc>1 && std::string(argv[1])=="--trilogy-captures") {runTest("M2CapturesAndDeterminism",testM2CapturesAndDeterminism);return gTestsFailed?1:0;}
+    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, filmStress = false, lifecycleTests = false;
+    for (int arg = 1; arg < argc; ++arg) {
+        const std::string option = argv[arg];
+        if (option == "--no-activate") noActivate = true;
+        else if (option == "--require-debug-layer") gRequireDebugLayer = true;
+        else if (option == "--trilogy-captures") trilogyCaptures = true;
+        else if (option == "--film-captures") filmCaptures = true;
+        else if (option == "--film-stress") filmStress = true;
+        else if (option == "--lifecycle-tests") lifecycleTests = true;
+        else if (option == "--capture-dir" && arg + 1 < argc) gFilmCaptureDirectory = argv[++arg];
+        else if (option == "--stress-iterations" && arg + 1 < argc) {
+            const std::string value = argv[++arg];
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), gFilmStressIterations);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || gFilmStressIterations < 200 || gFilmStressIterations > 100000) {
+                std::cerr << "--stress-iterations must be an integer in [200, 100000].\n"; return 2;
+            }
+        }
+        else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
+    }
+    if (int(trilogyCaptures) + int(filmCaptures) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
+    if ((trilogyCaptures || filmCaptures || filmStress || lifecycleTests) && !noActivate) {
+        std::cerr << "Automated integration gates require --no-activate.\n";
+        return 2;
+    }
+    if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
+    if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }
+    if (lifecycleTests) {
+        runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);
+        runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
+        return gTestsFailed ? 1 : 0;
+    }
     runTest("CapabilityProbeHonestyAndPermutations", testCapabilityProbeHonestyAndPermutations);
     runTest("D3D12HeadlessAndShaderFallback", testD3D12HeadlessAndShaderFallback);
+    runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);
     runTest("AudioAndSilentFallbackClockIntegration", testAudioAndSilentFallbackClockIntegration);
     runTest("WasapiPresentationClockAndMigrationLifecycle", testWasapiPresentationClockAndMigrationLifecycle);
     runTest("AdHocNumericalBenchmarksVerification", testAdHocNumericalBenchmarksVerification);
@@ -1979,7 +2072,7 @@ int main(int argc, char** argv) {
     runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
     runTest("SignalHijackMediaIngestCameraPrivacyAndFallback", testSignalHijackMediaIngestCameraPrivacyAndFallback);
     runTest("NativeCanvasModesAndCapture", testNativeCanvasModesAndCapture);
-    if (argc > 1 && std::string(argv[1]) == "--no-activate") {
+    if (noActivate) {
         runTest("NoActivateWindowTransitions", testNoActivateWindowTransitions);
         runTest("LiveNoActivateSwapchainDeterminism", testLiveNoActivateSwapchainDeterminism);
         runTest("M2LiveNoActivateSwapchainDeterminism", testM2LiveNoActivateSwapchainDeterminism);

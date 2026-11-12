@@ -141,6 +141,13 @@ bool exportDiagnosticsJson(
     run["quality_downgrades"] = static_cast<int64_t>(summary.qualityDowngrades);
     run["rendered_frames"] = static_cast<int64_t>(summary.renderedFrames);
     run["present_stalls"] = static_cast<int64_t>(summary.presentStalls);
+    run["device_recovery_attempts"] = static_cast<int64_t>(summary.deviceRecoveryAttempts);
+    run["device_recovery_successes"] = static_cast<int64_t>(summary.deviceRecoverySuccesses);
+    run["device_lost_injected"] = summary.deviceLostInjected;
+    run["graphics_unavailable"] = summary.graphicsUnavailable;
+    run["d3d_debug_layer_active"] = summary.d3dDebugLayerActive;
+    run["d3d_debug_errors"] = static_cast<int64_t>(summary.d3dDebugErrors);
+    run["d3d_debug_warnings"] = static_cast<int64_t>(summary.d3dDebugWarnings);
     run["start_sample_48k"] = summary.startSample;
     run["final_sample_48k"] = summary.finalSample;
     run["wall_elapsed_seconds"] = summary.wallElapsedSeconds;

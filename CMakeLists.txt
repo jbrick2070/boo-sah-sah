@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(BooSahSah
     VERSION 1.0.0
     DESCRIPTION "BOO SAH SAH — The Glass Orchid Protocol"
-    LANGUAGES CXX
+    LANGUAGES CXX RC
 )
 
 # Windows x64 enforcement for baseline build (SPEC_v4 Section 1.1 & 3.1)
@@ -14,6 +14,8 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Keep both Release and Debug install verification independent of a developer CRT.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Section 12.1: Build mode toggles (Baseline requires zero optional proprietary SDKs)
 option(BASE_ONLY       "Build baseline D3D12+DXR+raster+audio with all optional SDKs excluded" ON)
@@ -388,7 +390,8 @@ add_custom_target(boo_stage_assets ALL
 )
 
 # 1. Main Milestone M1 Demoscene Application
-add_executable(boo_sah_sah src/app/main.cpp)
+add_executable(boo_sah_sah src/app/main.cpp assets/icons/app_icon.rc)
+target_include_directories(boo_sah_sah PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_sah_sah PRIVATE boo_core)
 add_dependencies(boo_sah_sah boo_stage_assets)
 boo_apply_compiler_flags(boo_sah_sah)
@@ -406,7 +409,8 @@ add_dependencies(boo_bench boo_stage_assets)
 boo_apply_compiler_flags(boo_bench)
 
 # 3b. Native Single-File Windows Installer / Uninstaller Stub (inbox cabinet.dll LZMS SFX)
-add_executable(boo_installer_stub WIN32 tools/installer/setup_main.cpp)
+add_executable(boo_installer_stub WIN32 tools/installer/setup_main.cpp assets/icons/app_icon.rc)
+target_include_directories(boo_installer_stub PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_installer_stub PRIVATE
     cabinet
     ole32
@@ -435,12 +439,16 @@ if(BOO_BUILD_TESTS)
     set_tests_properties(BooCueValidation PROPERTIES LABELS "unit;validation")
 
     add_executable(boo_integration_tests tests/integration/integration_main.cpp)
-    target_link_libraries(boo_integration_tests PRIVATE boo_core)
+    target_link_libraries(boo_integration_tests PRIVATE boo_core windowscodecs gdi32)
     add_dependencies(boo_integration_tests boo_stage_assets)
     boo_apply_compiler_flags(boo_integration_tests)
 
     add_test(NAME BooHardwareIntegrationTests COMMAND boo_integration_tests --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    add_test(NAME BooTrilogyCaptures COMMAND boo_integration_tests --trilogy-captures WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooTrilogyCaptures COMMAND boo_integration_tests --trilogy-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooFilmCaptures COMMAND boo_integration_tests --film-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooFilmStress COMMAND boo_integration_tests --film-stress --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(BooFilmCaptures PROPERTIES LABELS "hardware;integration" TIMEOUT 600)
+    set_tests_properties(BooFilmStress PROPERTIES LABELS "hardware;integration" TIMEOUT 900)
     set_tests_properties(BooTrilogyCaptures PROPERTIES LABELS "hardware;integration")
     set_tests_properties(BooHardwareIntegrationTests PROPERTIES LABELS "hardware;integration")
 endif()

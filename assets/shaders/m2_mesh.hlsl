@@ -7,6 +7,7 @@ cbuffer Scene : register(b0) {
     float3 forward; float reveal;
     uint width; uint height; uint act; uint canonical;
     float daylight; float pulse; uint showFlags; float moodAccent;
+    float moodBloom; float moodLight; float moodCut; float scenePadding;
 };
 cbuffer Draw : register(b1) {
     float4 row0; float4 row1; float4 row2;
@@ -119,6 +120,10 @@ float3 baseColor(uint m) {
     if (m == 20u) return float3(0.84, 0.81, 0.75);    // Sculpted ivory hydroxyapatite tooth-crown enamel
     if (m == 21u) return float3(0.08, 0.22, 0.26);    // Neural Velvet 64-layer Tensor Core SIREN ribbon
     if (m == 22u) return float3(0.06, 0.38, 0.26);    // Symbiotic bioluminescent oral micro-flora
+    if (m == 23u) return float3(0.24, 0.29, 0.32);    // Brushed architectural titanium
+    if (m == 24u) return float3(0.72, 0.66, 0.55);    // Warm ceramic / mineral plaster
+    if (m == 25u) return float3(0.09, 0.24, 0.20);    // Celadon glazed vessels
+    if (m == 26u) return float3(0.23, 0.11, 0.045);   // Morning oak vanity
     return float3(0.70, 0.74, 0.76);
 }
 
@@ -173,12 +178,12 @@ float3 emissive(uint m, float3 p, float filterW) {
         float2 tuv = frac(p.xz * 0.095 + float2(time * 0.028, -time * 0.018));
         float3 nSample = tensorField.SampleLevel(linearClamp, tuv, 0.0).rgb;
         float3 accent = ((showFlags & 2u) != 0u) ? float3(1.15, 0.42, 1.05) : float3(0.35, 1.15, 0.96);
-        return nSample * accent * (1.35 + 0.35 * pulse);
+        return nSample * accent * (0.42 + 0.12 * pulse);
     }
     if (m == 22u) {
         float3 floraTint = lerp(float3(0.08, 0.88, 0.64), float3(0.96, 0.62, 0.20), clamp(moodAccent, 0.0, 1.0));
         if ((showFlags & 2u) != 0u) floraTint = lerp(floraTint, float3(0.88, 0.24, 0.74), 0.45);
-        return floraTint * (0.36 + 0.22 * pulse) * (0.25 + 0.75 * nightFactor);
+        return floraTint * (0.045 + 0.05 * moodBloom + 0.025 * pulse) * (0.25 + 0.75 * nightFactor);
     }
     return (float3)0.0;
 }
@@ -195,11 +200,23 @@ bool traceScene(float3 origin, float3 direction, float distance, uint mask, floa
     while (q.Proceed()) {}
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
         uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
-        Vertex v = vertices[indices[offset]];
-        uint hm = (uint)v.p.w;
+        Vertex v0 = vertices[indices[offset]], v1 = vertices[indices[offset+1u]], v2 = vertices[indices[offset+2u]];
+        uint hm = (uint)v0.p.w;
+        float2 bary = q.CommittedTriangleBarycentrics();
+        float3 objectNormal = v0.n.xyz + bary.x * (v1.n.xyz-v0.n.xyz) + bary.y * (v2.n.xyz-v0.n.xyz);
+        float3 hitNormal = norm(mul(objectNormal, (float3x3)q.CommittedWorldToObject3x4()));
+        if (dot(hitNormal,direction)>0.0) hitNormal=-hitNormal;
         float hitT = q.CommittedRayT();
         float3 p = origin + direction * hitT;
-        float3 hitCol = baseColor(hm) * (0.26 + 0.74 * daylight) + emissive(hm, p, coneSpread * hitT);
+        float3 key = norm((act==1u)?float3(-.48,.22+.28*daylight,.72):float3(-.44,.74,-.32));
+        float3 keyTint = lerp(float3(.42,.64,.92),float3(1.42,1.02,.68),daylight);
+        float3 hitCol = baseColor(hm) * (.18+.65*saturate(dot(hitNormal,key))) * keyTint
+                      + emissive(hm, p, coneSpread * hitT);
+        // Single-bounce rough-ray footprint approximation: filter both facade
+        // frequencies and reflected radiance instead of reflecting every surface like chrome.
+        float3 roughAmbient = lerp(float3(.025,.035,.045),float3(.12,.16,.20),saturate(hitNormal.y*.5+.5));
+        roughAmbient = lerp(roughAmbient,float3(.32,.25,.18),daylight) + baseColor(hm)*.12;
+        hitCol = lerp(hitCol, roughAmbient, saturate(coneSpread*hitT*.10));
         float hFog = 1.0 - exp(-max(hitT - 4.0, 0.0) * 0.006);
         color = lerp(hitCol, sky(direction), hFog * 0.72);
         return true;
@@ -223,13 +240,23 @@ bool traceShadow(float3 origin, float3 direction, float distance) {
 
 struct Targets { float4 color : SV_Target0; float distance : SV_Target1; };
 
+// Opaque primary triangles never discard or export depth. Force visibility
+// testing before the inline rays/UAV verification atomics, including closed
+// hero shells whose back surfaces would otherwise execute expensive shading.
+[earlydepthstencil]
 Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 n = norm(front ? i.normal : -i.normal);
     float3 v = norm(eye - i.world);
     float dist = length(i.world - eye);
     bool isGlass = (i.mat == 3u || i.mat == 4u || i.mat == 18u);
+    float rough = clamp(i.uv.w, 0.045, 0.95);
 
     float wetPuddle = (i.mat == 1u) ? puddleMask(i.world.xz) : 0.0;
+    float micro = sin(i.world.x*31.0+i.world.z*17.0)*sin(i.world.y*27.0-i.world.z*11.0);
+    rough = clamp(rough + .018*micro / (1.0+dist*.08), .045, .95);
+    if (i.mat==1u) rough=lerp(.48,.085,wetPuddle);
+    if (i.mat==12u) rough=clamp(i.uv.w,.045,.25);
+    if (i.mat==10u||i.mat==19u) rough=.92;
     if (i.mat == 7u || (i.mat == 1u && wetPuddle > 0.15)) {
         float baseRip = (i.mat == 7u) ? 0.011 : (0.006 * wetPuddle);
         float ripScale = baseRip / (1.0 + dist * 0.022);
@@ -259,15 +286,27 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 #if defined(M2_RT)
     bool reflHit = false;
     bool secondHit = false;
+    uint queries = 0u;
     if (isGlass) {
-        reflHit   = traceScene(i.world + n * 0.03, reflect(-v, n), 180.0, 0x01u, 0.012, reflected);
+        reflHit   = traceScene(i.world + n * 0.03, reflect(-v, n), 180.0, 0x01u, 0.008+rough*rough*.12, reflected);
         secondHit = traceScene(i.world - n * 0.03, refrDir,        180.0, 0x01u, 0.014, transmitted);
+        queries = 2u;
     } else {
-        reflHit   = traceScene(i.world + n * 0.024, reflect(-v, n), 180.0, 0x03u, 0.005, reflected);
+        // Trace resolvable reflections on water, mirrors and polished metal.
+        // Matte plaster/foliage and distant facades use broad environment light;
+        // casting a sharp geometry ray for these lobes adds cost and false chrome.
+        bool resolvedReflection = i.mat == 7u || i.mat == 12u || i.mat == 8u || i.mat == 23u ||
+                                  (i.mat == 1u && wetPuddle > .45) ||
+                                  (rough < .30 && fres > .28 && dist < 24.0);
+        if (resolvedReflection) {
+            reflHit = traceScene(i.world + n * 0.024, reflect(-v, n), 180.0, 0x03u, 0.005+rough*rough*.18, reflected);
+            ++queries;
+        }
         secondHit = traceShadow(i.world + n * 0.024, keyDir, 3.0);
+        ++queries;
         ao = secondHit ? 0.58 : 1.0;
     }
-    uint waveQueries = WaveActiveSum(2u);
+    uint waveQueries = WaveActiveSum(queries);
     if (canonical != 0u && WaveIsFirstLane()) InterlockedAdd(verified[1], waveQueries);
     if (canonical != 0u && (((uint)i.pos.x & 31u) == 0u) && (((uint)i.pos.y & 31u) == 0u)) {
         InterlockedAdd(verified[0], (reflHit ? 1u : 0u) + (secondHit ? 1u : 0u));
@@ -275,6 +314,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 #endif
 
     float3 base = baseColor(i.mat);
+    if(i.mat==26u) base*=.88+.12*sin(i.world.x*22.0+sin(i.world.z*4.0)*1.3);
+    if(i.mat==23u) base*=.96+.04*sin(i.world.y*130.0)/(1.0+dist*.1);
     float cwPane = 1.0;
     if (i.mat == 5u || i.mat == 13u || i.mat == 14u) {
         // Curtain-wall floor spandrels & vertical mullions articulate skyscrapers in daylight as well as night
@@ -303,12 +344,14 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         color += base * float3(0.26, 0.68, 0.62) * padBounce;
     }
 
-    float rough = clamp(i.uv.w, 0.04, 0.95);
-    if (i.mat == 1u)  rough = lerp(0.48, 0.06, wetPuddle);
-    if (i.mat == 12u) rough = 0.09;
-    if (i.mat == 10u || i.mat == 19u) rough = 0.92;
-
-    float spec = pow(saturate(dot(n, norm(v + keyDir))), lerp(150.0, 8.0, rough));
+    // Normalized GGX lobe with Schlick visibility, bounded for low-roughness pixels.
+    float nh=saturate(dot(n,norm(v+keyDir))), nl=saturate(dot(n,keyDir));
+    float alpha=max(rough*rough,.015), a2=alpha*alpha;
+    float denom=nh*nh*(a2-1.0)+1.0;
+    float distribution=a2/(3.14159265*denom*denom);
+    float k=(rough+1.0)*(rough+1.0)*.125;
+    float visibility=(ndotv/(ndotv*(1-k)+k))*(nl/(nl*(1-k)+k));
+    float spec=min(distribution*visibility*.04/max(4.0*ndotv,.05),4.0);
     float specMask = (i.mat == 10u || i.mat == 19u) ? 0.06 : (1.0 - 0.55 * rough);
     float3 specTint = (i.mat == 8u) ? float3(1.65, 1.18, 0.46) : lerp(float3(0.78, 0.90, 1.0), float3(1.28, 0.96, 0.66), daylight);
     color += spec * specTint * ao * specMask;
@@ -319,10 +362,15 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     else if (i.mat == 1u)  reflWeight = lerp(0.04, 0.62, wetPuddle);
     else if (i.mat == 5u || i.mat == 14u || i.mat == 13u) reflWeight = ((i.mat == 13u) ? 0.18 : 0.34) * (0.30 + 0.70 * cwPane);
     else if (i.mat == 8u)  reflWeight = 0.56;
+    else if (i.mat == 23u) reflWeight = 0.42;
+    else if (i.mat == 24u) reflWeight = 0.055;
+    else if (i.mat == 25u) reflWeight = 0.16;
+    else if (i.mat == 26u) reflWeight = 0.025;
     else if (i.mat == 10u || i.mat == 19u) reflWeight = 0.015;
 
     float3 reflTint = (i.mat == 8u) ? float3(1.0, 0.74, 0.30) : float3(1.0, 1.0, 1.0);
-    color += reflected * reflTint * reflWeight * (0.28 + 0.72 * fres);
+    float3 roughReflection=lerp(reflected,sky(n),rough*rough*.72);
+    color += roughReflection * reflTint * reflWeight * (0.28 + 0.72 * fres);
 
     // Metallic 24k Gold (TMD sphere, callus crest, ruyi medallions, brass collar)
     if (i.mat == 8u) {
@@ -371,7 +419,12 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float3 rimSheen = ((i.mat == 4u) ? float3(0.28, 0.42, 0.40) : float3(0.38, 0.44, 0.48)) * (edgeRim + 0.45 * crispMargin);
             float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth;
 
-            float3 glassTrans = transmitted * beer + bodyScatter + nectarGlow;
+            // Thin-shell dispersion approximation: three wavelength IORs sample
+            // the same smooth environment; geometry refraction remains one ray.
+            float3 redSky=sky(norm(refract(-v,n,1.0/1.486)));
+            float3 blueSky=sky(norm(refract(-v,n,1.0/1.504)));
+            float3 dispersion=float3(redSky.r-transmitted.r,0.0,blueSky.b-transmitted.b)*(.06*edgeRim);
+            float3 glassTrans = max(transmitted+dispersion,0.0) * beer + bodyScatter*(1.0-beer) + nectarGlow;
             float reflMix = clamp(0.16 + 0.78 * fres, 0.0, 0.93);
             color = lerp(glassTrans, reflected * float3(1.05, 1.08, 1.12), reflMix)
                   + rimSheen
@@ -429,8 +482,11 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float3 siren = tensorField.SampleLevel(linearClamp, ruv, 0.0).rgb;
         float3 sirenB = tensorField.SampleLevel(linearClamp, frac(ruv.yx * 1.37 - time * 0.03), 0.0).rgb;
         float velvetRim = pow(1.0 - ndotv, 2.4);
-        float3 tone = ((showFlags & 2u) != 0u) ? float3(1.22, 0.52, 1.15) : float3(0.52, 1.18, 1.05);
-        color = (siren * 1.45 + sirenB * 0.65) * tone * (0.55 + 0.85 * velvetRim)
+        float3 field = siren * .70 + sirenB * .30;
+        float fieldLuma = dot(field, float3(.2126,.7152,.0722));
+        float3 tone = ((showFlags & 2u) != 0u) ? float3(.86,.42,.66) : float3(.34,.72,.66);
+        float3 silk = lerp(fieldLuma.xxx * tone, field * tone, .24);
+        color = silk * .68 * (0.55 + 0.55 * velvetRim)
               + reflected * (0.34 * fres)
               + float3(0.95, 0.74, 0.38) * (velvetRim * 0.18);
     }
@@ -440,7 +496,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float domeGlow = pow(1.0 - ndotv, 1.8);
         float3 bioHue = lerp(float3(0.10, 0.92, 0.68), float3(0.98, 0.68, 0.24), clamp(moodAccent, 0.0, 1.0));
         if ((showFlags & 2u) != 0u) bioHue = lerp(bioHue, float3(0.92, 0.26, 0.78), 0.45);
-        color += bioHue * (0.32 + 0.48 * domeGlow) + neural * 0.12;
+        color += bioHue * (0.04 + 0.12 * domeGlow) * (.75+.30*moodBloom+.15*moodLight+.08*moodCut) + neural * 0.025;
     }
 
     if (i.mat == 17u) {

@@ -25,7 +25,7 @@ Write-Host "`n==> [1/8] Running CTest Unit, Cue Validation, and Hardware Integra
 Push-Location $BuildDir
 try {
     # Run unit, cue validation, and main hardware integration suite (excluding heavy 1440p PNG export test, which has its own dedicated gate)
-    ctest -E "BooTrilogyCaptures" --output-on-failure
+    ctest -E "BooTrilogyCaptures|BooFilmCaptures|BooFilmStress" --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw "CTest suite reported failures." }
 } finally {
     Pop-Location
@@ -92,6 +92,19 @@ if (-not $FbJson.runtime.used_embedded_fallback_shader) {
     throw "Expected embedded fallback shader to be active under --inject-shader-fail!"
 }
 Write-Host "[PASS] Fault-injection run presented $($FbJson.runtime.rendered_frames) frames using embedded safe shader + silent monotonic clock." -ForegroundColor Green
+
+Write-Host "`n==> Testing the application's single-attempt device recovery with Spout active" -ForegroundColor Cyan
+$DiagRecovery = Join-Path $DiagDir "smoke_device_recovery.json"
+& $ExePath --no-activate --mute --width 1280 --height 720 --start-seconds 275 --duration-seconds 4.5 `
+    --enable-spout --spout-name BooRecovery_Clean --inject-device-lost --export-diagnostics $DiagRecovery
+if ($LASTEXITCODE -ne 0) { throw "Injected device recovery exited with code $LASTEXITCODE" }
+$RecoveryJson = Get-Content $DiagRecovery -Raw | ConvertFrom-Json
+if (-not $RecoveryJson.runtime.device_lost_injected -or $RecoveryJson.runtime.device_recovery_attempts -ne 1 -or
+    $RecoveryJson.runtime.device_recovery_successes -ne 1 -or $RecoveryJson.runtime.graphics_unavailable -or
+    $RecoveryJson.runtime.rendered_frames -lt 3 -or $RecoveryJson.runtime.final_sample_48k -lt (275 * 48000)) {
+    throw "Device recovery or timeline preservation failed; inspect $DiagRecovery"
+}
+Write-Host "[PASS] One device recovery completed with timeline preserved and Spout enabled." -ForegroundColor Green
 
 Write-Host "`n==> [6/8] Milestone M2 (180s Trilogy) & M1 (60s Taipei) Backward-Compatibility Smoke Runs" -ForegroundColor Cyan
 $DiagM2Compat = Join-Path $DiagDir "smoke_m2_compat.json"

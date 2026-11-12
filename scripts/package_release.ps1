@@ -1,4 +1,5 @@
 param(
+    [ValidateSet("x64-base-release", "x64-base-debug")]
     [string]$Preset = "x64-base-release",
     [string]$OutRoot = "",
     [switch]$ExcludeOpenVinoRuntime
@@ -11,6 +12,7 @@ $BuildDir = if ($Preset -eq "x64-base-debug") { Join-Path $RepoRoot "build\x64-d
 if ([string]::IsNullOrWhiteSpace($OutRoot)) {
     $OutRoot = Join-Path $RepoRoot "build\dist"
 }
+$OutRoot = [IO.Path]::GetFullPath($OutRoot)
 
 Write-Host "==> Building $Preset (single-app + native LZMS setup stub)" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "build.ps1") -Preset $Preset
@@ -21,7 +23,7 @@ $StubExe = Join-Path $BuildDir "boo_installer_stub.exe"
 Write-Host "==> Validating asset & cue provenance manifest via unified boo_sah_sah.exe --validate-cues" -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
-    & $AppExe --validate-cues
+    & $AppExe --validate-cues --no-activate
     if ($LASTEXITCODE -ne 0) { throw "Cue/manifest validation failed before packaging!" }
 } finally {
     Pop-Location
@@ -37,8 +39,12 @@ foreach ($old in @(
     $SetupPath,
     $ZipPath
 )) {
-    if (Test-Path $old) {
-        Remove-Item -Recurse -Force $old
+    $ResolvedOld = [IO.Path]::GetFullPath($old)
+    if (-not $ResolvedOld.StartsWith($OutRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing cleanup outside output root: $ResolvedOld"
+    }
+    if (Test-Path -LiteralPath $ResolvedOld) {
+        Remove-Item -LiteralPath $ResolvedOld -Recurse -Force
     }
 }
 
@@ -104,6 +110,8 @@ Copy-Item -Force (Join-Path $RepoRoot "LICENSES.md") (Join-Path $StageDir "LICEN
 Copy-Item -Force (Join-Path $RepoRoot "CHANGELOG.md") (Join-Path $StageDir "CHANGELOG.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\USER_GUIDE.md") (Join-Path $StageDir "docs\USER_GUIDE.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\SPEC_v4.md") (Join-Path $StageDir "docs\SPEC_v4.md")
+Copy-Item -Force (Join-Path $RepoRoot "docs\quality_upgrade_report.md") (Join-Path $StageDir "docs\quality_upgrade_report.md")
+Copy-Item -Force (Join-Path $RepoRoot "docs\quality_timings.json") (Join-Path $StageDir "docs\quality_timings.json")
 
 Write-Host "==> Packing single-file Windows installer: $SetupPath" -ForegroundColor Cyan
 $packProc = Start-Process -FilePath $StubExe -ArgumentList @("--pack", "`"$StubExe`"", "`"$StageDir`"", "`"$SetupPath`"") -Wait -PassThru -NoNewWindow
@@ -114,36 +122,104 @@ if ($packProc.ExitCode -ne 0 -or -not (Test-Path $SetupPath)) {
 Write-Host "==> Compressing companion portable ZIP archive: $ZipPath" -ForegroundColor Cyan
 Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -Force
 
-# 7. End-to-end clean-environment verification of the single-file installer + uninstaller
-$VerifyDir = Join-Path $env:TEMP ("boo-setup-verify-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+# 7. Verify installs, upgrade preservation/replacement, rollback, and uninstall.
+# Shell metacharacters are deliberate: native setup must treat paths literally.
+$VerifyRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("boo-setup-verify-" + [guid]::NewGuid().ToString("N"))))
+$VerifyDir = Join-Path $VerifyRoot 'app space & 100% ! (test)'
 $SavedPath = $env:PATH
+$Succeeded = $false
+function Invoke-Setup([string[]]$ExtraArguments = @(), [int]$ExpectedExit = 0) {
+    $Arguments = @('--silent', '--install-dir', "`"$VerifyDir`"", '--no-shortcuts', '--no-registry', '--no-launch', '--no-activate') + $ExtraArguments
+    $Process = Start-Process -FilePath $SetupPath -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
+    if ($Process.ExitCode -ne $ExpectedExit) { throw "Setup expected exit $ExpectedExit, got $($Process.ExitCode)." }
+}
 try {
-    $env:PATH = "C:\Windows\System32;C:\Windows"
-    $instProc = Start-Process -FilePath $SetupPath -ArgumentList @("--silent", "--install-dir", "`"$VerifyDir`"", "--no-shortcuts", "--no-registry", "--no-launch") -Wait -PassThru -NoNewWindow
-    if ($instProc.ExitCode -ne 0) { throw "Silent setup install verification failed ($($instProc.ExitCode))!" }
-
+    $env:PATH = Join-Path $env:SystemRoot 'System32'
+    Invoke-Setup
     $InstalledApp = Join-Path $VerifyDir "boo_sah_sah.exe"
     $Uninstaller  = Join-Path $VerifyDir "Uninstall-BooSahSah.exe"
     if (-not (Test-Path $InstalledApp) -or -not (Test-Path $Uninstaller)) {
         throw "Installed app or uninstaller missing after silent install!"
     }
 
+    $Config = Join-Path $VerifyDir 'config\default.toml'
+    [IO.File]::AppendAllText($Config, "`r`n# packaging upgrade preservation sentinel`r`n")
+    $ConfigHash = (Get-FileHash -LiteralPath $Config).Hash
+    $UserFile = Join-Path $VerifyDir 'user notes.txt'
+    [IO.File]::WriteAllText($UserFile, 'Untracked user data must survive upgrade and uninstall.')
+    Invoke-Setup @('--preserve-config')
+    if ((Get-FileHash -LiteralPath $Config).Hash -ne $ConfigHash) { throw 'Upgrade overwrote config overrides.' }
+    if (-not (Test-Path -LiteralPath $UserFile)) { throw 'Upgrade deleted untracked user data.' }
+
+    # A locked late archive entry forces rollback after earlier files were replaced.
+    $Readme = Join-Path $VerifyDir 'README.md'
+    [IO.File]::AppendAllText($Readme, "`r`nRollback sentinel`r`n")
+    $ReadmeHash = (Get-FileHash -LiteralPath $Readme).Hash
+    $ManifestHash = (Get-FileHash -LiteralPath (Join-Path $VerifyDir 'install_manifest.txt')).Hash
+    $LockedFile = [IO.File]::Open($Config, 'Open', 'Read', 'None')
+    try { Invoke-Setup @('--replace-config') 1 } finally { $LockedFile.Dispose() }
+    if ((Get-FileHash -LiteralPath $Readme).Hash -ne $ReadmeHash -or
+        (Get-FileHash -LiteralPath $Config).Hash -ne $ConfigHash -or
+        (Get-FileHash -LiteralPath (Join-Path $VerifyDir 'install_manifest.txt')).Hash -ne $ManifestHash) {
+        throw 'Failed upgrade did not restore previous files and manifest.'
+    }
+    if (@(Get-ChildItem -LiteralPath $VerifyDir -Force -Filter '.boo-rollback-*').Count) { throw 'Rollback left transaction files.' }
+    Invoke-Setup @('--replace-config')
+    if ((Get-FileHash -LiteralPath $Config).Hash -ne (Get-FileHash -LiteralPath (Join-Path $StageDir 'config\default.toml')).Hash) {
+        throw 'Explicit config replacement did not install packaged defaults.'
+    }
     Push-Location $VerifyDir
     try {
-        & $InstalledApp --validate-cues | Out-Null
+        & $InstalledApp --validate-cues --no-activate | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Installed boo_sah_sah.exe --validate-cues failed!" }
     } finally {
         Pop-Location
     }
 
-    $uninstProc = Start-Process -FilePath $Uninstaller -ArgumentList @("--uninstall", "--silent", "--no-registry") -Wait -PassThru -NoNewWindow
+    $TrackedFiles = @(Get-Content -LiteralPath (Join-Path $VerifyDir 'install_manifest.txt') |
+        Where-Object { $_.StartsWith('FILE=') } | ForEach-Object { $_.Substring(5) })
+    # A locked tracked file must fail synchronously and leave a retryable uninstall.
+    $ManifestPath = Join-Path $VerifyDir 'install_manifest.txt'
+    $ManifestHash = (Get-FileHash -LiteralPath $ManifestPath).Hash
+    $LockedFile = [IO.File]::Open($Config, 'Open', 'Read', 'None')
+    try {
+        $uninstProc = Start-Process -FilePath $Uninstaller -ArgumentList @('--uninstall', '--silent', '--no-registry') -Wait -PassThru -WindowStyle Hidden
+        if ($uninstProc.ExitCode -ne 6) { throw "Locked-file uninstall expected exit 6, got $($uninstProc.ExitCode)." }
+        if (-not (Test-Path -LiteralPath $Uninstaller) -or
+            -not (Test-Path -LiteralPath $ManifestPath) -or
+            (Get-FileHash -LiteralPath $ManifestPath).Hash -ne $ManifestHash) {
+            throw 'Failed uninstall did not retain its executable and manifest for retry.'
+        }
+        if (-not (Test-Path -LiteralPath $UserFile)) { throw 'Failed uninstall deleted untracked user data.' }
+    } finally { $LockedFile.Dispose() }
+    $uninstProc = Start-Process -FilePath $Uninstaller -ArgumentList @("--uninstall", "--silent", "--no-registry") -Wait -PassThru -WindowStyle Hidden
     if ($uninstProc.ExitCode -ne 0) { throw "Silent uninstaller failed ($($uninstProc.ExitCode))!" }
+    $RemainingContent = @($TrackedFiles | Where-Object { $_ -ine 'Uninstall-BooSahSah.exe' -and (Test-Path -LiteralPath (Join-Path $VerifyDir $_)) })
+    if ($RemainingContent.Count -or (Test-Path -LiteralPath $ManifestPath)) {
+        throw "Uninstall reported success before removing tracked content: $($RemainingContent -join ', ')"
+    }
+    # Only the original uninstaller image may remain until the native helper runs.
+    $Deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $Remaining = @($TrackedFiles | Where-Object { Test-Path -LiteralPath (Join-Path $VerifyDir $_) })
+        if ($Remaining.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $VerifyDir 'install_manifest.txt'))) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    if ($Remaining.Count -or (Test-Path -LiteralPath (Join-Path $VerifyDir 'install_manifest.txt'))) {
+        throw "Uninstaller left tracked files: $($Remaining -join ', ')"
+    }
+    if (-not (Test-Path -LiteralPath $UserFile)) { throw 'Uninstaller deleted untracked user data.' }
+    $Succeeded = $true
 } finally {
     $env:PATH = $SavedPath
-    Start-Sleep -Milliseconds 400
-    if (Test-Path $VerifyDir) {
-        Remove-Item -Recurse -Force $VerifyDir -ErrorAction SilentlyContinue
-    }
+    # Retain failed verification artifacts; never mask an uninstall failure.
+    if ($Succeeded -and (Test-Path -LiteralPath $VerifyRoot)) {
+        $ResolvedVerifyRoot = [IO.Path]::GetFullPath($VerifyRoot)
+        $TempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if (-not $ResolvedVerifyRoot.StartsWith($TempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            -not ([IO.Path]::GetFileName($ResolvedVerifyRoot)).StartsWith('boo-setup-verify-')) { throw 'Unsafe verification cleanup path.' }
+        Remove-Item -LiteralPath $ResolvedVerifyRoot -Recurse -Force
+    } elseif (-not $Succeeded) { Write-Warning "Verification artifacts retained at $VerifyRoot" }
 }
 
 $SetupSizeMb = [math]::Round((Get-Item $SetupPath).Length / 1MB, 2)

@@ -655,8 +655,8 @@ M1CameraState evaluateShowCamera(
             const double careEye[3] = {0.62, 4.88, -0.78};
             const double careTgt[3] = {0.20, 5.35, 6.20};
 
-            const double finEye[3] = {0.48, 4.80, -0.48};
-            const double finTgt[3] = {7.55, 16.95, 46.00};
+            const double finEye[3] = {0.48, 5.25, -0.95};
+            const double finTgt[3] = {0.20, 4.85, 7.60};
 
             c.shotIndex = 6;
             for (int i = 0; i < 3; ++i) {

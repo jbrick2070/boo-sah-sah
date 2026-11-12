@@ -667,7 +667,7 @@ struct AsyncDirectorController::Impl {
     bool hasFeatureInput = false;
 
     bool hasValidNeuralSample = false;
-    bool runtimeQuarantined = false;
+    std::atomic<bool> runtimeQuarantined{false};
     NeuralInferenceSample latestNeuralSample{};
     std::chrono::steady_clock::time_point lastNeuralSampleTime{};
     HardwareResult currentHwResult{};
@@ -742,7 +742,7 @@ struct AsyncDirectorController::Impl {
                 const HardwareResult initRes = neural.initialize(cfg);
                 {
                     std::lock_guard<std::mutex> lk(mtx);
-                    currentHwResult = initRes;
+                    currentHwResult = disableNpu.load(std::memory_order_acquire) ? makeDisabledStatus() : initRes;
                 }
                 if (!initialCompileDone.exchange(true, std::memory_order_acq_rel)) {
                     cvInit.notify_all();
@@ -765,6 +765,11 @@ struct AsyncDirectorController::Impl {
                 if (neural.infer(fv, sample, forceTimeout)) {
                     const auto now = std::chrono::steady_clock::now();
                     std::lock_guard<std::mutex> lk(mtx);
+                    if (disableNpu.load(std::memory_order_acquire)) {
+                        hasValidNeuralSample = false;
+                        currentHwResult = makeDisabledStatus();
+                        continue;
+                    }
                     latestNeuralSample = sample;
                     lastNeuralSampleTime = now;
                     hasValidNeuralSample = true;
@@ -861,14 +866,16 @@ void AsyncDirectorController::reset(uint64_t seed) noexcept {
 
 void AsyncDirectorController::setDisableNpu(bool disable) noexcept {
     if (!impl_) return;
-    const bool prev = impl_->disableNpu.exchange(disable, std::memory_order_acq_rel);
-    if (prev != disable) {
-        if (!disable) {
-            std::lock_guard<std::mutex> lk(impl_->mtx);
-            impl_->runtimeQuarantined = false;
-        }
-        impl_->cvWorker.notify_all();
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        if (impl_->disableNpu.exchange(disable, std::memory_order_acq_rel) == disable) return;
+        // Publish the selected route synchronously; an in-flight worker result
+        // must not leave an Accelerated badge visible after the user disables it.
+        impl_->hasValidNeuralSample = false;
+        impl_->currentHwResult = disable ? impl_->makeDisabledStatus() : impl_->makeProbingStatus();
+        if (!disable) impl_->runtimeQuarantined = false;
     }
+    impl_->cvWorker.notify_all();
 }
 
 void AsyncDirectorController::setInjectTimeout(bool inject) noexcept {
@@ -952,7 +959,8 @@ AsyncDirectorTelemetry AsyncDirectorController::telemetry() const noexcept {
     AsyncDirectorTelemetry out{};
     if (!impl_) return out;
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    out.hardwareResult = impl_->currentHwResult;
+    out.hardwareResult = impl_->disableNpu.load(std::memory_order_acquire)
+        ? impl_->makeDisabledStatus() : impl_->currentHwResult;
     out.lastInferMs = impl_->lastInferMs;
     out.completedInferences = impl_->completedInferences;
     out.timeoutCount = impl_->timeoutCount;

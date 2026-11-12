@@ -2984,6 +2984,10 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
         pc.bloomIntensity = 0.18f + 0.06f * revealOpen01;
+        if (visualMode == ShowVisualMode::SoloNPU ||
+            (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0)) {
+            pc.bloomIntensity *= 0.85f + 0.30f * std::clamp(ctx.moodBloomStrength, 0.f, 1.f);
+        }
 
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
@@ -3808,6 +3812,64 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
     return true;
 }
 
+bool M1TaipeiSliceEffect::readSceneHdrFiniteForTest(uint64_t& nonFiniteComponents, std::string* error) {
+    nonFiniteComponents = 0;
+    if (!impl_ || !impl_->sceneHdr || !d3d_.deviceRaw()) {
+        if (error) *error = "SceneHDR is not initialized";
+        return false;
+    }
+    auto* dev = static_cast<ID3D12Device*>(d3d_.deviceRaw());
+    const auto desc = impl_->sceneHdr->GetDesc();
+    if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        if (error) *error = "SceneHDR finite gate requires FP16 RGBA";
+        return false;
+    }
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes = 0;
+    dev->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    const auto rd = makeBufferDesc(bytes);
+    ComPtr<ID3D12Resource> readback;
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)))) {
+        if (error) *error = "Unable to allocate FP16 readback";
+        return false;
+    }
+    if (!d3d_.executeSingleCommandListAndWait([&](void* raw) {
+        auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);
+        transitionResource(cmd, impl_->sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = impl_->sceneHdr.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = readback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = footprint;
+        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transitionResource(cmd, impl_->sceneHdr.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }, error)) return false;
+    void* mapped = nullptr;
+    D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+    if (FAILED(readback->Map(0, &range, &mapped)) || !mapped) {
+        if (error) *error = "Unable to map FP16 readback";
+        return false;
+    }
+    for (UINT y = 0; y < desc.Height; ++y) {
+        const auto* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(mapped)
+            + footprint.Offset + static_cast<size_t>(y) * footprint.Footprint.RowPitch);
+        for (UINT64 x = 0; x < desc.Width * 4; ++x) {
+            // IEEE binary16 exponent all-ones is Infinity or NaN, independent of sign/mantissa.
+            if ((row[x] & 0x7c00u) == 0x7c00u) ++nonFiniteComponents;
+        }
+    }
+    D3D12_RANGE written{0, 0};
+    readback->Unmap(0, &written);
+    return true;
+}
+
 bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
     std::vector<uint8_t>& outRgba,
     uint32_t& outWidth,
@@ -3819,7 +3881,10 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
         return false;
     }
 
-    d3d_.waitForGpu();
+    if (!d3d_.waitForGpu() || !d3d_.checkDeviceHealthy()) {
+        if (outError) *outError = "Canvas readback aborted: graphics device unavailable";
+        return false;
+    }
 
     auto* dev = static_cast<ID3D12Device*>(d3d_.deviceRaw());
     if (!dev) {

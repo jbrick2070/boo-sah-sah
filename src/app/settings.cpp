@@ -215,6 +215,8 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.injectVramPressure = true;
         } else if (a == "--inject-npu-timeout") {
             ioSettings.injectNpuTimeout = true;
+        } else if (a == "--inject-device-lost") {
+            ioSettings.injectDeviceLost = true;
         } else if (a == "--enable-spout") {
             ioSettings.enableSpout = true;
         } else if (a == "--disable-spout") {
@@ -313,6 +315,7 @@ std::string buildCliHelpText() {
         "  --inject-shader-fail        Force fallback to embedded precompiled safe shader\n"
         "  --inject-audio-fail         Simulate missing audio endpoint\n"
         "  --inject-npu-timeout        Simulate NPU inference stall/timeout -> graceful failover\n"
+        "  --inject-device-lost        Exercise one bounded graphics teardown/recreate (safe simulation)\n"
         "  --enable-spout              Publish clean 16:9 CanvasClean via Spout2 (zero HUD)\n"
         "  --spout-name <name>         Spout2 sender name (default: BooSahSah_Clean)\n"
         "  --media-input <path>        Opt-in local video file for Signal Hijack (1280x720 NV12 cap)\n"

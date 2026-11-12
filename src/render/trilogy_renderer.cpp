@@ -29,7 +29,7 @@ void transition(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r,D3D12_RESOURCE_
 }
 void uav(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r) {D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;b.UAV.pResource=r;cmd->ResourceBarrier(1,&b);}
 struct DrawConstants {float rows[12]{};uint32_t first=0,mat=0,part=0,pad=0;};
-struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;};
+struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;float moodBloom,moodLight,moodCut,pad;};
 void normalize(float v[3]) {float l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(int c=0;c<3;++c)v[c]/=std::max(l,1e-6f);}
 void cross(const float a[3],const float b[3],float r[3]) {r[0]=a[1]*b[2]-a[2]*b[1];r[1]=a[2]*b[0]-a[0]*b[2];r[2]=a[0]*b[1]-a[1]*b[0];}
 }
@@ -50,41 +50,42 @@ struct TrilogyMeshRenderer::Impl {
     explicit Impl(D3D12Context& c):context(c){}
     bool isPartActiveInShow(const Part& p,float time) const noexcept {
         const uint32_t pt=p.sub.part;
+        const bool hero=p.kit>=4;
         if(visualMode==ShowVisualMode::SoloRT) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=200&&pt<=207);
+            return p.kit==2||p.kit==3||(hero&&pt>=200&&pt<=215);
         }
         if(visualMode==ShowVisualMode::SoloTensor) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=210&&pt<=219);
+            return p.kit==2||p.kit==3||(hero&&pt>=210&&pt<=219);
         }
         if(visualMode==ShowVisualMode::SoloNPU) {
-            return p.kit==2||p.kit==3||(p.kit==4&&((pt>=210&&pt<=215)||(pt>=220&&pt<=227)));
+            return p.kit==2||p.kit==3||(hero&&((pt>=210&&pt<=215)||(pt>=220&&pt<=227)));
         }
         if(visualMode==ShowVisualMode::SoloCUDA) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=210&&pt<=215);
+            return p.kit==2||p.kit==3||(hero&&pt>=210&&pt<=215);
         }
         // FullFilm360s 7-act activation
         if(time<45.f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=210&&pt<=215&&time>=30.5f);
+            return p.kit==2||p.kit==3||(hero&&pt>=210&&pt<=215&&time>=30.5f);
         }
         if(time<100.f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&((pt>=200&&pt<=207)||(pt>=210&&pt<=215)));
+            return p.kit==2||p.kit==3||(hero&&pt>=200&&pt<=215);
         }
         if(time<150.f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=210&&pt<=219);
+            return p.kit==2||p.kit==3||(hero&&pt>=210&&pt<=219);
         }
         if(time<195.f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&((pt>=210&&pt<=215)||(pt>=220&&pt<=227)));
+            return p.kit==2||p.kit==3||(hero&&((pt>=210&&pt<=215)||(pt>=220&&pt<=227)));
         }
         if(time<245.f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&pt>=210&&pt<=215);
+            return p.kit==2||p.kit==3||(hero&&pt>=210&&pt<=215);
         }
         if(time<275.f) {
             return p.kit==1; // Act 5 Signal Hijack over Shenzhen Bay eVTOL
         }
         if(time<338.5f) {
-            return p.kit==2||p.kit==3||(p.kit==4&&((pt>=200&&pt<=207)||(pt>=210&&pt<=223)||(time>=335.5f&&pt>=230&&pt<=235)));
+            return p.kit==2||p.kit==3||(hero&&((pt>=200&&pt<=207)||(pt>=210&&pt<=227)||(time>=335.5f&&pt>=230&&pt<=235)));
         }
-        return p.kit==2||p.kit==3||(p.kit==4&&((pt>=210&&pt<=215)||(pt>=230&&pt<=235)));
+        return p.kit==2||p.kit==3||(hero&&((pt>=210&&pt<=215)||(pt>=230&&pt<=235)));
     }
     DrawConstants transform(const Part& p,const FrameContext& f,const M1CameraState& cam) {
         DrawConstants dc{};float scale=1,x=0,y=0,z=0,yaw=0,pitch=0,roll=0;
@@ -106,11 +107,19 @@ struct TrilogyMeshRenderer::Impl {
             roll=-0.24f*(1.f-sHover);
         }
         if(p.kit==2) {scale=.080f;x=18.5f;z=60.0f;}
-        if(p.kit==3) {x=0;y=5.85f;z=5.5f;scale=1.05f;yaw=-.10f;if(p.sub.part>=10&&p.sub.part<=16)scale*=.35f+.65f*cam.revealOpen01;}
-        if(p.kit==4) {
+        if(p.kit==3) {
+            x=0;y=5.85f;z=5.5f;scale=1.05f;yaw=-.10f;
+            if(visualMode==ShowVisualMode::FullFilm360s) {
+                const float care=smoother((time-336.f)/8.5f);
+                scale*=1.f-.82f*care;x=-1.2f*care;y-=1.3f*care;z+=1.8f*care;
+            }
+            if(p.sub.part>=10&&p.sub.part<=16)scale*=.35f+.65f*cam.revealOpen01;
+        }
+        if(p.kit>=4) {
             const uint32_t pt=p.sub.part;
             if(pt>=200&&pt<=207) {
-                yaw=0.055f*std::sin(time*0.45f+float(pt-200)*0.785398f);
+                // Grounded architectural feet: optical variation belongs in the material, not whole-vault sway.
+                yaw=0.f;
                 if(visualMode==ShowVisualMode::FullFilm360s&&time>=335.5f) {
                     y=-6.2f*smoother((time-335.5f)/3.0f);
                 }
@@ -118,6 +127,8 @@ struct TrilogyMeshRenderer::Impl {
                 if(visualMode==ShowVisualMode::FullFilm360s&&time<45.f) {
                     y=-4.5f*(1.f-smoother((time-30.5f)/7.5f));
                 }
+                if(visualMode==ShowVisualMode::FullFilm360s&&time>=335.5f)
+                    y=-9.f*smoother((time-335.5f)/7.f);
             } else if(pt>=216&&pt<=219) {
                 y=0.14f*std::sin(time*0.85f+float(pt-216)*1.15f);
                 if(visualMode==ShowVisualMode::FullFilm360s&&time>=335.5f) {
@@ -127,13 +138,14 @@ struct TrilogyMeshRenderer::Impl {
                 const float iris=std::clamp(f.moodIrisAngle,0.f,1.f);
                 const float dir=(pt&1u)?-1.f:1.f;
                 x=0.f; y=5.75f; z=5.50f;
-                scale=0.88f+0.28f*iris;
-                roll=dir*(time*0.32f+(iris-0.5f)*1.65f);
-                yaw=0.08f*std::sin(time*0.40f+float(pt-220));
+                scale=0.96f+0.08f*iris;
+                roll=dir*(0.04f*std::sin(time*.32f)+(iris-.5f)*.12f);
+                yaw=.018f*std::sin(time*.4f+float(pt-220));
             } else if(pt>=224&&pt<=227) {
                 const float localT=(visualMode==ShowVisualMode::SoloNPU)?std::fmod(time,45.f):(time-150.f);
                 const float bloom=smoother((localT-20.f)/6.5f);
-                y=-0.65f*(1.f-bloom);
+                // Rooted terraces stay on the floor; only foliage warmth is modulated by the director.
+                (void)bloom;
             } else if(pt>=230&&pt<=235) {
                 const float rise=smoother((time-335.5f)/6.5f);
                 y=-4.8f*(1.f-rise);
@@ -188,16 +200,25 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             vertices.insert(vertices.end(),mesh.vertices.begin(),mesh.vertices.end());
         }
         if(visualMode!=ShowVisualMode::M2Trilogy180s) {
-            Bmesh micro=buildEnamelMicrocosmKit();
-            for(auto sub:micro.submeshes) {sub.firstIndex+=static_cast<uint32_t>(indices.size());sub.firstVertex+=static_cast<uint32_t>(vertices.size());s.parts.push_back({sub,4u,{}});}
-            for(auto i:micro.indices)indices.push_back(i+static_cast<uint32_t>(vertices.size()));
-            vertices.insert(vertices.end(),micro.vertices.begin(),micro.vertices.end());
+            const char* heroes[]={"enamel_cathedral","microbial_sanctuary","dawn_alcove"};
+            for(uint32_t k=0;k<3;++k) {
+                Bmesh micro;std::string why;
+                if(fault||!loadBmesh(resolveResourcePath(std::string("assets/meshes/")+heroes[k]+".bmesh"),micro,&why)) {
+                    micro=buildEnamelMicrocosmKit();++s.fallbacks;
+                    const uint32_t lo=k==0?200u:(k==1?220u:230u),hi=k==0?219u:(k==1?227u:235u);
+                    std::erase_if(micro.submeshes,[&](const auto& sub){return sub.part<lo||sub.part>hi;});
+                    BOO_LOG_WARN("FilmMesh",std::string(heroes[k])+": deterministic fallback "+why);
+                }
+                for(auto sub:micro.submeshes) {sub.firstIndex+=static_cast<uint32_t>(indices.size());sub.firstVertex+=static_cast<uint32_t>(vertices.size());s.parts.push_back({sub,k+4u,{}});}
+                for(auto i:micro.indices)indices.push_back(i+static_cast<uint32_t>(vertices.size()));
+                vertices.insert(vertices.end(),micro.vertices.begin(),micro.vertices.end());
+            }
         }
         s.vb=buffer(d,vertices.size()*sizeof(BmeshVertex),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);upload(s.vb.Get(),vertices.data(),vertices.size()*sizeof(BmeshVertex));
         s.ib=buffer(d,indices.size()*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);upload(s.ib.Get(),indices.data(),indices.size()*4);
         D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=3;
         D3D12_ROOT_PARAMETER params[7]{};
-        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:24;}
+        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:28;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
         params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={1,&range};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
@@ -244,7 +265,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
     }catch(const std::exception& e) {if(error)*error=e.what();return false;}
 }
 bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
-    auto& s=*impl_;if(s.w==width&&s.h==height)return true;s.context.waitForGpu();
+    auto& s=*impl_;
+    if(!width||!height||!s.context.deviceRaw())return false;
+    if(s.w==width&&s.h==height)return s.context.checkDeviceHealthy();
+    if(!s.context.waitForGpu()||!s.context.checkDeviceHealthy())return false;
     try {
         auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=width;rd.Height=height;rd.DepthOrArraySize=1;rd.MipLevels=1;rd.Format=DXGI_FORMAT_D32_FLOAT;rd.SampleDesc.Count=1;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         D3D12_CLEAR_VALUE clear{};clear.Format=rd.Format;clear.DepthStencil.Depth=1;ComPtr<ID3D12Resource> depth;
@@ -293,9 +317,12 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         const bool isHijack=(s.visualMode==ShowVisualMode::FullFilm360s&&c.time>=245.f&&c.time<275.f);
         c.showFlags=1u|((f.edition==Edition::Midnight)?2u:0u)|(std::min<uint32_t>(camera.shotIndex,7u)<<2u);
         c.moodAccent=isHijack?0.5f:std::clamp(f.moodPaletteAccent,0.0f,1.0f);
+        c.moodBloom=isHijack?0.35f:std::clamp(f.moodBloomStrength,0.f,1.f);
+        c.moodLight=isHijack?0.35f:std::clamp(f.moodIntensity,0.f,1.f);
+        c.moodCut=isHijack?0.f:std::clamp(f.moodCutAccent,0.f,1.f);
     }
     c.pulse=camera.emissivePulse;
-    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,24,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,D3D12_GPU_DESCRIPTOR_HANDLE{tensor});cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,28,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,D3D12_GPU_DESCRIPTOR_HANDLE{tensor});cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->SetPipelineState(s.sky.Get());cmd->DrawInstanced(3,1,0,0);cmd->SetPipelineState(useRt?s.rt.Get():s.raster.Get());
     for(size_t i=0;i<s.parts.size();++i)if(inst[i].InstanceMask) {cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);}
     transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

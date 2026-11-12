@@ -68,6 +68,10 @@ public:
     bool popCommand(TransportCommand& outCmd);
     void setTitle(const std::string& utf8Title);
     void toggleBorderlessFullscreen();
+    void showGraphicsFailure(const std::string& reason);
+    bool paintGraphicsFailureFromWndProc();
+    void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
+    void fitFullscreenToMonitor();
 
     HWND hwnd() const noexcept { return hwnd_; }
     uint32_t clientWidth() const noexcept { return clientWidth_; }
@@ -88,6 +92,7 @@ private:
     bool resized_ = false;
     int windowedRect_[4] = {100, 100, 1380, 820};
     std::deque<TransportCommand> commandQueue_;
+    std::wstring graphicsFailureText_;
 };
 
 } // namespace boo
