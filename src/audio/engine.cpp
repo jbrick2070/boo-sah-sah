@@ -12,10 +12,16 @@
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <new>
 
 namespace boo {
 
@@ -186,10 +192,339 @@ AudioBandSnapshot computeAnalyticalAudioBands(
 }
 
 // ============================================================================
+// Dynamic Media Foundation MP3 / WAV / FLAC / M4A / AAC Decoder -> 48k Stereo
+// ============================================================================
+
+bool loadCustomAudioFile48k(
+    const std::filesystem::path& filePath,
+    CustomAudioTrack48k& outTrack,
+    std::string* outError,
+    bool injectFault) {
+    outTrack = {};
+    const std::string safeName = redactUserPath(filePath.string());
+    if (injectFault) {
+        if (outError) *outError = "Audio file fault injected (" + safeName + ")";
+        return false;
+    }
+    if (filePath.empty()) {
+        if (outError) *outError = "Empty audio file path";
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(filePath, ec) || !std::filesystem::is_regular_file(filePath, ec)) {
+        if (outError) *outError = "Audio file not found: " + safeName;
+        return false;
+    }
+    const uintmax_t fBytes = std::filesystem::file_size(filePath, ec);
+    if (ec || fBytes == 0 || fBytes > (512ULL * 1024ULL * 1024ULL)) {
+        if (outError) *outError = "Invalid or oversized audio file: " + safeName;
+        return false;
+    }
+
+    using PFN_MFCreateSourceReaderFromURL = HRESULT(STDAPICALLTYPE*)(
+        LPCWSTR pwszURL, IMFAttributes* pAttributes, IMFSourceReader** ppSourceReader);
+
+    HMODULE hMfRw = LoadLibraryExW(L"mfreadwrite.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hMfRw) {
+        if (outError) *outError = "Windows Media Foundation mfreadwrite.dll unavailable";
+        return false;
+    }
+    auto pfnCreateReader = reinterpret_cast<PFN_MFCreateSourceReaderFromURL>(
+        GetProcAddress(hMfRw, "MFCreateSourceReaderFromURL"));
+    if (!pfnCreateReader) {
+        FreeLibrary(hMfRw);
+        if (outError) *outError = "MFCreateSourceReaderFromURL entry point unavailable";
+        return false;
+    }
+
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool needCoUninit = SUCCEEDED(hrCo);
+    bool ok = false;
+
+    if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {
+        ComPtr<IMFSourceReader> reader;
+        const std::wstring wUrl = filePath.wstring();
+        if (SUCCEEDED(pfnCreateReader(wUrl.c_str(), nullptr, &reader)) && reader) {
+            (void)reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+            if (SUCCEEDED(reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), TRUE))) {
+                bool configured = false;
+
+                // Attempt 1: Ask Media Foundation to decode & resample directly to 48 kHz stereo float32
+                {
+                    ComPtr<IMFMediaType> req48k;
+                    if (SUCCEEDED(MFCreateMediaType(&req48k)) && req48k) {
+                        req48k->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                        req48k->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+                        req48k->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2u);
+                        req48k->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000u);
+                        req48k->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32u);
+                        req48k->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 8u);
+                        req48k->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48000u * 8u);
+                        if (SUCCEEDED(reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, req48k.Get()))) {
+                            configured = true;
+                        }
+                    }
+                }
+                // Attempt 2: Native rate/channel IEEE Float
+                if (!configured) {
+                    ComPtr<IMFMediaType> reqFlt;
+                    if (SUCCEEDED(MFCreateMediaType(&reqFlt)) && reqFlt) {
+                        reqFlt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                        reqFlt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+                        if (SUCCEEDED(reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, reqFlt.Get()))) {
+                            configured = true;
+                        }
+                    }
+                }
+                // Attempt 3: Native rate/channel 16-bit PCM
+                if (!configured) {
+                    ComPtr<IMFMediaType> reqPcm;
+                    if (SUCCEEDED(MFCreateMediaType(&reqPcm)) && reqPcm) {
+                        reqPcm->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                        reqPcm->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+                        reqPcm->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16u);
+                        if (SUCCEEDED(reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, reqPcm.Get()))) {
+                            configured = true;
+                        }
+                    }
+                }
+
+                ComPtr<IMFMediaType> curType;
+                if (configured &&
+                    SUCCEEDED(reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &curType)) &&
+                    curType) {
+                    GUID subType = GUID_NULL;
+                    UINT32 srcRate = 48000u;
+                    UINT32 srcCh = 2u;
+                    UINT32 srcBits = 32u;
+                    (void)curType->GetGUID(MF_MT_SUBTYPE, &subType);
+                    (void)curType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &srcRate);
+                    (void)curType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &srcCh);
+                    (void)curType->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &srcBits);
+
+                    const bool isFloat = (subType == MFAudioFormat_Float && srcBits == 32u);
+                    const bool isPcm16 = (subType == MFAudioFormat_PCM && srcBits == 16u);
+                    if ((isFloat || isPcm16) && srcRate >= 8000u && srcRate <= 192000u && srcCh >= 1u && srcCh <= 8u) {
+                        const uint64_t maxSrcFrames = static_cast<uint64_t>(srcRate) * 20ULL * 60ULL; // 20-minute cap
+                        std::vector<float> rawStereo;
+                        rawStereo.reserve(static_cast<size_t>(srcRate) * 180u * 2u);
+
+                        const size_t bytesPerSample = isFloat ? 4u : 2u;
+                        const size_t frameStrideBytes = bytesPerSample * static_cast<size_t>(srcCh);
+
+                        while ((rawStereo.size() / 2u) < maxSrcFrames) {
+                            DWORD flags = 0;
+                            ComPtr<IMFSample> sample;
+                            const HRESULT hrRead = reader->ReadSample(
+                                static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
+                                0, nullptr, &flags, nullptr, &sample);
+                            if (FAILED(hrRead) || (flags & MF_SOURCE_READERF_ERROR) != 0) {
+                                break;
+                            }
+                            if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0 && !sample) {
+                                break;
+                            }
+                            if (sample) {
+                                ComPtr<IMFMediaBuffer> buf;
+                                if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buf)) && buf) {
+                                    BYTE* ptr = nullptr;
+                                    DWORD curLen = 0;
+                                    if (SUCCEEDED(buf->Lock(&ptr, nullptr, &curLen)) && ptr && curLen >= frameStrideBytes) {
+                                        const size_t nFrames = std::min<size_t>(
+                                            curLen / frameStrideBytes,
+                                            static_cast<size_t>(maxSrcFrames - (rawStereo.size() / 2u)));
+                                        for (size_t f = 0; f < nFrames; ++f) {
+                                            float sL = 0.0f, sR = 0.0f;
+                                            if (isFloat) {
+                                                const float* fp = reinterpret_cast<const float*>(ptr + f * frameStrideBytes);
+                                                sL = fp[0];
+                                                sR = (srcCh >= 2u) ? fp[1] : fp[0];
+                                            } else {
+                                                const int16_t* ip = reinterpret_cast<const int16_t*>(ptr + f * frameStrideBytes);
+                                                sL = static_cast<float>(ip[0]) * (1.0f / 32768.0f);
+                                                sR = static_cast<float>((srcCh >= 2u) ? ip[1] : ip[0]) * (1.0f / 32768.0f);
+                                            }
+                                            if (!std::isfinite(sL)) sL = 0.0f;
+                                            if (!std::isfinite(sR)) sR = 0.0f;
+                                            rawStereo.push_back(std::clamp(sL, -1.25f, 1.25f));
+                                            rawStereo.push_back(std::clamp(sR, -1.25f, 1.25f));
+                                        }
+                                        buf->Unlock();
+                                    }
+                                }
+                            }
+                            if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+                                break;
+                            }
+                        }
+
+                        const uint64_t srcFrames = rawStereo.size() / 2u;
+                        if (srcFrames >= 480u) {
+                            if (srcRate == 48000u) {
+                                outTrack.interleavedStereo = std::move(rawStereo);
+                                outTrack.frameCount = srcFrames;
+                            } else {
+                                const uint64_t dstFrames = std::max<uint64_t>(
+                                    480u, (srcFrames * 48000ULL) / static_cast<uint64_t>(srcRate));
+                                outTrack.interleavedStereo.resize(static_cast<size_t>(dstFrames) * 2u);
+                                const double ratio = static_cast<double>(srcRate) / 48000.0;
+                                auto atCh = [&](int64_t idx, size_t ch) noexcept -> float {
+                                    const uint64_t cIdx = static_cast<uint64_t>(
+                                        std::clamp<int64_t>(idx, 0, static_cast<int64_t>(srcFrames) - 1));
+                                    return rawStereo[static_cast<size_t>(cIdx) * 2u + ch];
+                                };
+                                for (uint64_t d = 0; d < dstFrames; ++d) {
+                                    const double sp = static_cast<double>(d) * ratio;
+                                    const int64_t i1 = static_cast<int64_t>(std::floor(sp));
+                                    const float frac = static_cast<float>(sp - static_cast<double>(i1));
+                                    for (size_t ch = 0; ch < 2u; ++ch) {
+                                        const float p0 = atCh(i1 - 1, ch);
+                                        const float p1 = atCh(i1 + 0, ch);
+                                        const float p2 = atCh(i1 + 1, ch);
+                                        const float p3 = atCh(i1 + 2, ch);
+                                        const float a = -0.5f * p0 + 1.5f * p1 - 1.5f * p2 + 0.5f * p3;
+                                        const float b = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+                                        const float c = -0.5f * p0 + 0.5f * p2;
+                                        const float v = ((a * frac + b) * frac + c) * frac + p1;
+                                        outTrack.interleavedStereo[static_cast<size_t>(d) * 2u + ch] = std::clamp(v, -1.0f, 1.0f);
+                                    }
+                                }
+                                outTrack.frameCount = dstFrames;
+                            }
+
+                            // Peak-normalize safely so mastered Suno MP3s & quiet WAVs both sit cleanly at ~0.92 peak
+                            float peak = 0.0f;
+                            for (float s : outTrack.interleavedStereo) {
+                                peak = std::max(peak, std::abs(s));
+                            }
+                            if (peak > 1e-4f) {
+                                const float normScale = std::clamp(0.92f / peak, 0.35f, 3.5f);
+                                for (float& s : outTrack.interleavedStereo) {
+                                    s = std::clamp(s * normScale, -0.98f, 0.98f);
+                                }
+                            }
+                            outTrack.label = filePath.filename().string();
+                            ok = true;
+                        }
+                    }
+                }
+            }
+        }
+        MFShutdown();
+    }
+
+    if (needCoUninit) CoUninitialize();
+    FreeLibrary(hMfRw);
+
+    if (!ok && outError && outError->empty()) {
+        *outError = "Failed to decode audio stream from " + safeName;
+    }
+    return ok;
+}
+
+// ============================================================================
 // AudioSynthesizer48k — Deterministic Multi-Voice C1 Crossfade Synthesizer
 // ============================================================================
 
-AudioSynthesizer48k::AudioSynthesizer48k() noexcept {
+struct AudioSynthesizer48k::StereoHallState {
+    static constexpr size_t kComb0L = 1597, kComb0R = 1621;
+    static constexpr size_t kComb1L = 1823, kComb1R = 1847;
+    static constexpr size_t kComb2L = 2089, kComb2R = 2113;
+    static constexpr size_t kComb3L = 2357, kComb3R = 2381;
+    static constexpr size_t kAp0L   = 347,  kAp0R   = 359;
+    static constexpr size_t kAp1L   = 113,  kAp1R   = 127;
+
+    std::array<float, kComb0L> c0L{}; std::array<float, kComb0R> c0R{};
+    std::array<float, kComb1L> c1L{}; std::array<float, kComb1R> c1R{};
+    std::array<float, kComb2L> c2L{}; std::array<float, kComb2R> c2R{};
+    std::array<float, kComb3L> c3L{}; std::array<float, kComb3R> c3R{};
+    std::array<float, kAp0L>   ap0L{}; std::array<float, kAp0R>  ap0R{};
+    std::array<float, kAp1L>   ap1L{}; std::array<float, kAp1R>  ap1R{};
+    size_t i0L = 0, i0R = 0, i1L = 0, i1R = 0, i2L = 0, i2R = 0, i3L = 0, i3R = 0;
+    size_t ia0L = 0, ia0R = 0, ia1L = 0, ia1R = 0;
+    float damp0L = 0.0f, damp0R = 0.0f;
+    float damp1L = 0.0f, damp1R = 0.0f;
+    float damp2L = 0.0f, damp2R = 0.0f;
+    float damp3L = 0.0f, damp3R = 0.0f;
+    float silkL = 0.0f, silkR = 0.0f;
+
+    void clear() noexcept {
+        c0L.fill(0.0f); c0R.fill(0.0f);
+        c1L.fill(0.0f); c1R.fill(0.0f);
+        c2L.fill(0.0f); c2R.fill(0.0f);
+        c3L.fill(0.0f); c3R.fill(0.0f);
+        ap0L.fill(0.0f); ap0R.fill(0.0f);
+        ap1L.fill(0.0f); ap1R.fill(0.0f);
+        i0L = i0R = i1L = i1R = i2L = i2R = i3L = i3R = 0;
+        ia0L = ia0R = ia1L = ia1R = 0;
+        damp0L = damp0R = damp1L = damp1R = damp2L = damp2R = damp3L = damp3R = 0.0f;
+        silkL = silkR = 0.0f;
+    }
+
+    void process(float inL, float inR, float& outWetL, float& outWetR) noexcept {
+        constexpr float kFb   = 0.79f;
+        constexpr float kDamp = 0.34f;
+        const float sendL = (inL * 0.78f + inR * 0.22f) * 0.24f;
+        const float sendR = (inR * 0.78f + inL * 0.22f) * 0.24f;
+
+        const float y0L = c0L[i0L], y0R = c0R[i0R];
+        damp0L = y0L * (1.0f - kDamp) + damp0L * kDamp;
+        damp0R = y0R * (1.0f - kDamp) + damp0R * kDamp;
+        c0L[i0L] = sendL + damp0L * kFb;
+        c0R[i0R] = sendR + damp0R * kFb;
+
+        const float y1L = c1L[i1L], y1R = c1R[i1R];
+        damp1L = y1L * (1.0f - kDamp) + damp1L * kDamp;
+        damp1R = y1R * (1.0f - kDamp) + damp1R * kDamp;
+        c1L[i1L] = sendL + damp1L * kFb;
+        c1R[i1R] = sendR + damp1R * kFb;
+
+        const float y2L = c2L[i2L], y2R = c2R[i2R];
+        damp2L = y2L * (1.0f - kDamp) + damp2L * kDamp;
+        damp2R = y2R * (1.0f - kDamp) + damp2R * kDamp;
+        c2L[i2L] = sendL + damp2L * kFb;
+        c2R[i2R] = sendR + damp2R * kFb;
+
+        const float y3L = c3L[i3L], y3R = c3R[i3R];
+        damp3L = y3L * (1.0f - kDamp) + damp3L * kDamp;
+        damp3R = y3R * (1.0f - kDamp) + damp3R * kDamp;
+        c3L[i3L] = sendL + damp3L * kFb;
+        c3R[i3R] = sendR + damp3R * kFb;
+
+        if (++i0L >= kComb0L) i0L = 0;
+        if (++i0R >= kComb0R) i0R = 0;
+        if (++i1L >= kComb1L) i1L = 0;
+        if (++i1R >= kComb1R) i1R = 0;
+        if (++i2L >= kComb2L) i2L = 0;
+        if (++i2R >= kComb2R) i2R = 0;
+        if (++i3L >= kComb3L) i3L = 0;
+        if (++i3R >= kComb3R) i3R = 0;
+
+        float sumL = y0L + y1L + y2L + y3L;
+        float sumR = y0R + y1R + y2R + y3R;
+
+        // 2-stage stereo-decorrelated Schroeder allpass diffusion
+        constexpr float kApG = 0.5f;
+        const float b0L = ap0L[ia0L], b0R = ap0R[ia0R];
+        ap0L[ia0L] = sumL + b0L * kApG;
+        ap0R[ia0R] = sumR + b0R * kApG;
+        sumL = b0L - sumL * kApG;
+        sumR = b0R - sumR * kApG;
+        if (++ia0L >= kAp0L) ia0L = 0;
+        if (++ia0R >= kAp0R) ia0R = 0;
+
+        const float b1L = ap1L[ia1L], b1R = ap1R[ia1R];
+        ap1L[ia1L] = sumL + b1L * kApG;
+        ap1R[ia1R] = sumR + b1R * kApG;
+        outWetL = b1L - sumL * kApG;
+        outWetR = b1R - sumR * kApG;
+        if (++ia1L >= kAp1L) ia1L = 0;
+        if (++ia1R >= kAp1R) ia1R = 0;
+    }
+};
+
+AudioSynthesizer48k::AudioSynthesizer48k() noexcept
+    : hall_(std::shared_ptr<StereoHallState>(new (std::nothrow) StereoHallState())) {
     reset(0, 0.0f);
 }
 
@@ -217,6 +552,7 @@ void AudioSynthesizer48k::reset(uint64_t seedSample, float initialGain) noexcept
     voices_[0].currentWeight = 1.0f;
     voices_[0].fadeStartWeight = 1.0f;
     voices_[0].fadePos = kCrossfadeSamples;
+    voices_[0].voiceTrack = customTrack_;
 
     hasRenderedAnyAudio_ = (initialGain > 1e-6f);
     editionMidnightMix_ = (targetEdition_ == Edition::Midnight) ? 1.0f : 0.0f;
@@ -232,6 +568,9 @@ void AudioSynthesizer48k::reset(uint64_t seedSample, float initialGain) noexcept
 
     lp180_ = 0.0f;
     lp2400_ = 0.0f;
+    if (hall_) {
+        hall_->clear();
+    }
 }
 
 uint64_t AudioSynthesizer48k::primarySamplePosition() const noexcept {
@@ -250,11 +589,13 @@ void AudioSynthesizer48k::seekTo(uint64_t targetSample) noexcept {
         voices_[0].currentWeight = 1.0f;
         voices_[0].fadeStartWeight = 1.0f;
         voices_[0].fadePos = kCrossfadeSamples;
+        voices_[0].voiceTrack = customTrack_;
         return;
     }
 
     const VoiceSlot& curPri = voices_[primaryVoiceIndex_];
-    if (curPri.active && !curPri.fadingOut && curPri.phaseSample == targetSample) {
+    if (curPri.active && !curPri.fadingOut &&
+        curPri.phaseSample == targetSample && curPri.voiceTrack == customTrack_) {
         return;
     }
 
@@ -310,6 +651,7 @@ void AudioSynthesizer48k::seekTo(uint64_t targetSample) noexcept {
     incoming.currentWeight = 0.0f;
     incoming.fadeStartWeight = 0.0f;
     incoming.fadePos = 0;
+    incoming.voiceTrack = customTrack_;
     primaryVoiceIndex_ = chosen;
 }
 
@@ -318,191 +660,291 @@ void AudioSynthesizer48k::evaluateVoiceSample(
     float& outLeft,
     float& outRight,
     float& outMono) noexcept {
-    const double t = static_cast<double>(v.phaseSample) * kInvSr;
-    if (durationSamples_ == 17280000 || durationSamples_ == 2640000 ||
-        durationSamples_ == 2400000  || durationSamples_ == 2160000) {
-        const double durSec = static_cast<double>(durationSamples_) * kInvSr;
-        const double localU = std::fmod(t, durSec);
-        auto fade = [](double x) noexcept { return 0.5 - 0.5 * std::cos(kPi * std::clamp(x, 0.0, 1.0)); };
-        auto sine = [&](double hz) noexcept { return std::sin(kTwoPi * hz * t); };
-
-        // Map standalone solo loops directly into their matching movement in the 360.0s 7-act score
-        double u = localU;
-        if (durationSamples_ == 2640000)      u = 45.0  + localU; // SoloRT [45..100s)
-        else if (durationSamples_ == 2400000) u = 195.0 + localU; // SoloCUDA / SoloTensor 50s loop
-        else if (durationSamples_ == 2160000) u = 150.0 + localU; // SoloNPU [150..195s)
-
-        const double seam = fade(localU / 0.050) * fade((durSec - localU) / 0.050);
-        const double midMix = std::clamp(static_cast<double>(editionMidnightMix_), 0.0, 1.0);
-        const double famMix = 1.0 - midMix;
-
-        // Smooth 4.0s crossfades across all 7 act boundaries
-        const double c1 = fade((u - 43.0) / 4.0);
-        const double c2 = fade((u - 98.0) / 4.0);
-        const double c3 = fade((u - 148.0) / 4.0);
-        const double c4 = fade((u - 193.0) / 4.0);
-        const double c5 = fade((u - 243.0) / 4.0);
-        const double c6 = fade((u - 273.0) / 4.0);
-
-        const double w0 = 1.0 - c1;
-        const double w1 = c1 * (1.0 - c2);
-        const double w2 = c2 * (1.0 - c3);
-        const double w3 = c3 * (1.0 - c4);
-        const double w4 = c4 * (1.0 - c5);
-        const double w5 = c5 * (1.0 - c6);
-        const double w6 = c6;
-
-        // Filtered rain texture for Act 0 Taipei opening
-        v.lfsr = (v.lfsr >> 1u) ^ (((v.lfsr & 1u) != 0u) ? 0xB400u : 0u);
-        const float white = static_cast<float>((static_cast<double>(v.lfsr & 0xFFFFu) / 32768.0) - 1.0);
-        v.rainLp += 0.16f * (white - v.rainLp);
-
-        // Act 0 [0..45s): Synth-noir city-pop (Dmaj9 in Family vs sultry Bm9 in Midnight) + 36.0s Enamel Scale Reveal swell
-        const double rev0 = std::exp(-std::pow((u - 36.0) / 4.2, 2.0));
-        const double padFam = 0.095 * sine(146.832) + 0.068 * sine(184.997) + 0.062 * sine(220.000) + 0.048 * sine(277.183) + 0.040 * sine(329.628);
-        const double padMid = 0.098 * sine(123.471) + 0.072 * sine(146.832) + 0.060 * sine(184.997) + 0.050 * sine(220.000) + 0.042 * sine(277.183);
-        const double act0 = (padFam * famMix + padMid * midMix) * (0.72 + 0.28 * sine(0.5))
-                          + 0.055 * (sine(73.416) * famMix + sine(61.735) * midMix) * (0.55 + 0.45 * sine(1.5))
-                          + rev0 * (0.045 * sine(587.330) + 0.032 * sine(880.000))
-                          + static_cast<double>(v.rainLp) * 0.014 * (1.0 - fade((u - 32.0) / 8.0));
-
-        // Act 1 [45..100s): Crystal percussion & optical mirror pulses
-        const double bellGate = std::pow(0.5 + 0.5 * sine(3.0), 4.0);
-        const double pulseGate = std::pow(0.5 + 0.5 * sine(2.0), 3.0);
-        const double act1 = pulseGate * (0.085 * sine(110.000) + 0.045 * sine(220.000))
-                          + bellGate * (0.048 * sine(880.000) + 0.036 * (sine(1108.731) * famMix + sine(1046.502) * midMix) + 0.024 * sine(1318.510))
-                          + 0.042 * (sine(277.183) * famMix + sine(261.626) * midMix);
-
-        // Act 2 [100..150s): Neural Velvet lush harmonic electronica
-        const double swell2 = 0.65 + 0.35 * sine(0.25);
-        const double act2 = (0.090 * sine(97.999) + 0.072 * sine(195.998) + 0.058 * (sine(246.942) * famMix + sine(233.082) * midMix)
-                           + 0.048 * sine(293.665) + 0.036 * sine(369.994) + 0.025 * sine(587.330)) * swell2;
-
-        // Act 3 [150..195s): Madame N suspense -> warm jazz-lounge bloom across 175.0s midpoint_ecology_reveal
-        const double jazzMorph = fade((u - 169.0) / 8.0);
-        const double rev1 = std::exp(-std::pow((u - 175.0) / 4.5, 2.0));
-        // Integrate sinusoidal frequency modulation analytically. Multiplying a
-        // time-varying frequency by absolute film time makes late seeks produce
-        // ultrasonic phase slopes, and edition interpolation produces clicks.
-        const auto fm = [&](double carrier, double depth, double rate) noexcept {
-            return std::sin(kTwoPi * carrier * t - (depth / rate) * std::cos(kTwoPi * rate * t));
-        };
-        const double susp3 = 0.088 * sine(82.407) + 0.052 * sine(123.471) + 0.036 * fm(246.942, 0.8, 3.5);
-        const double jazzFam = 0.092 * fm(103.999, 6.0, 1.75) + 0.068 * sine(195.998) + 0.055 * sine(246.942) + 0.046 * sine(369.994) + 0.034 * sine(440.000);
-        const double jazzMid = 0.094 * fm(97.499, 5.0, 1.75) + 0.070 * sine(184.997) + 0.056 * sine(220.000) + 0.048 * sine(329.628) + 0.036 * sine(415.305);
-        const double act3 = susp3 * (1.0 - jazzMorph)
-                          + (jazzFam * famMix + jazzMid * midMix) * jazzMorph
-                          + rev1 * (0.038 * sine(739.989) + 0.026 * sine(987.767));
-
-        // Act 4 [195..245s): Particle Mutiny — Jazz-Funk -> Highlife guitar-bells -> Demoscene Techno
-        const double hlMorph = fade((u - 210.0) / 5.0);
-        const double tcMorph = fade((u - 227.0) / 5.0);
-        const double funkGate = std::pow(0.5 + 0.5 * sine(2.5), 3.0);
-        const double polyGate = std::pow(0.5 + 0.5 * std::sin(kTwoPi * 3.75 * t + 0.8), 4.0);
-        const double techKick = std::pow(0.5 + 0.5 * sine(2.2), 6.0);
-        const double funk4 = funkGate * (0.105 * sine(73.416) + 0.062 * sine(146.832)) + 0.048 * (sine(293.665) * famMix + sine(261.626) * midMix);
-        const double high4 = 0.085 * sine(97.999) + polyGate * (0.056 * sine(587.330) + 0.042 * sine(783.991) + 0.030 * sine(987.767));
-        const double tech4 = techKick * 0.125 * sine(65.406) + 0.064 * sine(130.813) + polyGate * 0.046 * sine(523.251);
-        const double act4 = funk4 * (1.0 - hlMorph) + high4 * hlMorph * (1.0 - tcMorph) + tech4 * tcMorph;
-
-        // Act 5 [245..275s): Signal Hijack broken-beat carrier interference (strictly C1 continuous)
-        const double brkGate = std::pow(0.5 + 0.5 * std::sin(kTwoPi * 2.75 * t + 0.5 * sine(0.5)), 4.0);
-        const double fmMod = 14.0 * sine(55.0);
-        const double act5 = brkGate * 0.105 * sine(73.416)
-                          + 0.052 * std::sin(kTwoPi * 220.0 * t + fmMod * 0.08)
-                          + 0.034 * sine(659.255);
-
-        // Act 6 [275..360s): Silicon Rebellion grand tutti -> 342.0s serene dawn mirror reveal -> warm tonic end-card hold
-        const double dawnMorph = fade((u - 337.0) / 7.5);
-        const double cardHold  = fade((u - 350.5) / 3.5);
-        const double rev2 = std::exp(-std::pow((u - 342.0) / 4.2, 2.0));
-        const double tuttiDrive = std::pow(0.5 + 0.5 * sine(2.0), 3.0);
-        const double tutti6 = 0.105 * sine(73.416) * (0.65 + 0.35 * tuttiDrive)
-                            + 0.074 * sine(146.832) + 0.062 * sine(220.000)
-                            + 0.054 * (sine(277.183) * famMix + sine(261.626) * midMix)
-                            + 0.046 * sine(440.000) + bellGate * 0.038 * sine(880.000);
-        const double dawn6  = (0.088 * sine(146.832) + 0.066 * sine(184.997) + 0.058 * sine(220.000) + 0.046 * sine(293.665))
-                            * (1.0 - 0.32 * cardHold)
-                            + rev2 * (0.042 * sine(880.000) + 0.028 * sine(1174.659));
-        const double act6 = tutti6 * (1.0 - dawnMorph) + dawn6 * dawnMorph;
-
-        const double total = (act0 * w0 + act1 * w1 + act2 * w2 + act3 * w3 + act4 * w4 + act5 * w5 + act6 * w6) * seam;
-        outMono = static_cast<float>(total);
-        const float pan = static_cast<float>(0.14 * sine(0.14));
-        outLeft  = outMono * (1.0f - pan);
-        outRight = outMono * (1.0f + pan);
+    // 1. User-Imported Custom MP3 / WAV / FLAC / M4A Soundtrack (Suno / Studio Audio)
+    const CustomAudioTrack48k* trk = v.voiceTrack ? v.voiceTrack : customTrack_;
+    if (v.voiceTrack != nullptr && trk->frameCount > 0u &&
+        trk->interleavedStereo.size() >= trk->frameCount * 2u) {
+        const uint64_t N = trk->frameCount;
+        const uint64_t idx = v.phaseSample % N;
+        float seam = 1.0f;
+        if (N > 6000u) {
+            constexpr uint64_t kSeamFrames = 2400u; // 50 ms C1 loop crossfade seam
+            if (idx < kSeamFrames) {
+                const float u = static_cast<float>(idx) / static_cast<float>(kSeamFrames);
+                seam = 0.5f - 0.5f * std::cos(static_cast<float>(kPi) * u);
+            } else if (N - idx < kSeamFrames) {
+                const float u = static_cast<float>(N - idx) / static_cast<float>(kSeamFrames);
+                seam = 0.5f - 0.5f * std::cos(static_cast<float>(kPi) * u);
+            }
+        }
+        constexpr float kCustomGain = 4.2f;
+        const float sL = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 0u] * seam * kCustomGain;
+        const float sR = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 1u] * seam * kCustomGain;
+        outLeft  = sL;
+        outRight = sR;
+        outMono  = 0.5f * (sL + sR);
         return;
     }
-    if(durationSamples_ == 8640000) {
-        const double u=std::fmod(t,180.0);
-        auto fade=[](double x){return .5-.5*std::cos(kPi*std::clamp(x,0.,1.));};
-        auto sine=[&](double hz){return std::sin(kTwoPi*hz*t);};
-        const double a=fade((u-58)/4),b=fade((u-118)/4),finale=fade((u-169)/3);
-        const double rail=std::pow(.5+.5*sine(2.0),8),arp=std::pow(.5+.5*sine(3.0),4);
-        const double minor=.10*sine(73.416)+.055*sine(174.614)+.04*sine(261.626)+.025*sine(311.127);
-        const double metal=rail*(.025*sine(587.33)+.012*sine(831.0));
-        const double solar=(.09*sine(146.832)+.07*sine(184.997)+.06*sine(220)+.04*sine(329.628))*(.75+.25*sine(.125));
-        const double aerial=arp*(.035*sine(440)+.025*sine(659.255));
-        const double sanctuary=.10*sine(146.832)+.07*sine(184.997)+.065*sine(277.183)+.045*sine(329.628);
-        const double bloom=std::exp(-std::pow((u-167.5)/5,2))*(.03*sine(880)+.018*sine(1318.51));
-        const double chord=finale*(.07*sine(73.416)+.035*sine(293.665)+.025*sine(440));
-        const double seam=fade(u/.05)*fade((180-u)/.05);
-        outMono=float(((minor+metal)*(1-a)+(solar+aerial)*a*(1-b)+(sanctuary+bloom+chord)*b)*seam);
-        const float pan=float(.12*sine(.1));outLeft=outMono*(1-pan);outRight=outMono*(1+pan);return;
+
+    // 2. Built-In NVIDIA RTX Showcase Polyphonic Score (CS-80 Stereo Ensemble + DX7 Glassy Rhodes +
+    //    Crystal Bell Arpeggiator + Cantabile Lead + Analog Sub-Bass & Heartbeat Pulse)
+    const double t = static_cast<double>(v.phaseSample) * kInvSr;
+    auto fade = [](double x) noexcept {
+        return 0.5 - 0.5 * std::cos(kPi * std::clamp(x, 0.0, 1.0));
+    };
+    auto osc = [](double hz, double timeSec) noexcept {
+        const double cyc = timeSec * hz;
+        return std::sin(kTwoPi * (cyc - std::floor(cyc)));
+    };
+
+    const double durSec = std::max(1.0, static_cast<double>(durationSamples_) * kInvSr);
+    const double localU = std::fmod(t, durSec);
+    const double seam = fade(localU / 0.050) * fade((durSec - localU) / 0.050);
+
+    const double midMix = std::clamp(static_cast<double>(editionMidnightMix_), 0.0, 1.0);
+    const double famMix = 1.0 - midMix;
+
+    // Map M1 60s, M2 180s, Solo loops, and FullFilm 360s onto unified 360s 7-act orchestration envelope
+    double u = localU;
+    if (durationSamples_ == 2640000) {
+        u = 45.0 + localU;  // SoloRT [45..100s)
+    } else if (durationSamples_ == 2400000) {
+        u = 195.0 + localU; // SoloCUDA / SoloTensor 50s loop
+    } else if (durationSamples_ == 2160000) {
+        u = 150.0 + localU; // SoloNPU [150..195s)
+    } else if (durationSamples_ == 8640000) {
+        // M2 180s Trilogy -> Shanghai (Act 0..1), Shenzhen (Act 2..4), Taipei Sanctuary (Act 6)
+        u = localU * 2.0;
+    } else if (durationSamples_ != 17280000) {
+        // M1 60s Taipei Slice -> Rain Noir -> Architectural Bass -> Glass Orchid Dawn Finale
+        const double m1a = fade((localU - 18.0) / 4.0);
+        const double m1b = fade((localU - 38.0) / 4.0);
+        u = localU * (1.0 - m1a) + (55.0 + localU) * m1a * (1.0 - m1b) + (300.0 + localU) * m1b;
     }
-    const double t60 = std::fmod(t, 60.0);
 
-    // 50 ms raised-cosine seam across the 60.0s slice loop boundary
-    double loopSeam = 1.0;
-    if (t60 < 0.050) {
-        loopSeam = 0.5 - 0.5 * std::cos(kPi * (t60 / 0.050));
-    } else if (t60 > 59.950) {
-        loopSeam = 0.5 - 0.5 * std::cos(kPi * ((60.0 - t60) / 0.050));
+    // Smooth 4.0s raised-cosine crossfades across all 7 film acts
+    const double c1 = fade((u - 43.0) / 4.0);
+    const double c2 = fade((u - 98.0) / 4.0);
+    const double c3 = fade((u - 148.0) / 4.0);
+    const double c4 = fade((u - 193.0) / 4.0);
+    const double c5 = fade((u - 243.0) / 4.0);
+    const double c6 = fade((u - 273.0) / 4.0);
+
+    const double w0 = 1.0 - c1;
+    const double w1 = c1 * (1.0 - c2);
+    const double w2 = c2 * (1.0 - c3);
+    const double w3 = c3 * (1.0 - c4);
+    const double w4 = c4 * (1.0 - c5);
+    const double w5 = c5 * (1.0 - c6);
+    const double w6 = c6;
+
+    const double rev0 = std::exp(-std::pow((u - 36.0) / 4.5, 2.0));
+    const double rev1 = std::exp(-std::pow((u - 175.0) / 5.0, 2.0));
+    const double rev2 = std::exp(-std::pow((u - 342.0) / 5.5, 2.0));
+    const double jazzMorph = fade((u - 166.0) / 8.0);
+    const double dawnMorph = fade((u - 335.0) / 7.0);
+
+    // Per-act dynamic orchestration balances (ensuring 343.5s Dawn Bathroom Studio is immediately lush!)
+    const double padAmt =
+        0.94 * w0 + 0.78 * w1 + 1.04 * w2 + 0.92 * w3 + 0.80 * w4 + 0.72 * w5 + 0.98 * w6;
+    const double rhodesAmt =
+        0.82 * w0 + 0.92 * w1 + 0.86 * w2 + (0.68 + 0.30 * jazzMorph) * w3 + 0.94 * w4 + 0.78 * w5 + 0.92 * w6;
+    const double crystalAmt =
+        (0.28 + 0.48 * rev0) * w0 + 0.88 * w1 + 0.56 * w2 + (0.24 + 0.52 * jazzMorph) * w3 +
+        0.92 * w4 + 0.68 * w5 + (0.84 * (1.0 - dawnMorph) + 0.58 * dawnMorph) * w6;
+    const double pulseAmt =
+        0.48 * w0 + 0.74 * w1 + 0.58 * w2 + (0.42 + 0.34 * jazzMorph) * w3 +
+        1.00 * w4 + 0.92 * w5 + (0.94 * (1.0 - dawnMorph) + 0.46 * dawnMorph) * w6;
+    const double leadAmt =
+        (0.22 + 0.68 * rev0) * w0 + 0.35 * w1 + 0.68 * w2 + (0.30 + 0.52 * jazzMorph + 0.25 * rev1) * w3 +
+        0.64 * w4 + 0.42 * w5 + (0.78 + 0.22 * rev2) * w6;
+
+    // 4-Chord Harmonic Progression (32.0s cycle = 8.0s per chord, smooth 1.44s C1 voice-leading)
+    // Family:   Dmaj9 -> Bm11 -> Gmaj9(#11) -> A13sus4 (Warm Lydian / Marbles RTX Dawn)
+    // Midnight: Bm9   -> Gmaj7(#11) -> Em9  -> F#7sus4(b9) (Sultry Neo-Noir Taipei Rain)
+    static constexpr double kFamBass[4] = {73.416, 61.735, 48.999, 55.000};
+    static constexpr double kMidBass[4] = {61.735, 48.999, 41.203, 46.249};
+
+    static constexpr double kFamPad[4][5] = {
+        {146.832, 184.997, 220.000, 277.183, 329.628}, // Dmaj9
+        {123.471, 184.997, 220.000, 277.183, 369.994}, // Bm11
+        {146.832, 184.997, 220.000, 246.942, 329.628}, // Gmaj9#11
+        {146.832, 164.814, 195.998, 246.942, 369.994}  // A13sus4
+    };
+    static constexpr double kMidPad[4][5] = {
+        {123.471, 146.832, 184.997, 220.000, 277.183}, // Bm9
+        {97.999,  146.832, 184.997, 220.000, 293.665}, // Gmaj7#11
+        {110.000, 146.832, 184.997, 195.998, 246.942}, // Em9
+        {138.591, 164.814, 195.998, 220.000, 277.183}  // F#7sus4
+    };
+
+    static constexpr double kFamArp[4][6] = {
+        {293.665, 369.994, 440.000, 554.365, 659.255, 739.989},
+        {246.942, 369.994, 440.000, 554.365, 659.255, 739.989},
+        {293.665, 369.994, 440.000, 493.883, 659.255, 739.989},
+        {293.665, 329.628, 391.995, 493.883, 659.255, 739.989}
+    };
+    static constexpr double kMidArp[4][6] = {
+        {246.942, 293.665, 369.994, 440.000, 554.365, 659.255},
+        {246.942, 293.665, 369.994, 440.000, 554.365, 587.330},
+        {220.000, 293.665, 329.628, 391.995, 493.883, 659.255},
+        {277.183, 329.628, 391.995, 440.000, 554.365, 659.255}
+    };
+
+    const double progPos = std::fmod(t, 32.0) * 0.125; // [0.0, 4.0)
+    const int cIdx0 = static_cast<int>(progPos) & 3;
+    const int cIdx1 = (cIdx0 + 1) & 3;
+    const double cFrac = progPos - std::floor(progPos);
+    const double cXfade = (cFrac <= 0.82) ? 0.0 : fade((cFrac - 0.82) / 0.18);
+    const double cw0 = 1.0 - cXfade;
+    const double cw1 = cXfade;
+
+    // A. Cinematic 120 BPM Quarter-Note Sub-Kick Heartbeat & Warm Analog Sub-Bass
+    const uint64_t beatStep = static_cast<uint64_t>(t * 2.0);
+    const double beatT = t - static_cast<double>(beatStep) * 0.50;
+    const double kickEnv = fade(beatT / 0.012) * std::exp(-beatT * 9.5) * fade((0.50 - beatT) / 0.024);
+    const double kickPh = kTwoPi * (38.0 * beatT + (24.0 / 20.0) * (1.0 - std::exp(-20.0 * beatT)));
+    const double subKick = 0.155 * pulseAmt * kickEnv * std::sin(kickPh);
+
+    auto evalBassChord = [&](int ci) noexcept -> double {
+        double b = 0.0;
+        if (famMix > 1e-5) {
+            const double bf = kFamBass[ci];
+            b += famMix * (0.68 * osc(bf, t) + 0.24 * osc(bf * 2.0, t) + 0.08 * osc(bf * 3.0, t));
+        }
+        if (midMix > 1e-5) {
+            const double bm = kMidBass[ci];
+            b += midMix * (0.68 * osc(bm, t) + 0.24 * osc(bm * 2.0, t) + 0.08 * osc(bm * 3.0, t));
+        }
+        return b;
+    };
+    const double bassWave = cw0 * evalBassChord(cIdx0) + ((cw1 > 1e-6) ? (cw1 * evalBassChord(cIdx1)) : 0.0);
+    const double bassGroove = 0.72 + 0.28 * (0.5 + 0.5 * osc(2.0, t));
+    const double bassSig = 0.145 * (0.65 + 0.35 * pulseAmt) * bassGroove * bassWave + subKick;
+
+    // B. Wide Stereo Detuned CS-80 Analog Brass/Strings Pad (with gentle sidechain breath)
+    static constexpr double kVoiceGains[5] = {0.26, 0.22, 0.20, 0.17, 0.15};
+    auto evalPadChord = [&](int ci, double& pL, double& pR) noexcept {
+        double accL = 0.0, accR = 0.0;
+        if (famMix > 1e-5) {
+            double fl = 0.0, fr = 0.0;
+            for (int n = 0; n < 5; ++n) {
+                const double f = kFamPad[ci][n];
+                const double g = kVoiceGains[n];
+                fl += g * (osc(f - 0.21, t) + 0.26 * osc(f * 2.0 - 0.33, t));
+                fr += g * (osc(f + 0.21, t) + 0.26 * osc(f * 2.0 + 0.33, t));
+            }
+            accL += famMix * fl;
+            accR += famMix * fr;
+        }
+        if (midMix > 1e-5) {
+            double ml = 0.0, mr = 0.0;
+            for (int n = 0; n < 5; ++n) {
+                const double f = kMidPad[ci][n];
+                const double g = kVoiceGains[n];
+                ml += g * (osc(f - 0.21, t) + 0.26 * osc(f * 2.0 - 0.33, t));
+                mr += g * (osc(f + 0.21, t) + 0.26 * osc(f * 2.0 + 0.33, t));
+            }
+            accL += midMix * ml;
+            accR += midMix * mr;
+        }
+        pL = accL;
+        pR = accR;
+    };
+
+    double padL0 = 0.0, padR0 = 0.0;
+    evalPadChord(cIdx0, padL0, padR0);
+    double padL = cw0 * padL0;
+    double padR = cw0 * padR0;
+    if (cw1 > 1e-6) {
+        double padL1 = 0.0, padR1 = 0.0;
+        evalPadChord(cIdx1, padL1, padR1);
+        padL += cw1 * padL1;
+        padR += cw1 * padR1;
     }
+    const double padBreath = (0.82 + 0.18 * osc(0.18, t)) * (1.0 - 0.24 * kickEnv * pulseAmt);
+    padL *= 0.21 * padAmt * padBreath;
+    padR *= 0.21 * padAmt * padBreath;
 
-    // Smooth crossfade weights across the 3 M1 Taipei shots
-    const double w1 = std::clamp((t60 - 18.5) / 3.0, 0.0, 1.0);
-    const double w2 = std::clamp((t60 - 38.5) / 3.0, 0.0, 1.0);
-    const double sec0Weight = 1.0 - w1 * 0.45;
-    const double sec1Weight = w1 * (1.0 - w2 * 0.35);
-    const double sec2Weight = w2;
+    // C. 8th-Note DX7 / Fender Rhodes Glassy Electric Piano Arpeggiator (0.250s notes, C1 zeroed boundaries)
+    static constexpr uint8_t kArpPatFam[16] = {0, 2, 4, 3, 1, 4, 5, 4, 0, 2, 3, 5, 4, 2, 3, 1};
+    static constexpr uint8_t kArpPatMid[16] = {0, 1, 3, 4, 2, 5, 4, 2, 0, 2, 4, 5, 3, 4, 2, 1};
+    const uint64_t step8 = static_cast<uint64_t>(t * 4.0);
+    const double local8 = t - static_cast<double>(step8) * 0.25;
+    const int arpChord = static_cast<int>(std::fmod(static_cast<double>(step8) * 0.25, 32.0) * 0.125) & 3;
+    const double env8 = fade(local8 / 0.015) * std::exp(-local8 * 8.2) * fade((0.25 - local8) / 0.020);
 
-    // Warm Dmaj9 electric piano pad (D3, F#3, A3, C#4, E4)
-    const double pulse = 0.62 + 0.38 * std::sin(kTwoPi * 0.5 * t);
-    const double rhodes =
-        (std::sin(kTwoPi * 146.832 * t) * 0.34 +
-         std::sin(kTwoPi * 184.997 * t) * 0.22 +
-         std::sin(kTwoPi * 220.000 * t) * 0.24 +
-         std::sin(kTwoPi * 277.183 * t) * 0.18 +
-         std::sin(kTwoPi * 329.628 * t) * 0.16) * pulse;
+    auto evalRhodes = [&](double fHz) noexcept -> double {
+        const double ph = kTwoPi * fHz * local8;
+        const double tine = 0.48 * std::exp(-local8 * 14.5) * std::sin(2.0 * ph);
+        return std::sin(ph + tine) + 0.14 * std::exp(-local8 * 18.0) * std::sin(3.0 * ph);
+    };
+    const double fRhodesFam = kFamArp[arpChord][kArpPatFam[step8 & 15u]];
+    const double fRhodesMid = kMidArp[arpChord][kArpPatMid[step8 & 15u]];
+    const double rhodesSample =
+        0.135 * rhodesAmt * env8 *
+        (famMix * evalRhodes(fRhodesFam) + midMix * evalRhodes(fRhodesMid));
+    const double arpPan = ((step8 & 1u) != 0u) ? 0.36 : -0.36;
 
-    // Low-pass filtered Taipei rain shimmer in Shot 0 (prevents harsh white-noise sample steps)
+    // D. 16th-Note Crystal Celesta Shimmer (0.125s notes, gentle sparkling upper harmonic halo)
+    static constexpr uint8_t kCrysPat[8] = {5, 3, 4, 2, 5, 4, 3, 1};
+    const uint64_t step16 = static_cast<uint64_t>(t * 8.0);
+    const double local16 = t - static_cast<double>(step16) * 0.125;
+    const int crysChord = static_cast<int>(std::fmod(static_cast<double>(step16) * 0.125, 32.0) * 0.125) & 3;
+    const double env16 = fade(local16 / 0.012) * std::exp(-local16 * 15.0) * fade((0.125 - local16) / 0.016);
+    const double fCrysFam = kFamArp[crysChord][kCrysPat[step16 & 7u]] * 2.0;
+    const double fCrysMid = kMidArp[crysChord][kCrysPat[(step16 + 3u) & 7u]] * 2.0;
+    const double crystalSample =
+        0.048 * crystalAmt * env16 *
+        (famMix * std::sin(kTwoPi * fCrysFam * local16) + midMix * std::sin(kTwoPi * fCrysMid * local16));
+    const double crysPan = ((step16 & 1u) != 0u) ? -0.42 : 0.42;
+
+    // E. Expressive Cantabile Synth Lead (2.0s lyrical phrasing with delayed ribbon vibrato)
+    static constexpr double kLeadFam[16] = {
+        587.330, 659.255, 739.989, 880.000,
+        739.989, 659.255, 554.365, 440.000,
+        493.883, 587.330, 739.989, 659.255,
+        659.255, 587.330, 493.883, 440.000
+    };
+    static constexpr double kLeadMid[16] = {
+        493.883, 587.330, 659.255, 739.989,
+        587.330, 554.365, 493.883, 369.994,
+        391.995, 493.883, 659.255, 587.330,
+        554.365, 493.883, 440.000, 369.994
+    };
+    const uint64_t leadStep = static_cast<uint64_t>(t * 0.5);
+    const double localLead = t - static_cast<double>(leadStep) * 2.0;
+    const double leadEnv = fade(localLead / 0.18) * (0.92 - 0.22 * (localLead * 0.5)) * fade((2.0 - localLead) / 0.24);
+    const double leadVib = 0.22 * fade(localLead / 0.50) * std::sin(kTwoPi * 5.2 * localLead);
+    auto evalLead = [&](double fHz) noexcept -> double {
+        const double ph = kTwoPi * fHz * localLead + leadVib;
+        return 0.76 * std::sin(ph) + 0.24 * std::sin(2.0 * ph);
+    };
+    const double leadSample =
+        0.088 * leadAmt * leadEnv *
+        (famMix * evalLead(kLeadFam[leadStep & 15u]) + midMix * evalLead(kLeadMid[leadStep & 15u]));
+    const double leadPan = 0.18 * osc(0.12, t);
+
+    // F. Silky Filtered Taipei Rain Atmosphere in Act 0 Opening
     v.lfsr = (v.lfsr >> 1u) ^ (((v.lfsr & 1u) != 0u) ? 0xB400u : 0u);
     const float white = static_cast<float>((static_cast<double>(v.lfsr & 0xFFFFu) / 32768.0) - 1.0);
-    v.rainLp += 0.18f * (white - v.rainLp);
-    const double rainTex = static_cast<double>(v.rainLp) * 0.032 * (1.0 - w1);
+    v.rainLp += 0.14f * (white - v.rainLp);
+    const double rainSample = static_cast<double>(v.rainLp) * 0.016 * w0 * (1.0 - fade((u - 34.0) / 8.0));
 
-    // Pulsing D2 (73.416 Hz) / A2 (110.0 Hz) architectural bass ostinato in Shot 1+
-    const double bassGate = 0.50 + 0.50 * std::max(0.0, std::sin(kTwoPi * 2.0 * t));
-    const double bass =
-        (std::sin(kTwoPi * 73.416 * t) * 0.52 +
-         std::sin(kTwoPi * 110.000 * t) * 0.28) * bassGate;
+    const double chL = (bassSig + padL +
+                        rhodesSample * (1.0 - arpPan) +
+                        crystalSample * (1.0 - crysPan) +
+                        leadSample * (1.0 - leadPan) +
+                        rainSample) * seam;
+    const double chR = (bassSig + padR +
+                        rhodesSample * (1.0 + arpPan) +
+                        crystalSample * (1.0 + crysPan) +
+                        leadSample * (1.0 + leadPan) +
+                        rainSample) * seam;
 
-    // Crystalline Glass Orchid high bell shimmer (A5, C#6, E6, F#6) peaking across 45s reveal
-    const double crystalEnv = 0.55 + 0.45 * std::sin(kTwoPi * 1.0 * t);
-    const double crystal =
-        (std::sin(kTwoPi * 880.000 * t) * 0.22 +
-         std::sin(kTwoPi * 1108.731 * t) * 0.18 +
-         std::sin(kTwoPi * 1318.510 * t) * 0.16 +
-         std::sin(kTwoPi * 1479.978 * t) * 0.12) * crystalEnv;
-
-    const float mono = static_cast<float>(
-        (rhodes * sec0Weight + rainTex + bass * sec1Weight + crystal * sec2Weight) * 0.48 * loopSeam);
-    const float pan = static_cast<float>(0.16 * std::sin(kTwoPi * 0.18 * t));
-
-    outMono  = mono;
-    outLeft  = mono * (1.0f - pan);
-    outRight = mono * (1.0f + pan);
+    outLeft  = static_cast<float>(chL);
+    outRight = static_cast<float>(chR);
+    outMono  = static_cast<float>(0.5 * (chL + chR));
 }
 
 uint32_t AudioSynthesizer48k::renderFrames(
@@ -522,7 +964,7 @@ uint32_t AudioSynthesizer48k::renderFrames(
 
     const float clampedVol = std::isfinite(masterVolume01) ? std::clamp(masterVolume01, 0.0f, 1.0f) : 0.0f;
     const float desiredGain = (paused || muted) ? 0.0f : (clampedVol * 0.14f);
-    if ( std::fabs(desiredGain - rampTargetGain_) > 1e-6f) {
+    if (std::fabs(desiredGain - rampTargetGain_) > 1e-6f) {
         rampStartGain_ = currentGain_;
         rampTargetGain_ = desiredGain;
         gainRampPos_ = 0;
@@ -603,8 +1045,32 @@ uint32_t AudioSynthesizer48k::renderFrames(
             }
         }
 
-        outInterleavedStereo[i * 2 + 0] = mixL * currentGain_;
-        outInterleavedStereo[i * 2 + 1] = mixR * currentGain_;
+        float finalL = mixL;
+        float finalR = mixR;
+        if (customTrack_ != nullptr) {
+            // Preserve full 20 kHz studio master clarity for imported MP3/WAV/FLAC tracks
+            finalL = 0.96f * std::tanh(mixL * 0.85f);
+            finalR = 0.96f * std::tanh(mixR * 0.85f);
+            if (hall_) {
+                hall_->silkL = finalL;
+                hall_->silkR = finalR;
+            }
+        } else if (hall_) {
+            if (shouldAdvanceVoices) {
+                float wetL = 0.0f, wetR = 0.0f;
+                hall_->process(mixL, mixR, wetL, wetR);
+                const float revL = 0.84f * std::tanh((mixL * 0.82f + wetL * 0.34f) * 1.45f);
+                const float revR = 0.84f * std::tanh((mixR * 0.82f + wetR * 0.34f) * 1.45f);
+                hall_->silkL += 0.34f * (revL - hall_->silkL);
+                hall_->silkR += 0.34f * (revR - hall_->silkR);
+            }
+            finalL = hall_->silkL;
+            finalR = hall_->silkR;
+            mixMono = 0.5f * (finalL + finalR);
+        }
+
+        outInterleavedStereo[i * 2 + 0] = finalL * currentGain_;
+        outInterleavedStereo[i * 2 + 1] = finalR * currentGain_;
         if (currentGain_ > 1e-6f) {
             hasRenderedAnyAudio_ = true;
         }
@@ -893,6 +1359,9 @@ void AudioEngine::stopStreamOnly() noexcept {
 
 void AudioEngine::shutdown() noexcept {
     stopStreamOnly();
+    activeCustomTrack_.store(nullptr, std::memory_order_release);
+    retainedTracks_.clear();
+    customAudioLabel_.clear();
 
     auto* enumerator = static_cast<IMMDeviceEnumerator*>(enumeratorPtr_);
     auto* notif = static_cast<EndpointNotificationClient*>(notifClientPtr_);
@@ -981,6 +1450,26 @@ void AudioEngine::setMasterVolume(float volume01) noexcept {
 void AudioEngine::resetPhase(uint64_t seedSample) noexcept {
     pendingPhaseSample_.store(seedSample, std::memory_order_relaxed);
     phaseResetGen_.fetch_add(1, std::memory_order_release);
+}
+
+bool AudioEngine::loadExternalAudioFile(
+    const std::filesystem::path& filePath,
+    std::string* outError,
+    bool injectFault) {
+    CustomAudioTrack48k decoded{};
+    if (!loadCustomAudioFile48k(filePath, decoded, outError, injectFault)) {
+        return false;
+    }
+    auto sharedTrack = std::make_shared<const CustomAudioTrack48k>(std::move(decoded));
+    retainedTracks_.push_back(sharedTrack);
+    customAudioLabel_ = sharedTrack->label;
+    activeCustomTrack_.store(sharedTrack.get(), std::memory_order_release);
+    return true;
+}
+
+void AudioEngine::clearExternalAudioFile() noexcept {
+    activeCustomTrack_.store(nullptr, std::memory_order_release);
+    customAudioLabel_.clear();
 }
 
 bool AudioEngine::readPlayedSamples48k(int64_t& outSamples48k) const noexcept {
@@ -1142,7 +1631,9 @@ void AudioEngine::audioThreadMain() noexcept {
     AudioSynthesizer48k synth;
     synth.setDurationSamples(durationSamples_);
     synth.setEdition(static_cast<Edition>(edition_.load(std::memory_order_relaxed)));
-    synth.reset(pendingPhaseSample_.load(std::memory_order_relaxed), 0.0f);
+    const CustomAudioTrack48k* appliedTrack = activeCustomTrack_.load(std::memory_order_acquire);
+    synth.setCustomTrack(appliedTrack);
+    synth.reset(appliedTrack ? 0ULL : pendingPhaseSample_.load(std::memory_order_relaxed), 0.0f);
     uint64_t appliedPhaseGen = phaseResetGen_.load(std::memory_order_acquire);
 
     while (!stopRequested_.load(std::memory_order_acquire)) {
@@ -1179,6 +1670,14 @@ void AudioEngine::audioThreadMain() noexcept {
             break;
         }
 
+        // Seamless C1 crossfade if user loaded or cleared a custom MP3/WAV/FLAC soundtrack live!
+        const CustomAudioTrack48k* desiredTrack = activeCustomTrack_.load(std::memory_order_acquire);
+        if (desiredTrack != appliedTrack) {
+            appliedTrack = desiredTrack;
+            synth.setCustomTrack(appliedTrack);
+            synth.seekTo(appliedTrack ? 0ULL : pendingPhaseSample_.load(std::memory_order_relaxed));
+        }
+
         // Consume any pending transport seek/loop phase reset atomically via C1 crossfader
         const uint64_t reqGen = phaseResetGen_.load(std::memory_order_acquire);
         if (reqGen != appliedPhaseGen) {
@@ -1189,15 +1688,17 @@ void AudioEngine::audioThreadMain() noexcept {
 
         const bool isMuted = muted_.load(std::memory_order_relaxed);
         const float masterVol = masterVolume_.load(std::memory_order_relaxed);
+        const bool ambientPlay = isPaused && exploreAmbient_.load(std::memory_order_relaxed);
 
         AudioBandSnapshot bands{};
-        const uint32_t timelineAdvanced = synth.renderFrames(
+        const uint32_t synthAdvanced = synth.renderFrames(
             reinterpret_cast<float*>(rawBuf),
             availableFrames,
-            isPaused,
+            isPaused && !ambientPlay,
             isMuted,
             masterVol,
             &bands);
+        const uint32_t timelineAdvanced = isPaused ? 0u : synthAdvanced;
 
         rmsEnvelope_.store(bands.rms, std::memory_order_relaxed);
 

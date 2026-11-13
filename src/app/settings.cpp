@@ -102,6 +102,10 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
         else if (fullKey == "audio.mute") parseBoolVal(val, ioSettings.mute);
         else if (fullKey == "audio.master_volume") ioSettings.masterVolume = static_cast<float>(std::atof(val.c_str()));
         else if (fullKey == "audio.force_silent_clock") parseBoolVal(val, ioSettings.forceSilentClock);
+        else if (fullKey == "audio.audio_file" || fullKey == "audio.music_file") {
+            const std::string af = unquoteTomlString(val);
+            if (!af.empty()) ioSettings.audioInputPath = af;
+        }
         else if (fullKey == "hardware.enable_signal_hijack") parseBoolVal(val, ioSettings.enableSignalHijack);
         else if (fullKey == "hardware.disable_rt") parseBoolVal(val, ioSettings.disableRT);
         else if (fullKey == "hardware.disable_cuda") parseBoolVal(val, ioSettings.disableCUDA);
@@ -227,6 +231,9 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
         } else if (a == "--media-input") {
             const auto* v = requireNext(i, a); if (!v) return false;
             ioSettings.mediaInputPath = *v;
+        } else if (a == "--audio-file" || a == "--music") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.audioInputPath = *v;
         } else if (a == "--camera-input") {
             ioSettings.enableCameraInput = true;
         } else if (a == "--inject-media-fail") {
@@ -311,6 +318,7 @@ std::string buildCliHelpText() {
         "  --legacy-m0-visual          Force Milestone M0 test visual renderer\n"
         "  --loop                      Loop timeline playback\n"
         "  --mute                      Start audio muted\n"
+        "  --audio-file <path>         Load custom MP3/WAV/FLAC/M4A soundtrack (or drag & drop onto window)\n"
         "  --force-silent-clock        Use monotonic QPC silence-fallback clock\n\n"
         "Hardware Fault Injection & Overrides (SPEC_v4 Section 8.3):\n"
         "  --disable-rt                Disable DXR raytracing\n"

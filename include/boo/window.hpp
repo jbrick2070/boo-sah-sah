@@ -63,6 +63,8 @@ enum class TransportCommand : uint8_t {
     SoloEngineCUDA,
     SoloEngineCodec,
     RestoreAllEngines,
+    OpenAudioFileDialog,
+    ClearCustomAudio,
     Quit
 };
 
@@ -111,6 +113,8 @@ public:
     bool pumpMessages();
 
     bool popCommand(TransportCommand& outCmd);
+    bool popDroppedFile(std::wstring& outPath);
+    void onDroppedFileFromWndProc(std::wstring path);
     void setTitle(const std::string& utf8Title);
     void toggleBorderlessFullscreen();
     void showGraphicsFailure(const std::string& reason);
@@ -159,6 +163,7 @@ private:
     float accumWheel_ = 0.0f;
     int windowedRect_[4] = {100, 100, 1380, 820};
     std::deque<TransportCommand> commandQueue_;
+    std::deque<std::wstring> droppedFiles_;
     std::wstring graphicsFailureText_;
 };
 

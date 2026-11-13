@@ -3607,6 +3607,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     interFlags |= ((mrblCnt & 0xFFu) << 16u);
     interFlags |= ((ctx.interactive.soloEngine & 0x7u) << 24u);
     if (ctx.interactive.studioDrawerOpen)        interFlags |= (1u << 27u);
+    if (ctx.interactive.customAudioActive)       interFlags |= (1u << 28u);
+    if (ctx.interactive.audioMuted)              interFlags |= (1u << 29u);
     pc.interactiveMeta[0] = interFlags;
     pc.interactiveMeta[1] = static_cast<uint32_t>(hud.npuCompletedInferences & 0xFFFFu) |
                             (static_cast<uint32_t>(std::clamp(hud.npuInferMs * 10.0f, 0.0f, 9999.0f) + 0.5f) << 16u);

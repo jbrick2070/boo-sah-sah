@@ -22,12 +22,14 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commdlg.h>
 #include <d3d12.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -43,6 +45,52 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
 namespace {
+
+bool openNativeAudioFilePicker(void* hwndRaw, std::filesystem::path& outPath) {
+    HMODULE hComDlg = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hComDlg) {
+        return false;
+    }
+    using PFN_GetOpenFileNameW = BOOL(WINAPI*)(LPOPENFILENAMEW);
+    const auto pfnGetOpen = reinterpret_cast<PFN_GetOpenFileNameW>(GetProcAddress(hComDlg, "GetOpenFileNameW"));
+    if (!pfnGetOpen) {
+        FreeLibrary(hComDlg);
+        return false;
+    }
+
+    wchar_t fileBuf[1024] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = static_cast<HWND>(hwndRaw);
+    ofn.lpstrFilter =
+        L"Audio Soundtrack (*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg)\0*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg\0"
+        L"All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileBuf;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
+    ofn.lpstrTitle = L"BOO SAH SAH — Select Custom Soundtrack (MP3 / Suno / WAV / FLAC)";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+    const BOOL chosen = pfnGetOpen(&ofn);
+    FreeLibrary(hComDlg);
+    if (chosen && fileBuf[0] != L'\0') {
+        outPath = std::filesystem::path(fileBuf);
+        return true;
+    }
+    return false;
+}
+
+bool isAudioFileExtension(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".mp3" || ext == ".wav" || ext == ".flac" ||
+           ext == ".m4a" || ext == ".aac" || ext == ".ogg" || ext == ".wma";
+}
+
+bool isVideoFileExtension(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".mp4" || ext == ".mov" || ext == ".mkv" || ext == ".avi" || ext == ".webm";
+}
 
 boo::CueSheet makeEmergencyFallbackCueSheet() {
     boo::CueSheet cs{};
@@ -291,7 +339,10 @@ struct InteractiveExploreController {
         hasPrevState = false;
         window.setExploreKeyCapture(true);
         clock.pause();
-        if (audioClockReady) audio.setPaused(true);
+        if (audioClockReady) {
+            audio.setExploreAmbient(true);
+            audio.setPaused(true);
+        }
         BOO_LOG_INFO("Explore", "Interactive RTX Explore camera ENABLED [F] (WASDQE + Mouse + Wheel + Alt-Drag Sun + NRD PT)");
     }
 
@@ -598,7 +649,10 @@ struct InteractiveExploreController {
         hasPrevState = false;
         window.setExploreKeyCapture(false);
         clock.resume();
-        if (audioClockReady) audio.setPaused(false);
+        if (audioClockReady) {
+            audio.setExploreAmbient(false);
+            audio.setPaused(false);
+        }
         BOO_LOG_INFO("Explore", "Returning smoothly to scripted film choreography [F]");
     }
 
@@ -688,10 +742,16 @@ struct InteractiveExploreController {
             targetSec = std::min(targetSec, maxCueSec);
         }
 
+        const bool wasExploring = exploreActive;
         clock.seekToSeconds(targetSec);
         clock.pause();
         if (audioClockReady) {
-            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+            audio.setExploreAmbient(true);
+            if (!wasExploring || !audio.hasExternalAudioFile()) {
+                if (!audio.hasExternalAudioFile()) {
+                    audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                }
+            }
             audio.setPaused(true);
         }
         orchestrator.resetTo(clock.currentSeconds());
@@ -753,23 +813,30 @@ struct InteractiveExploreController {
         const float tlMinX  = 82.0f * u;
         const float tlSizeX = std::max(90.0f, w * 0.20f);
 
-        // Right-click on the 5 bottom-right Engine Pills toggles that single engine in place!
-        if (snap.rmbJustPressed && settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
-            const float rightBase = w - 245.0f * u;
-            const float pTop = h - 34.0f * u;
-            if (snap.mouseY >= pTop && snap.mouseY <= pTop + 22.0f * u) {
-                static constexpr boo::TransportCommand kToggleCmds[5] = {
-                    boo::TransportCommand::ToggleRtRuntime,
-                    boo::TransportCommand::ToggleTensorRuntime,
-                    boo::TransportCommand::ToggleNpuRuntime,
-                    boo::TransportCommand::ToggleCudaRuntime,
-                    boo::TransportCommand::ToggleCodecRuntime
-                };
-                for (uint32_t e = 0; e < 5u; ++e) {
-                    const float pMinX = rightBase + static_cast<float>(e) * 47.0f * u;
-                    if (snap.mouseX >= pMinX && snap.mouseX <= pMinX + 42.0f * u) {
-                        window.pushCommandFromWndProc(kToggleCmds[e]);
-                        break;
+        // Right-click on the 5 bottom-right Engine Pills toggles that single engine in place,
+        // and right-click on Row 2 [MP3] restores the built-in RTX polyphonic film score!
+        if (snap.rmbJustPressed) {
+            if (barVisible &&
+                snap.mouseX >= barMinX + 312.0f * u && snap.mouseX <= barMinX + 350.0f * u &&
+                snap.mouseY >= barMinY + 27.0f * u  && snap.mouseY <= barMinY + 49.0f * u) {
+                window.pushCommandFromWndProc(boo::TransportCommand::ClearCustomAudio);
+            } else if (settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
+                const float rightBase = w - 245.0f * u;
+                const float pTop = h - 34.0f * u;
+                if (snap.mouseY >= pTop && snap.mouseY <= pTop + 22.0f * u) {
+                    static constexpr boo::TransportCommand kToggleCmds[5] = {
+                        boo::TransportCommand::ToggleRtRuntime,
+                        boo::TransportCommand::ToggleTensorRuntime,
+                        boo::TransportCommand::ToggleNpuRuntime,
+                        boo::TransportCommand::ToggleCudaRuntime,
+                        boo::TransportCommand::ToggleCodecRuntime
+                    };
+                    for (uint32_t e = 0; e < 5u; ++e) {
+                        const float pMinX = rightBase + static_cast<float>(e) * 47.0f * u;
+                        if (snap.mouseX >= pMinX && snap.mouseX <= pMinX + 42.0f * u) {
+                            window.pushCommandFromWndProc(kToggleCmds[e]);
+                            break;
+                        }
                     }
                 }
             }
@@ -878,19 +945,25 @@ struct InteractiveExploreController {
                             window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
                         }
                     } else if (ry >= 27.0f && ry <= 49.0f) {
-                        if (rx >= 30.0f && rx <= 192.0f) {
+                        if (rx >= 30.0f && rx <= 155.0f) {
                             dragTarget = DragTarget::SunSlider;
                             sunOverride = true;
-                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (156.0f * u), 0.0f, 1.0f);
+                            sunElevation01 = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 222.0f && rx <= 384.0f) {
+                        } else if (rx >= 182.0f && rx <= 307.0f) {
                             dragTarget = DragTarget::AzmSlider;
                             sunOverride = true;
-                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 226.0f * u)) / (156.0f * u), 0.0f, 1.0f);
+                            sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (118.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 390.0f && rx <= 436.0f) {
+                        } else if (rx >= 312.0f && rx <= 350.0f) {
+                            window.pushCommandFromWndProc(
+                                snap.shiftDown ? boo::TransportCommand::ClearCustomAudio
+                                               : boo::TransportCommand::OpenAudioFileDialog);
+                        } else if (rx >= 354.0f && rx <= 396.0f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::ToggleMute);
+                        } else if (rx >= 400.0f && rx <= 438.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ResetInteractiveLighting);
                         } else if (rx >= 442.0f && rx <= 530.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
@@ -928,7 +1001,7 @@ struct InteractiveExploreController {
                 const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
                 abSplitRatio = std::clamp((snap.mouseX - lb.x) / std::max(1.0f, lb.width), 0.05f, 0.95f);
             } else if (dragTarget == DragTarget::SunSlider) {
-                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (156.0f * u), 0.0f, 1.0f);
+                const float nextEl = std::clamp((snap.mouseX - (barMinX + 34.0f * u)) / (118.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextEl - sunElevation01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunElevation01 = nextEl;
@@ -936,7 +1009,7 @@ struct InteractiveExploreController {
                     hasPrevState = false;
                 }
             } else if (dragTarget == DragTarget::AzmSlider) {
-                const float nextAz = std::clamp((snap.mouseX - (barMinX + 226.0f * u)) / (156.0f * u), 0.0f, 1.0f);
+                const float nextAz = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (118.0f * u), 0.0f, 1.0f);
                 if (std::abs(nextAz - sunAzimuth01) > 1e-4f || !sunOverride) {
                     sunOverride = true;
                     sunAzimuth01 = nextAz;
@@ -1090,8 +1163,11 @@ struct InteractiveExploreController {
         ioCtx.interactive.abSplitRatio = abSplitRatio;
         ioCtx.interactive.activePreset = activePreset;
         ioCtx.interactive.aovMode = aovMode;
+        audio.setExploreAmbient(exploreActive);
         ioCtx.interactive.soloEngine = soloEngine;
         ioCtx.interactive.studioDrawerOpen = studioDrawerOpen;
+        ioCtx.interactive.customAudioActive = audio.hasExternalAudioFile();
+        ioCtx.interactive.audioMuted = audio.isMuted();
         ioCtx.interactive.marbleCount = marbleCount;
         for (uint32_t m = 0; m < marbleCount && m < boo::InteractiveView::kMaxMarbles; ++m) {
             ioCtx.interactive.marblePosRad[m][0] = marbles[m].pos[0];
@@ -1371,6 +1447,32 @@ int main(int argc, char** argv) {
     audio.setMasterVolume(settings.masterVolume);
     audio.setMuted(settings.mute);
     audio.setEdition(settings.edition);
+
+    // Optional custom MP3 / WAV / FLAC / M4A soundtrack (--audio-file or auto-detected soundtrack.mp3)
+    {
+        std::filesystem::path startupAudioPath;
+        if (!settings.audioInputPath.empty()) {
+            startupAudioPath = std::filesystem::exists(settings.audioInputPath)
+                                   ? std::filesystem::path(settings.audioInputPath)
+                                   : resolveResourcePath(settings.audioInputPath);
+        } else if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
+            const std::filesystem::path candRoot = resolveResourcePath("soundtrack.mp3");
+            const std::filesystem::path candAssets = resolveResourcePath("assets/audio/soundtrack.mp3");
+            if (std::filesystem::exists(candRoot)) {
+                startupAudioPath = candRoot;
+            } else if (std::filesystem::exists(candAssets)) {
+                startupAudioPath = candAssets;
+            }
+        }
+        if (!startupAudioPath.empty()) {
+            std::string audErr;
+            if (audio.loadExternalAudioFile(startupAudioPath, &audErr)) {
+                BOO_LOG_INFO("Audio", "Loaded custom 48 kHz soundtrack: '" + audio.externalAudioLabel() + "'");
+            } else {
+                BOO_LOG_WARN("Audio", "Custom soundtrack fallback to built-in RTX score: " + audErr);
+            }
+        }
+    }
     bool audioClockReady = false;
     if (!settings.forceSilentClock) {
         audio.setMasterVolume(settings.masterVolume);
@@ -1717,6 +1819,32 @@ int main(int argc, char** argv) {
         BooXInputGamepad padState{};
         bool hasGamepad = false;
         interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode, padState, hasGamepad);
+
+        // Drag-and-drop custom MP3/WAV/FLAC/M4A soundtrack (or MP4 Signal Hijack video) directly onto window!
+        std::wstring droppedFile;
+        while (window.popDroppedFile(droppedFile)) {
+            const std::filesystem::path dropPath(droppedFile);
+            if (isAudioFileExtension(dropPath)) {
+                std::string audErr;
+                if (audio.loadExternalAudioFile(dropPath, &audErr)) {
+                    if (audio.isMuted()) {
+                        settings.mute = false;
+                        audio.setMuted(false);
+                    }
+                    BOO_LOG_INFO("Audio", "Imported custom soundtrack via drag & drop: '" + audio.externalAudioLabel() + "'");
+                } else {
+                    BOO_LOG_WARN("Audio", "Could not decode dropped audio file: " + audErr);
+                }
+            } else if (isVideoFileExtension(dropPath)) {
+                if (mediaIngest.openLocalFile(dropPath.string(), false)) {
+                    settings.enableSignalHijack = true;
+                    orchestrator.setCodecSignalHijackActive(true);
+                    BOO_LOG_INFO("Media", "Imported Signal Hijack video via drag & drop: " + mediaIngest.statusReason());
+                } else {
+                    BOO_LOG_WARN("Media", mediaIngest.statusReason());
+                }
+            }
+        }
         if (interactiveCtrl.pendingScrubRatio >= 0.0f) {
             if (interactiveCtrl.exploreActive) {
                 interactiveCtrl.exploreActive = false;
@@ -2235,6 +2363,31 @@ int main(int argc, char** argv) {
                     interactiveCtrl.clearMarbles();
                     BOO_LOG_INFO("Explore", "Cleared interactive physics marbles [Shift+Y]");
                     break;
+                case TransportCommand::OpenAudioFileDialog: {
+                    std::filesystem::path pickedPath;
+                    if (openNativeAudioFilePicker(window.hwnd(), pickedPath)) {
+                        std::string audErr;
+                        if (audio.loadExternalAudioFile(pickedPath, &audErr)) {
+                            if (audio.isMuted()) {
+                                settings.mute = false;
+                                audio.setMuted(false);
+                            }
+                            BOO_LOG_INFO("Audio", "Loaded custom soundtrack [MP3]: '" + audio.externalAudioLabel() + "'");
+                        } else {
+                            BOO_LOG_WARN("Audio", "Failed to load selected audio file: " + audErr);
+                        }
+                    }
+                    break;
+                }
+                case TransportCommand::ClearCustomAudio:
+                    if (audio.hasExternalAudioFile()) {
+                        audio.clearExternalAudioFile();
+                        if (audioClockReady) {
+                            audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                        }
+                        BOO_LOG_INFO("Audio", "Restored built-in polyphonic NVIDIA RTX showcase score");
+                    }
+                    break;
                 case TransportCommand::HeroPreset1:
                 case TransportCommand::HeroPreset2:
                 case TransportCommand::HeroPreset3:
@@ -2292,7 +2445,8 @@ int main(int argc, char** argv) {
 
         const ClockSnapshot tick = clock.tickFrame();
         if (audioClockReady) {
-            if (tick.loopedThisTick) {
+            if (tick.loopedThisTick &&
+                (!audio.hasExternalAudioFile() || settings.playbackMode == PlaybackMode::FullFilm)) {
                 audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, tick.samplePosition)));
             }
             audio.setPaused(tick.state == TransportState::Paused || tick.state == TransportState::Ended);

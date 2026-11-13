@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <vector>
@@ -182,6 +183,20 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         }
+        case WM_DROPFILES: {
+            const HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+            if (hDrop) {
+                const UINT needed = DragQueryFileW(hDrop, 0, nullptr, 0);
+                if (needed > 0 && needed < 4096u) {
+                    std::wstring path(static_cast<size_t>(needed), L'\0');
+                    if (DragQueryFileW(hDrop, 0, path.data(), needed + 1u) > 0) {
+                        self->onDroppedFileFromWndProc(std::move(path));
+                    }
+                }
+                DragFinish(hDrop);
+            }
+            return 0;
+        }
         case WM_CLOSE:
             self->pushCommandFromWndProc(TransportCommand::Quit);
             DestroyWindow(hwnd);
@@ -287,6 +302,7 @@ bool AppWindow::create(
         ShowWindow(hwnd_, cmdShow);
     }
     if (!noActivate) {
+        DragAcceptFiles(hwnd_, TRUE);
         SetForegroundWindow(hwnd_);
     }
     UpdateWindow(hwnd_);
@@ -322,6 +338,19 @@ bool AppWindow::popCommand(TransportCommand& outCmd) {
     outCmd = commandQueue_.front();
     commandQueue_.pop_front();
     return true;
+}
+
+bool AppWindow::popDroppedFile(std::wstring& outPath) {
+    if (droppedFiles_.empty()) return false;
+    outPath = std::move(droppedFiles_.front());
+    droppedFiles_.pop_front();
+    return true;
+}
+
+void AppWindow::onDroppedFileFromWndProc(std::wstring path) {
+    if (!path.empty() && droppedFiles_.size() < 8u) {
+        droppedFiles_.push_back(std::move(path));
+    }
 }
 
 void AppWindow::setTitle(const std::string& utf8Title) {

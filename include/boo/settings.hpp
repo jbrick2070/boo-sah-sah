@@ -53,8 +53,9 @@ struct AppSettings {
 
     int32_t sampleRate = 48000;
     bool mute = false;
-    float masterVolume = 0.25f;
+    float masterVolume = 0.75f;
     bool forceSilentClock = false;
+    std::filesystem::path audioInputPath;
 
     // Hardware & fault-injection flags (Section 8.3)
     bool enableSignalHijack = false;

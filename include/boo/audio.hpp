@@ -5,8 +5,11 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace boo {
 
@@ -16,6 +19,20 @@ struct AudioBandSnapshot {
     float mid = 0.0f;
     float high = 0.0f;
 };
+
+struct CustomAudioTrack48k {
+    std::vector<float> interleavedStereo; // Interleaved [L0, R0, L1, R1, ...] at 48,000 Hz
+    uint64_t frameCount = 0;
+    std::string label;
+};
+
+// Decodes MP3 / WAV / FLAC / M4A / AAC / OGG audio via dynamic Media Foundation (zero static PE import)
+// and resamples cleanly to 48,000 Hz stereo IEEE float.
+bool loadCustomAudioFile48k(
+    const std::filesystem::path& filePath,
+    CustomAudioTrack48k& outTrack,
+    std::string* outError = nullptr,
+    bool injectFault = false);
 
 AudioBandSnapshot computeAnalyticalAudioBands(
     int64_t samplePosition,
@@ -39,6 +56,8 @@ public:
     void setDurationSamples(int64_t samples) noexcept { durationSamples_ = samples; }
     void setEdition(Edition edition) noexcept;
     Edition edition() const noexcept { return targetEdition_; }
+    void setCustomTrack(const CustomAudioTrack48k* track) noexcept { customTrack_ = track; }
+    const CustomAudioTrack48k* customTrack() const noexcept { return customTrack_; }
     void reset(uint64_t seedSample, float initialGain = 0.0f) noexcept;
     void seekTo(uint64_t targetSample) noexcept;
 
@@ -65,6 +84,7 @@ private:
         float currentWeight = 0.0f;
         float fadeStartWeight = 0.0f;
         uint32_t fadePos = 0;
+        const CustomAudioTrack48k* voiceTrack = nullptr;
     };
 
     static uint32_t seedLfsrForSample(uint64_t sample) noexcept;
@@ -89,6 +109,9 @@ private:
 
     float lp180_ = 0.0f;
     float lp2400_ = 0.0f;
+    const CustomAudioTrack48k* customTrack_ = nullptr;
+    struct StereoHallState;
+    std::shared_ptr<StereoHallState> hall_;
 };
 
 // Section 2.4: 48,000 Hz stereo floating-point WASAPI audio engine with
@@ -112,10 +135,16 @@ public:
     void shutdown() noexcept;
 
     void setPaused(bool paused) noexcept;
+    void setExploreAmbient(bool active) noexcept { exploreAmbient_.store(active, std::memory_order_relaxed); }
     void setMuted(bool muted) noexcept;
     bool isMuted() const noexcept { return muted_.load(std::memory_order_relaxed); }
     void setMasterVolume(float volume01) noexcept;
     void resetPhase(uint64_t seedSample) noexcept;
+
+    bool loadExternalAudioFile(const std::filesystem::path& filePath, std::string* outError = nullptr, bool injectFault = false);
+    void clearExternalAudioFile() noexcept;
+    bool hasExternalAudioFile() const noexcept { return activeCustomTrack_.load(std::memory_order_acquire) != nullptr; }
+    const std::string& externalAudioLabel() const noexcept { return customAudioLabel_; }
 
     // Polled on the main thread (never on the real-time audio thread) to cleanly
     // migrate to a newly selected default endpoint or recover from endpoint invalidation
@@ -156,10 +185,15 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> healthy_{false};
     std::atomic<bool> paused_{false};
+    std::atomic<bool> exploreAmbient_{false};
     std::atomic<bool> muted_{false};
     std::atomic<bool> usesHwClock_{false};
     std::atomic<bool> migrationPending_{false};
-    std::atomic<float> masterVolume_{0.25f};
+    std::atomic<float> masterVolume_{0.75f};
+
+    std::atomic<const CustomAudioTrack48k*> activeCustomTrack_{nullptr};
+    std::vector<std::shared_ptr<const CustomAudioTrack48k>> retainedTracks_;
+    std::string customAudioLabel_;
 
     std::atomic<int64_t> submittedFrames48k_{0};
     mutable std::atomic<int64_t> monotonicPresented48k_{0};

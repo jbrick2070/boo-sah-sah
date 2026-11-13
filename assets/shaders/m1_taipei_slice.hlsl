@@ -2832,8 +2832,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             const bool lampsOff = (gInteractiveMeta.x & 4u) != 0u;
             const bool nrdOn    = (gInteractiveMeta.x & 8u) != 0u;
             const uint presetId = (gInteractiveMeta.x >> 4u) & 0xFu;
-            const bool isAccum  = (gInteractiveMeta.x & 256u) != 0u;
-            const bool isReblur = (curDenMode == 1u);
+            const bool isAccum   = (gInteractiveMeta.x & 256u) != 0u;
+            const bool customMp3 = (gInteractiveMeta.x & (1u << 28u)) != 0u;
+            const bool audMuted  = (gInteractiveMeta.x & (1u << 29u)) != 0u;
+            const bool isReblur  = (curDenMode == 1u);
             const uint sppCount = (uint)(clamp(gInteractiveState.w, 1.0, 9999.0) + 0.5);
 
             sdr = lerp(sdr, float3(0.015, 0.024, 0.046), 0.91);
@@ -2991,34 +2993,64 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float tScnName = sampleWord8(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, sn0, sn1, sn2, sn3, sn4, sn5, 32u, 32u);
             sdr = lerp(sdr, expOn ? colJade : colAmber, tScnName);
 
-            // Row 2: Draggable [SUN] Slider (34..190) + [AZM] Slider (226..382) + [RST] (390..436) + [NEXT SCN >] (442..530)
+            // Row 2: Draggable [SUN] (34..152) + [AZM] (186..304) + [MP3] (312..350) + [MUSC/MUTE] (354..396) + [RST] (400..438) + [NEXT SCN >] (442..530)
             float tSunLbl = sampleWord4(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 83u, 85u, 78u, 32u);
             sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
 
             float2 sunMin  = barMin + float2(34.0 * u, 34.0 * u);
-            float2 sunSize = float2(156.0 * u, 8.0 * u);
+            float2 sunSize = float2(118.0 * u, 8.0 * u);
             float  sunVal  = saturate(gInteractiveState.y);
-            float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 20u);
+            float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 16u);
             float3 sunTint = lerp(float3(0.26, 0.42, 0.88), lerp(colAmber, colEnamel, smoothstep(0.45, 1.0, sunVal)), smoothstep(0.0, 0.55, sunVal));
             sdr = lerp(sdr, sunTint, sunBar * 0.92);
             float sunThumbX = sunMin.x + sunVal * sunSize.x;
             if (abs(px.x - sunThumbX) <= 2.4 * u && px.y >= sunMin.y - 2.5 * u && px.y <= sunMin.y + sunSize.y + 2.5 * u)
                 sdr = colEnamel;
 
-            float tAzmLbl = sampleWord4(px, barMin + float2(200.0 * u, 34.0 * u), 1.35 * u, 65u, 90u, 77u, 32u);
+            float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 65u, 90u, 77u, 32u);
             sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
 
-            float2 azmMin  = barMin + float2(226.0 * u, 34.0 * u);
-            float2 azmSize = float2(156.0 * u, 8.0 * u);
+            float2 azmMin  = barMin + float2(186.0 * u, 34.0 * u);
+            float2 azmSize = float2(118.0 * u, 8.0 * u);
             float  azmVal  = saturate(gInteractiveState.z);
-            float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 20u);
-            sdr = lerp(sdr, colCyan, azmBar * 0.90);
+            float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 16u);
+            float3 azmTint = colCyan;
+            sdr = lerp(sdr, azmTint, azmBar * 0.90);
             float azmThumbX = azmMin.x + azmVal * azmSize.x;
             if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
                 sdr = colEnamel;
 
-            float2 bRstMin = barMin + float2(390.0 * u, 29.5 * u);
-            float2 bRstMax = bRstMin + float2(46.0 * u, 17.5 * u);
+            // [MP3] Import Custom Soundtrack Button (rx = 312..350; LMB opens picker, RMB/Shift+Click restores built-in score)
+            float2 bMp3Min = barMin + float2(312.0 * u, 29.5 * u);
+            float2 bMp3Max = bMp3Min + float2(38.0 * u, 17.5 * u);
+            float3 mp3C = customMp3 ? colJade : colCyan;
+            if (px.x >= bMp3Min.x && px.x <= bMp3Max.x && px.y >= bMp3Min.y && px.y <= bMp3Max.y)
+            {
+                sdr = lerp(sdr, mp3C * (customMp3 ? 0.34 : 0.14), 0.86);
+                if ((px.x - bMp3Min.x < 1.1) || (bMp3Max.x - px.x < 1.1) || (px.y - bMp3Min.y < 1.1) || (bMp3Max.y - px.y < 1.1))
+                    sdr = mp3C;
+            }
+            float tMp3 = sampleWord4(px, bMp3Min + float2(7.5 * u, 4.8 * u), 1.35 * u, 77u, 80u, 51u, 32u); // MP3
+            sdr = lerp(sdr, customMp3 ? colEnamel : mp3C, tMp3);
+
+            // [MUSC] / [MUTE] Live Music Toggle Pill (rx = 354..396)
+            float2 bMusMin = barMin + float2(354.0 * u, 29.5 * u);
+            float2 bMusMax = bMusMin + float2(42.0 * u, 17.5 * u);
+            float3 musC = audMuted ? colAmber : colJade;
+            if (px.x >= bMusMin.x && px.x <= bMusMax.x && px.y >= bMusMin.y && px.y <= bMusMax.y)
+            {
+                sdr = lerp(sdr, musC * (audMuted ? 0.28 : 0.22), 0.86);
+                if ((px.x - bMusMin.x < 1.1) || (bMusMax.x - px.x < 1.1) || (px.y - bMusMin.y < 1.1) || (bMusMax.y - px.y < 1.1))
+                    sdr = musC;
+            }
+            float tMus = audMuted
+                ? sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 84u, 69u)  // MUTE
+                : sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 83u, 67u); // MUSC
+            sdr = lerp(sdr, audMuted ? colEnamel : musC, tMus);
+
+            // [RST] Lighting & Studio Reset Pill (rx = 400..438)
+            float2 bRstMin = barMin + float2(400.0 * u, 29.5 * u);
+            float2 bRstMax = bRstMin + float2(38.0 * u, 17.5 * u);
             bool anyOvr = sunOvr || lampsOff || (curAovMode != 0u) || (curMarbleCnt != 0u) || (curSolo != 0u);
             float3 rstC = anyOvr ? colAmber : float3(0.42, 0.46, 0.56);
             if (px.x >= bRstMin.x && px.x <= bRstMax.x && px.y >= bRstMin.y && px.y <= bRstMax.y)
@@ -3027,7 +3059,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bRstMin.x < 1.1) || (bRstMax.x - px.x < 1.1) || (px.y - bRstMin.y < 1.1) || (bRstMax.y - px.y < 1.1))
                     sdr = rstC;
             }
-            float tRst = sampleWord4(px, bRstMin + float2(12.0 * u, 4.8 * u), 1.35 * u, 82u, 83u, 84u, 32u);
+            float tRst = sampleWord4(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 82u, 83u, 84u, 32u);
             sdr = lerp(sdr, rstC, tRst);
 
             // Prominent Row-2 [NEXT SCN >] One-Click Scene Button (rx = 442..530)
