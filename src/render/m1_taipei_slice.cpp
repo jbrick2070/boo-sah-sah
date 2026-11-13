@@ -3612,6 +3612,9 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     pc.interactiveMeta[0] = interFlags;
     pc.interactiveMeta[1] = static_cast<uint32_t>(hud.npuCompletedInferences & 0xFFFFu) |
                             (static_cast<uint32_t>(std::clamp(hud.npuInferMs * 10.0f, 0.0f, 9999.0f) + 0.5f) << 16u);
+    const uint32_t trkSlot = std::min<uint32_t>(ctx.interactive.audioTrackSlot, 5u);
+    const uint32_t toastA8 = static_cast<uint32_t>(std::clamp(ctx.interactive.audioToastAlpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+    pc.interactiveMeta[2] = (trkSlot & 0xFFu) | ((toastA8 & 0xFFu) << 8u);
 
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;
     uint8_t* mappedCb = nullptr;

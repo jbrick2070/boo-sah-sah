@@ -54,6 +54,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\shaders")
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\meshes") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\textures") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\models") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\audio") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\cues") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "config") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "docs") | Out-Null
@@ -69,6 +70,7 @@ Copy-Item -Force (Join-Path $RepoRoot "assets\shaders\*.hlsl") (Join-Path $Stage
 Copy-Item -Force (Join-Path $RepoRoot "assets\meshes\*.bmesh") (Join-Path $StageDir "assets\meshes\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\textures\*.btex") (Join-Path $StageDir "assets\textures\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\models\madame_n_*") (Join-Path $StageDir "assets\models\")
+Copy-Item -Force (Join-Path $RepoRoot "assets\audio\*.mp3") (Join-Path $StageDir "assets\audio\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\cues\*.json") (Join-Path $StageDir "assets\cues\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\manifest.json") (Join-Path $StageDir "assets\manifest.json")
 

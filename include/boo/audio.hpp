@@ -21,18 +21,21 @@ struct AudioBandSnapshot {
 };
 
 struct CustomAudioTrack48k {
-    std::vector<float> interleavedStereo; // Interleaved [L0, R0, L1, R1, ...] at 48,000 Hz
+    std::vector<float> interleavedStereo;  // Interleaved [L0, R0, L1, R1, ...] float at 48,000 Hz
+    std::vector<int16_t> interleavedPcm16; // Optional compact normalized 16-bit PCM stereo at 48,000 Hz
     uint64_t frameCount = 0;
     std::string label;
 };
 
 // Decodes MP3 / WAV / FLAC / M4A / AAC / OGG audio via dynamic Media Foundation (zero static PE import)
-// and resamples cleanly to 48,000 Hz stereo IEEE float.
+// and resamples cleanly to 48,000 Hz stereo. Supports cooperative cancellation for instant shutdown.
 bool loadCustomAudioFile48k(
     const std::filesystem::path& filePath,
     CustomAudioTrack48k& outTrack,
     std::string* outError = nullptr,
-    bool injectFault = false);
+    bool injectFault = false,
+    const std::atomic<bool>* cancelRequested = nullptr,
+    bool compactPcm16 = false);
 
 AudioBandSnapshot computeAnalyticalAudioBands(
     int64_t samplePosition,
@@ -122,6 +125,9 @@ class AudioEngine {
 public:
     static constexpr int32_t kTargetSampleRate = 48000;
     static constexpr int32_t kChannels = 2;
+    static constexpr size_t  kBundledTrackCount = 4;
+
+    static const char* bundledSoundtrackTitle(uint32_t slot1To4) noexcept;
 
     AudioEngine();
     ~AudioEngine();
@@ -141,9 +147,23 @@ public:
     void setMasterVolume(float volume01) noexcept;
     void resetPhase(uint64_t seedSample) noexcept;
 
+    // Built-in 4-track original soundtrack (0=Procedural Synth, 1..4=Bundled OST Tracks 1..4, 5=External MP3)
+    void startBundledSoundtrack(
+        const std::array<std::filesystem::path, kBundledTrackCount>& trackPaths,
+        uint32_t initialSlot1To4 = 1u);
+    void selectSoundtrackSlot(uint32_t slot0To5) noexcept;
+    uint32_t cycleSoundtrackForward() noexcept;
+    uint32_t cycleSoundtrackBackward() noexcept;
+    uint32_t activeSoundtrackSlot() const noexcept { return selectedTrackSlot_.load(std::memory_order_acquire); }
+    bool hasBundledSoundtrack() const noexcept { return hasBundledSoundtrack_; }
+    std::string activeSoundtrackTitle() const;
+
     bool loadExternalAudioFile(const std::filesystem::path& filePath, std::string* outError = nullptr, bool injectFault = false);
     void clearExternalAudioFile() noexcept;
-    bool hasExternalAudioFile() const noexcept { return activeCustomTrack_.load(std::memory_order_acquire) != nullptr; }
+    bool hasExternalAudioFile() const noexcept {
+        return selectedTrackSlot_.load(std::memory_order_acquire) == 5u &&
+               activeCustomTrack_.load(std::memory_order_acquire) != nullptr;
+    }
     const std::string& externalAudioLabel() const noexcept { return customAudioLabel_; }
 
     // Polled on the main thread (never on the real-time audio thread) to cleanly
@@ -176,6 +196,8 @@ public:
 private:
     bool openDefaultEndpoint(uint64_t initialSeedSample, int64_t initialPlayedCounter);
     void stopStreamOnly() noexcept;
+    void stopEndpointAndEnumerator() noexcept;
+    void stopPreloadWorker() noexcept;
     void audioThreadMain() noexcept;
 
     int64_t durationSamples_ = 2880000;
@@ -190,6 +212,16 @@ private:
     std::atomic<bool> usesHwClock_{false};
     std::atomic<bool> migrationPending_{false};
     std::atomic<float> masterVolume_{0.75f};
+
+    bool hasBundledSoundtrack_ = false;
+    std::atomic<uint32_t> selectedTrackSlot_{0}; // 0=Procedural Synth, 1..4=OST 1..4, 5=External MP3
+    std::atomic<uint64_t> trackSwitchGen_{0};
+    std::atomic<uint64_t> lastSongSamplePos_{0};
+    std::atomic<bool> preloadInProgress_{false};
+    std::atomic<bool> cancelPreload_{false};
+    std::thread preloadWorker_;
+    std::array<std::atomic<const CustomAudioTrack48k*>, kBundledTrackCount> bundledTracks_{nullptr, nullptr, nullptr, nullptr};
+    std::array<std::shared_ptr<const CustomAudioTrack48k>, kBundledTrackCount> bundledTrackStorage_{};
 
     std::atomic<const CustomAudioTrack48k*> activeCustomTrack_{nullptr};
     std::vector<std::shared_ptr<const CustomAudioTrack48k>> retainedTracks_;

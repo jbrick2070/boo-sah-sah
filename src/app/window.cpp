@@ -136,6 +136,9 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case VK_F10:
                         self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ClearMarbles : TransportCommand::SpawnMarbles);
                         return 0;
+                    case 'Z':
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::PrevMusicTrack : TransportCommand::NextMusicTrack);
+                        return 0;
                     case VK_DOWN:
                     case VK_OEM_MINUS: self->pushCommandFromWndProc(TransportCommand::VolumeDown); return 0;
                     case VK_UP:

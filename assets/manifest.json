@@ -28,7 +28,7 @@
       "provenance": "Original M1 4-pass DXR 1.1 RayQuery + Raster + Dual-Kawase HDR Bloom + ACES + Letterbox HUD shader suite",
       "license": "Proprietary / Project First-Party",
       "attribution_required": false,
-      "sha256": "9279538c6fa8b1cb0e3dbeb1a9d7d80506a8742d1e9e239e52b41d6590874561"
+      "sha256": "911029d4ac43d06108dab864b83c117a2971fbd26aaca31c1797fbfd71e6b705"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -227,6 +227,42 @@
       "license": "CC0-1.0",
       "attribution_required": false,
       "sha256": "9c46c1941c6a5f01b8f32bb0dbdf202d268a3f79182e6101d85a27ffc082acfe"
+    },
+    {
+      "id": "ost_01_neon_orchid",
+      "path": "assets/audio/01_neon_orchid.mp3",
+      "kind": "audio",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid — Taiwanese Spy Jazz)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "425c8893fdc38e13f572802597b53700c113966c7285484e868ca3be3789d031"
+    },
+    {
+      "id": "ost_02_acid_lotus",
+      "path": "assets/audio/02_acid_lotus.mp3",
+      "kind": "audio",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus — Taiwanese Detroit Techno)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "1a26607fc0252d2a718b92ecc9c7e77ba5c3d909b68c29d6666740faceada07f"
+    },
+    {
+      "id": "ost_03_velvet_cipher",
+      "path": "assets/audio/03_velvet_cipher.mp3",
+      "kind": "audio",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher — Cinematic Taiwanese Synth-Funk)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "31b15859de51d3988c5e195957511364f878953f7bb4e398b97dd1882b450c1c"
+    },
+    {
+      "id": "ost_04_glass_dragon",
+      "path": "assets/audio/04_glass_dragon.mp3",
+      "kind": "audio",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon — Progressive Demoscene Electronica)",
+      "license": "Proprietary / Project First-Party",
+      "attribution_required": false,
+      "sha256": "b299721459028832f2f054c3283759125ab9338d27d90f4b768174448ebb87dd"
     }
   ],
   "visual_presets": [

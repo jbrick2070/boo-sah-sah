@@ -1072,6 +1072,49 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     BOO_CHECK(measure(1024u));
     BOO_CHECK(maxStep < 0.020f);
 
+    // 5. Verify bundled 4-track first-party OST assets, cooperative cancellation, compact PCM16, and playlist cycling
+    const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
+        resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
+        resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
+        resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
+        resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+    };
+    for (const auto& p : ostPaths) {
+        BOO_CHECK(std::filesystem::exists(p));
+        BOO_CHECK(std::filesystem::file_size(p) > (3ULL * 1024ULL * 1024ULL));
+    }
+
+    std::atomic<bool> preCancelled{true};
+    CustomAudioTrack48k cancelledTrack{};
+    BOO_CHECK(!loadCustomAudioFile48k(ostPaths[0], cancelledTrack, &errMsg, false, &preCancelled, true));
+    BOO_CHECK(cancelledTrack.frameCount == 0u);
+
+    CustomAudioTrack48k ost01{};
+    if (loadCustomAudioFile48k(ostPaths[0], ost01, &errMsg, false, nullptr, true)) {
+        BOO_CHECK(ost01.frameCount > (180ULL * 48000ULL)); // > 3 minutes @ 48 kHz
+        BOO_CHECK(ost01.interleavedStereo.empty());
+        BOO_CHECK(ost01.interleavedPcm16.size() == ost01.frameCount * 2u);
+        synth.setCustomTrack(&ost01);
+        synth.seekTo(48000ULL * 30ULL); // 0:30 into Neon Orchid
+        AudioBandSnapshot ostBands{};
+        BOO_CHECK(measure(1024u, &ostBands));
+        BOO_CHECK(ostBands.rms > 0.01f);
+        synth.setCustomTrack(nullptr);
+    }
+
+    AudioEngine ostEngine;
+    ostEngine.startBundledSoundtrack(ostPaths, 1u);
+    BOO_CHECK(ostEngine.hasBundledSoundtrack());
+    BOO_CHECK(ostEngine.activeSoundtrackSlot() == 1u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 2u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 3u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 4u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 0u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 1u);
+    BOO_CHECK(ostEngine.cycleSoundtrackBackward() == 0u);
+    BOO_CHECK(ostEngine.cycleSoundtrackBackward() == 4u);
+    ostEngine.shutdown();
+
     return true;
 }
 

@@ -295,6 +295,8 @@ struct InteractiveExploreController {
     uint32_t prevCanvasH = 0;
     bool prevDisableRt = false;
     boo::Edition prevEdition = boo::Edition::Family;
+    float audioToastTimer = 0.0f;
+    uint32_t lastAudioTrackSlot = 0xFFFFFFFFu;
 
     DragTarget dragTarget = DragTarget::None;
     WORD prevPadButtons = 0;
@@ -814,12 +816,12 @@ struct InteractiveExploreController {
         const float tlSizeX = std::max(90.0f, w * 0.20f);
 
         // Right-click on the 5 bottom-right Engine Pills toggles that single engine in place,
-        // and right-click on Row 2 [MP3] restores the built-in RTX polyphonic film score!
+        // and right-click on Row 2 [TRK1..4] steps backward through the built-in soundtrack!
         if (snap.rmbJustPressed) {
             if (barVisible &&
-                snap.mouseX >= barMinX + 312.0f * u && snap.mouseX <= barMinX + 350.0f * u &&
+                snap.mouseX >= barMinX + 310.0f * u && snap.mouseX <= barMinX + 350.0f * u &&
                 snap.mouseY >= barMinY + 27.0f * u  && snap.mouseY <= barMinY + 49.0f * u) {
-                window.pushCommandFromWndProc(boo::TransportCommand::ClearCustomAudio);
+                window.pushCommandFromWndProc(boo::TransportCommand::PrevMusicTrack);
             } else if (settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
                 const float rightBase = w - 245.0f * u;
                 const float pTop = h - 34.0f * u;
@@ -957,10 +959,10 @@ struct InteractiveExploreController {
                             sunAzimuth01 = std::clamp((snap.mouseX - (barMinX + 186.0f * u)) / (118.0f * u), 0.0f, 1.0f);
                             recomputeSunDir();
                             hasPrevState = false;
-                        } else if (rx >= 312.0f && rx <= 350.0f) {
+                        } else if (rx >= 310.0f && rx <= 350.0f) {
                             window.pushCommandFromWndProc(
-                                snap.shiftDown ? boo::TransportCommand::ClearCustomAudio
-                                               : boo::TransportCommand::OpenAudioFileDialog);
+                                snap.shiftDown ? boo::TransportCommand::OpenAudioFileDialog
+                                               : boo::TransportCommand::NextMusicTrack);
                         } else if (rx >= 354.0f && rx <= 396.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ToggleMute);
                         } else if (rx >= 400.0f && rx <= 438.0f) {
@@ -1164,10 +1166,26 @@ struct InteractiveExploreController {
         ioCtx.interactive.activePreset = activePreset;
         ioCtx.interactive.aovMode = aovMode;
         audio.setExploreAmbient(exploreActive);
+        const uint32_t curAudioSlot = audio.activeSoundtrackSlot();
+        if (!settings.noActivateWindow) {
+            if (lastAudioTrackSlot == 0xFFFFFFFFu) {
+                lastAudioTrackSlot = curAudioSlot;
+                audioToastTimer = 4.2f;
+            } else if (curAudioSlot != lastAudioTrackSlot) {
+                lastAudioTrackSlot = curAudioSlot;
+                audioToastTimer = 3.8f;
+            } else {
+                audioToastTimer = std::max(0.0f, audioToastTimer - wallDt);
+            }
+        }
         ioCtx.interactive.soloEngine = soloEngine;
         ioCtx.interactive.studioDrawerOpen = studioDrawerOpen;
         ioCtx.interactive.customAudioActive = audio.hasExternalAudioFile();
         ioCtx.interactive.audioMuted = audio.isMuted();
+        ioCtx.interactive.audioTrackSlot = curAudioSlot;
+        ioCtx.interactive.audioToastAlpha = (!settings.noActivateWindow)
+                                                ? std::clamp(audioToastTimer / 0.65f, 0.0f, 1.0f)
+                                                : 0.0f;
         ioCtx.interactive.marbleCount = marbleCount;
         for (uint32_t m = 0; m < marbleCount && m < boo::InteractiveView::kMaxMarbles; ++m) {
             ioCtx.interactive.marblePosRad[m][0] = marbles[m].pos[0];
@@ -1444,35 +1462,6 @@ int main(int argc, char** argv) {
 
     // 3. Initialize 48 kHz WASAPI Audio Engine or silent monotonic clock fallback
     AudioEngine audio;
-    audio.setMasterVolume(settings.masterVolume);
-    audio.setMuted(settings.mute);
-    audio.setEdition(settings.edition);
-
-    // Optional custom MP3 / WAV / FLAC / M4A soundtrack (--audio-file or auto-detected soundtrack.mp3)
-    {
-        std::filesystem::path startupAudioPath;
-        if (!settings.audioInputPath.empty()) {
-            startupAudioPath = std::filesystem::exists(settings.audioInputPath)
-                                   ? std::filesystem::path(settings.audioInputPath)
-                                   : resolveResourcePath(settings.audioInputPath);
-        } else if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
-            const std::filesystem::path candRoot = resolveResourcePath("soundtrack.mp3");
-            const std::filesystem::path candAssets = resolveResourcePath("assets/audio/soundtrack.mp3");
-            if (std::filesystem::exists(candRoot)) {
-                startupAudioPath = candRoot;
-            } else if (std::filesystem::exists(candAssets)) {
-                startupAudioPath = candAssets;
-            }
-        }
-        if (!startupAudioPath.empty()) {
-            std::string audErr;
-            if (audio.loadExternalAudioFile(startupAudioPath, &audErr)) {
-                BOO_LOG_INFO("Audio", "Loaded custom 48 kHz soundtrack: '" + audio.externalAudioLabel() + "'");
-            } else {
-                BOO_LOG_WARN("Audio", "Custom soundtrack fallback to built-in RTX score: " + audErr);
-            }
-        }
-    }
     bool audioClockReady = false;
     if (!settings.forceSilentClock) {
         audio.setMasterVolume(settings.masterVolume);
@@ -1487,6 +1476,42 @@ int main(int argc, char** argv) {
         }
     } else {
         BOO_LOG_INFO("Audio", "Using monotonic silence-fallback clock (--force-silent-clock).");
+    }
+
+    // Activate built-in 4-track original soundtrack (or optional --audio-file override) with zero main-thread stall
+    if (!settings.forceSilentClock && !settings.injectAudioFail) {
+        std::filesystem::path startupAudioPath;
+        if (!settings.audioInputPath.empty()) {
+            startupAudioPath = std::filesystem::exists(settings.audioInputPath)
+                                   ? std::filesystem::path(settings.audioInputPath)
+                                   : resolveResourcePath(settings.audioInputPath);
+        } else if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
+            const std::filesystem::path candRoot = resolveResourcePath("soundtrack.mp3");
+            if (std::filesystem::exists(candRoot)) {
+                startupAudioPath = candRoot;
+            }
+        }
+        if (!startupAudioPath.empty()) {
+            std::string audErr;
+            if (audio.loadExternalAudioFile(startupAudioPath, &audErr)) {
+                BOO_LOG_INFO("Audio", "Loaded custom 48 kHz soundtrack: '" + audio.externalAudioLabel() + "'");
+            } else {
+                BOO_LOG_WARN("Audio", "Custom soundtrack fallback to built-in OST: " + audErr);
+            }
+        }
+        if (!audio.hasExternalAudioFile()) {
+            const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
+                resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
+                resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
+                resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
+                resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+            };
+            audio.startBundledSoundtrack(ostPaths, 1u);
+            if (audio.hasBundledSoundtrack()) {
+                BOO_LOG_INFO("Audio", "Built-in 4-track OST active: '" + audio.activeSoundtrackTitle() +
+                                      "' (click [TRK1] or press Z to switch tracks)");
+            }
+        }
     }
 
     TimelineClock clock;
@@ -2363,6 +2388,30 @@ int main(int argc, char** argv) {
                     interactiveCtrl.clearMarbles();
                     BOO_LOG_INFO("Explore", "Cleared interactive physics marbles [Shift+Y]");
                     break;
+                case TransportCommand::NextMusicTrack: {
+                    const uint32_t slot = audio.cycleSoundtrackForward();
+                    if (slot == 0u && audioClockReady) {
+                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                    }
+                    if (audio.isMuted()) {
+                        settings.mute = false;
+                        audio.setMuted(false);
+                    }
+                    BOO_LOG_INFO("Audio", "Soundtrack [Z / TRK]: " + audio.activeSoundtrackTitle());
+                    break;
+                }
+                case TransportCommand::PrevMusicTrack: {
+                    const uint32_t slot = audio.cycleSoundtrackBackward();
+                    if (slot == 0u && audioClockReady) {
+                        audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
+                    }
+                    if (audio.isMuted()) {
+                        settings.mute = false;
+                        audio.setMuted(false);
+                    }
+                    BOO_LOG_INFO("Audio", "Soundtrack [Shift+Z / TRK]: " + audio.activeSoundtrackTitle());
+                    break;
+                }
                 case TransportCommand::OpenAudioFileDialog: {
                     std::filesystem::path pickedPath;
                     if (openNativeAudioFilePicker(window.hwnd(), pickedPath)) {

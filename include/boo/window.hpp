@@ -63,6 +63,8 @@ enum class TransportCommand : uint8_t {
     SoloEngineCUDA,
     SoloEngineCodec,
     RestoreAllEngines,
+    NextMusicTrack,
+    PrevMusicTrack,
     OpenAudioFileDialog,
     ClearCustomAudio,
     Quit

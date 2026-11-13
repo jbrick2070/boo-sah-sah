@@ -199,8 +199,14 @@ bool loadCustomAudioFile48k(
     const std::filesystem::path& filePath,
     CustomAudioTrack48k& outTrack,
     std::string* outError,
-    bool injectFault) {
+    bool injectFault,
+    const std::atomic<bool>* cancelRequested,
+    bool compactPcm16) {
     outTrack = {};
+    if (cancelRequested && cancelRequested->load(std::memory_order_relaxed)) {
+        if (outError) *outError = "Audio decode cancelled";
+        return false;
+    }
     const std::string safeName = redactUserPath(filePath.string());
     if (injectFault) {
         if (outError) *outError = "Audio file fault injected (" + safeName + ")";
@@ -312,7 +318,12 @@ bool loadCustomAudioFile48k(
                         const size_t bytesPerSample = isFloat ? 4u : 2u;
                         const size_t frameStrideBytes = bytesPerSample * static_cast<size_t>(srcCh);
 
+                        bool cancelled = false;
                         while ((rawStereo.size() / 2u) < maxSrcFrames) {
+                            if (cancelRequested && cancelRequested->load(std::memory_order_relaxed)) {
+                                cancelled = true;
+                                break;
+                            }
                             DWORD flags = 0;
                             ComPtr<IMFSample> sample;
                             const HRESULT hrRead = reader->ReadSample(
@@ -358,7 +369,7 @@ bool loadCustomAudioFile48k(
                             }
                         }
 
-                        const uint64_t srcFrames = rawStereo.size() / 2u;
+                        const uint64_t srcFrames = cancelled ? 0ULL : (rawStereo.size() / 2u);
                         if (srcFrames >= 480u) {
                             if (srcRate == 48000u) {
                                 outTrack.interleavedStereo = std::move(rawStereo);
@@ -374,6 +385,10 @@ bool loadCustomAudioFile48k(
                                     return rawStereo[static_cast<size_t>(cIdx) * 2u + ch];
                                 };
                                 for (uint64_t d = 0; d < dstFrames; ++d) {
+                                    if ((d & 4095ULL) == 0ULL && cancelRequested && cancelRequested->load(std::memory_order_relaxed)) {
+                                        cancelled = true;
+                                        break;
+                                    }
                                     const double sp = static_cast<double>(d) * ratio;
                                     const int64_t i1 = static_cast<int64_t>(std::floor(sp));
                                     const float frac = static_cast<float>(sp - static_cast<double>(i1));
@@ -389,22 +404,36 @@ bool loadCustomAudioFile48k(
                                         outTrack.interleavedStereo[static_cast<size_t>(d) * 2u + ch] = std::clamp(v, -1.0f, 1.0f);
                                     }
                                 }
-                                outTrack.frameCount = dstFrames;
-                            }
-
-                            // Peak-normalize safely so mastered Suno MP3s & quiet WAVs both sit cleanly at ~0.92 peak
-                            float peak = 0.0f;
-                            for (float s : outTrack.interleavedStereo) {
-                                peak = std::max(peak, std::abs(s));
-                            }
-                            if (peak > 1e-4f) {
-                                const float normScale = std::clamp(0.92f / peak, 0.35f, 3.5f);
-                                for (float& s : outTrack.interleavedStereo) {
-                                    s = std::clamp(s * normScale, -0.98f, 0.98f);
+                                if (!cancelled) {
+                                    outTrack.frameCount = dstFrames;
                                 }
                             }
-                            outTrack.label = filePath.filename().string();
-                            ok = true;
+
+                            if (cancelled || (cancelRequested && cancelRequested->load(std::memory_order_relaxed))) {
+                                outTrack = {};
+                            } else if (outTrack.frameCount >= 480u) {
+                                // Peak-normalize safely so mastered MP3s & quiet WAVs both sit cleanly at ~0.92 peak
+                                float peak = 0.0f;
+                                for (float s : outTrack.interleavedStereo) {
+                                    peak = std::max(peak, std::abs(s));
+                                }
+                                if (peak > 1e-4f) {
+                                    const float normScale = std::clamp(0.92f / peak, 0.35f, 3.5f);
+                                    for (float& s : outTrack.interleavedStereo) {
+                                        s = std::clamp(s * normScale, -0.98f, 0.98f);
+                                    }
+                                }
+                                if (compactPcm16) {
+                                    outTrack.interleavedPcm16.resize(outTrack.interleavedStereo.size());
+                                    for (size_t k = 0; k < outTrack.interleavedStereo.size(); ++k) {
+                                        const float clamped = std::clamp(outTrack.interleavedStereo[k], -0.999f, 0.999f);
+                                        outTrack.interleavedPcm16[k] = static_cast<int16_t>(std::lrintf(clamped * 32767.0f));
+                                    }
+                                    std::vector<float>().swap(outTrack.interleavedStereo);
+                                }
+                                outTrack.label = filePath.filename().string();
+                                ok = true;
+                            }
                         }
                     }
                 }
@@ -660,10 +689,11 @@ void AudioSynthesizer48k::evaluateVoiceSample(
     float& outLeft,
     float& outRight,
     float& outMono) noexcept {
-    // 1. User-Imported Custom MP3 / WAV / FLAC / M4A Soundtrack (Suno / Studio Audio)
+    // 1. Bundled 4-Track Original Soundtrack or User-Imported MP3 / WAV / FLAC / M4A
     const CustomAudioTrack48k* trk = v.voiceTrack ? v.voiceTrack : customTrack_;
-    if (v.voiceTrack != nullptr && trk->frameCount > 0u &&
-        trk->interleavedStereo.size() >= trk->frameCount * 2u) {
+    const bool hasPcm16 = (trk != nullptr) && (trk->interleavedPcm16.size()  >= trk->frameCount * 2u);
+    const bool hasFlt32 = (trk != nullptr) && (trk->interleavedStereo.size() >= trk->frameCount * 2u);
+    if (v.voiceTrack != nullptr && trk->frameCount > 0u && (hasPcm16 || hasFlt32)) {
         const uint64_t N = trk->frameCount;
         const uint64_t idx = v.phaseSample % N;
         float seam = 1.0f;
@@ -678,8 +708,17 @@ void AudioSynthesizer48k::evaluateVoiceSample(
             }
         }
         constexpr float kCustomGain = 4.2f;
-        const float sL = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 0u] * seam * kCustomGain;
-        const float sR = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 1u] * seam * kCustomGain;
+        float rawL = 0.0f;
+        float rawR = 0.0f;
+        if (hasPcm16) {
+            rawL = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 0u]) * (1.0f / 32767.0f);
+            rawR = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 1u]) * (1.0f / 32767.0f);
+        } else {
+            rawL = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 0u];
+            rawR = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 1u];
+        }
+        const float sL = rawL * seam * kCustomGain;
+        const float sR = rawR * seam * kCustomGain;
         outLeft  = sL;
         outRight = sR;
         outMono  = 0.5f * (sL + sR);
@@ -1103,6 +1142,16 @@ uint32_t AudioSynthesizer48k::renderFrames(
 // AudioEngine — WASAPI Presentation Clock + Endpoint Migration
 // ============================================================================
 
+const char* AudioEngine::bundledSoundtrackTitle(uint32_t slot1To4) noexcept {
+    switch (slot1To4) {
+        case 1u: return "1. Neon Orchid - Taiwanese Spy Jazz";
+        case 2u: return "2. Acid Lotus - Taiwanese Detroit Techno";
+        case 3u: return "3. Velvet Cipher - Cinematic Taiwanese Synth-Funk";
+        case 4u: return "4. Glass Dragon - Progressive Demoscene Electronica";
+        default: return "Procedural RTX Synth Score";
+    }
+}
+
 AudioEngine::AudioEngine() {
     LARGE_INTEGER freq{};
     QueryPerformanceFrequency(&freq);
@@ -1118,7 +1167,7 @@ void AudioEngine::notifyDefaultEndpointChangedFromCallback(const wchar_t* /*newD
 }
 
 bool AudioEngine::initialize(bool forceFail) {
-    shutdown();
+    stopEndpointAndEnumerator();
     forceFailed_ = forceFail;
     migrationCount_.store(0, std::memory_order_relaxed);
     consecutiveMigrationFailures_ = 0;
@@ -1357,11 +1406,8 @@ void AudioEngine::stopStreamOnly() noexcept {
     }
 }
 
-void AudioEngine::shutdown() noexcept {
+void AudioEngine::stopEndpointAndEnumerator() noexcept {
     stopStreamOnly();
-    activeCustomTrack_.store(nullptr, std::memory_order_release);
-    retainedTracks_.clear();
-    customAudioLabel_.clear();
 
     auto* enumerator = static_cast<IMMDeviceEnumerator*>(enumeratorPtr_);
     auto* notif = static_cast<EndpointNotificationClient*>(notifClientPtr_);
@@ -1378,6 +1424,30 @@ void AudioEngine::shutdown() noexcept {
         enumeratorPtr_ = nullptr;
     }
     activeEndpointId_.clear();
+}
+
+void AudioEngine::stopPreloadWorker() noexcept {
+    cancelPreload_.store(true, std::memory_order_release);
+    if (preloadWorker_.joinable()) {
+        preloadWorker_.join();
+    }
+    preloadInProgress_.store(false, std::memory_order_release);
+}
+
+void AudioEngine::shutdown() noexcept {
+    stopPreloadWorker();
+    stopEndpointAndEnumerator();
+
+    hasBundledSoundtrack_ = false;
+    selectedTrackSlot_.store(0u, std::memory_order_release);
+    lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+    for (size_t i = 0; i < kBundledTrackCount; ++i) {
+        bundledTracks_[i].store(nullptr, std::memory_order_release);
+        bundledTrackStorage_[i].reset();
+    }
+    activeCustomTrack_.store(nullptr, std::memory_order_release);
+    retainedTracks_.clear();
+    customAudioLabel_.clear();
 }
 
 bool AudioEngine::pollEndpointMigration(uint64_t resumeTimelineSample) {
@@ -1452,6 +1522,115 @@ void AudioEngine::resetPhase(uint64_t seedSample) noexcept {
     phaseResetGen_.fetch_add(1, std::memory_order_release);
 }
 
+void AudioEngine::startBundledSoundtrack(
+    const std::array<std::filesystem::path, kBundledTrackCount>& trackPaths,
+    uint32_t initialSlot1To4) {
+    stopPreloadWorker();
+
+    bool anyExists = false;
+    std::error_code ec;
+    for (const auto& p : trackPaths) {
+        if (!p.empty() && std::filesystem::exists(p, ec)) {
+            anyExists = true;
+            break;
+        }
+    }
+    if (!anyExists) {
+        return;
+    }
+
+    const uint32_t clampedSlot = std::clamp<uint32_t>(initialSlot1To4, 1u, static_cast<uint32_t>(kBundledTrackCount));
+    hasBundledSoundtrack_ = true;
+    cancelPreload_.store(false, std::memory_order_release);
+    preloadInProgress_.store(true, std::memory_order_release);
+    selectedTrackSlot_.store(clampedSlot, std::memory_order_release);
+    trackSwitchGen_.fetch_add(1u, std::memory_order_release);
+
+    const size_t firstIdx = static_cast<size_t>(clampedSlot - 1u);
+    preloadWorker_ = std::thread([this, trackPaths, firstIdx]() {
+        for (size_t step = 0; step < kBundledTrackCount; ++step) {
+            if (cancelPreload_.load(std::memory_order_acquire)) {
+                break;
+            }
+            const size_t idx = (firstIdx + step) % kBundledTrackCount;
+            if (bundledTracks_[idx].load(std::memory_order_acquire) != nullptr) {
+                continue;
+            }
+            CustomAudioTrack48k decoded{};
+            std::string err;
+            if (loadCustomAudioFile48k(trackPaths[idx], decoded, &err, false, &cancelPreload_, true)) {
+                decoded.label = bundledSoundtrackTitle(static_cast<uint32_t>(idx + 1u));
+                auto sharedPtr = std::make_shared<const CustomAudioTrack48k>(std::move(decoded));
+                bundledTrackStorage_[idx] = sharedPtr;
+                bundledTracks_[idx].store(sharedPtr.get(), std::memory_order_release);
+            }
+        }
+        preloadInProgress_.store(false, std::memory_order_release);
+    });
+}
+
+void AudioEngine::selectSoundtrackSlot(uint32_t slot0To5) noexcept {
+    uint32_t clamped = std::min<uint32_t>(slot0To5, 5u);
+    if (clamped == 5u && activeCustomTrack_.load(std::memory_order_acquire) == nullptr) {
+        clamped = hasBundledSoundtrack_ ? 1u : 0u;
+    }
+    if (clamped >= 1u && clamped <= kBundledTrackCount && !hasBundledSoundtrack_) {
+        clamped = 0u;
+    }
+    selectedTrackSlot_.store(clamped, std::memory_order_release);
+    lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+    trackSwitchGen_.fetch_add(1u, std::memory_order_release);
+}
+
+uint32_t AudioEngine::cycleSoundtrackForward() noexcept {
+    const uint32_t cur = selectedTrackSlot_.load(std::memory_order_acquire);
+    uint32_t next = 0u;
+    if (hasBundledSoundtrack_) {
+        if (cur >= 1u && cur < kBundledTrackCount) {
+            next = cur + 1u;
+        } else if (cur == kBundledTrackCount) {
+            next = 0u; // After Track 4 -> Built-in Procedural Synth
+        } else {
+            next = 1u; // From Synth (0) or External MP3 (5) -> Track 1
+        }
+    } else if (activeCustomTrack_.load(std::memory_order_acquire) != nullptr) {
+        next = (cur == 5u) ? 0u : 5u;
+    }
+    selectSoundtrackSlot(next);
+    return selectedTrackSlot_.load(std::memory_order_acquire);
+}
+
+uint32_t AudioEngine::cycleSoundtrackBackward() noexcept {
+    const uint32_t cur = selectedTrackSlot_.load(std::memory_order_acquire);
+    uint32_t prev = 0u;
+    if (hasBundledSoundtrack_) {
+        if (cur == 5u) {
+            prev = 1u;
+        } else if (cur == 1u) {
+            prev = 0u;
+        } else if (cur == 0u) {
+            prev = static_cast<uint32_t>(kBundledTrackCount);
+        } else {
+            prev = cur - 1u;
+        }
+    } else if (activeCustomTrack_.load(std::memory_order_acquire) != nullptr) {
+        prev = (cur == 5u) ? 0u : 5u;
+    }
+    selectSoundtrackSlot(prev);
+    return selectedTrackSlot_.load(std::memory_order_acquire);
+}
+
+std::string AudioEngine::activeSoundtrackTitle() const {
+    const uint32_t slot = selectedTrackSlot_.load(std::memory_order_acquire);
+    if (slot >= 1u && slot <= kBundledTrackCount) {
+        return bundledSoundtrackTitle(slot);
+    }
+    if (slot == 5u && activeCustomTrack_.load(std::memory_order_acquire) != nullptr) {
+        return customAudioLabel_;
+    }
+    return "Procedural RTX Synth Score";
+}
+
 bool AudioEngine::loadExternalAudioFile(
     const std::filesystem::path& filePath,
     std::string* outError,
@@ -1464,12 +1643,18 @@ bool AudioEngine::loadExternalAudioFile(
     retainedTracks_.push_back(sharedTrack);
     customAudioLabel_ = sharedTrack->label;
     activeCustomTrack_.store(sharedTrack.get(), std::memory_order_release);
+    selectedTrackSlot_.store(5u, std::memory_order_release);
+    lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+    trackSwitchGen_.fetch_add(1u, std::memory_order_release);
     return true;
 }
 
 void AudioEngine::clearExternalAudioFile() noexcept {
     activeCustomTrack_.store(nullptr, std::memory_order_release);
     customAudioLabel_.clear();
+    selectedTrackSlot_.store(hasBundledSoundtrack_ ? 1u : 0u, std::memory_order_release);
+    lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+    trackSwitchGen_.fetch_add(1u, std::memory_order_release);
 }
 
 bool AudioEngine::readPlayedSamples48k(int64_t& outSamples48k) const noexcept {
@@ -1628,12 +1813,39 @@ void AudioEngine::audioThreadMain() noexcept {
         clockSeq_.fetch_add(1u, std::memory_order_release);
     };
 
+    auto resolveSlotTrack = [&](uint32_t slot, bool& outWaitingForPreload) noexcept -> const CustomAudioTrack48k* {
+        outWaitingForPreload = false;
+        if (slot == 5u) {
+            return activeCustomTrack_.load(std::memory_order_acquire);
+        }
+        if (slot >= 1u && slot <= kBundledTrackCount) {
+            const auto* t = bundledTracks_[slot - 1u].load(std::memory_order_acquire);
+            if (t) return t;
+            if (preloadInProgress_.load(std::memory_order_acquire)) {
+                outWaitingForPreload = true;
+                return nullptr;
+            }
+            for (size_t k = 0; k < kBundledTrackCount; ++k) {
+                if (const auto* alt = bundledTracks_[k].load(std::memory_order_acquire)) {
+                    return alt;
+                }
+            }
+        }
+        return nullptr;
+    };
+
     AudioSynthesizer48k synth;
     synth.setDurationSamples(durationSamples_);
     synth.setEdition(static_cast<Edition>(edition_.load(std::memory_order_relaxed)));
-    const CustomAudioTrack48k* appliedTrack = activeCustomTrack_.load(std::memory_order_acquire);
+    bool initWaiting = false;
+    const uint32_t initSlot = selectedTrackSlot_.load(std::memory_order_acquire);
+    const CustomAudioTrack48k* appliedTrack = resolveSlotTrack(initSlot, initWaiting);
     synth.setCustomTrack(appliedTrack);
-    synth.reset(appliedTrack ? 0ULL : pendingPhaseSample_.load(std::memory_order_relaxed), 0.0f);
+    const uint64_t initSample = appliedTrack
+        ? ((initialPlayedCounter_ > 0) ? lastSongSamplePos_.load(std::memory_order_relaxed) : 0ULL)
+        : pendingPhaseSample_.load(std::memory_order_relaxed);
+    synth.reset(initSample, 0.0f);
+    uint64_t appliedSwitchGen = trackSwitchGen_.load(std::memory_order_acquire);
     uint64_t appliedPhaseGen = phaseResetGen_.load(std::memory_order_acquire);
 
     while (!stopRequested_.load(std::memory_order_acquire)) {
@@ -1670,23 +1882,55 @@ void AudioEngine::audioThreadMain() noexcept {
             break;
         }
 
-        // Seamless C1 crossfade if user loaded or cleared a custom MP3/WAV/FLAC soundtrack live!
-        const CustomAudioTrack48k* desiredTrack = activeCustomTrack_.load(std::memory_order_acquire);
-        if (desiredTrack != appliedTrack) {
-            appliedTrack = desiredTrack;
-            synth.setCustomTrack(appliedTrack);
-            synth.seekTo(appliedTrack ? 0ULL : pendingPhaseSample_.load(std::memory_order_relaxed));
+        // 1. Auto-advance across the 4-track bundled soundtrack album (1 -> 2 -> 3 -> 4 -> 1) when a song finishes!
+        uint32_t curSlot = selectedTrackSlot_.load(std::memory_order_acquire);
+        const uint64_t curSwitchGen = trackSwitchGen_.load(std::memory_order_acquire);
+        if (curSwitchGen == appliedSwitchGen &&
+            curSlot >= 1u && curSlot <= kBundledTrackCount &&
+            appliedTrack != nullptr && appliedTrack->frameCount > 4800ULL) {
+            if (synth.primarySamplePosition() + 1200ULL >= appliedTrack->frameCount) {
+                uint32_t nextSlot = curSlot;
+                for (uint32_t step = 1u; step <= kBundledTrackCount; ++step) {
+                    const uint32_t cand = ((curSlot - 1u + step) % static_cast<uint32_t>(kBundledTrackCount)) + 1u;
+                    if (bundledTracks_[cand - 1u].load(std::memory_order_acquire) != nullptr) {
+                        nextSlot = cand;
+                        break;
+                    }
+                }
+                if (selectedTrackSlot_.compare_exchange_strong(curSlot, nextSlot, std::memory_order_acq_rel)) {
+                    curSlot = nextSlot;
+                    appliedTrack = bundledTracks_[curSlot - 1u].load(std::memory_order_acquire);
+                    synth.setCustomTrack(appliedTrack);
+                    synth.seekTo(0ULL);
+                    lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+                }
+            }
         }
 
-        // Consume any pending transport seek/loop phase reset atomically via C1 crossfader
+        // 2. Seamless C1 crossfade when switching soundtrack tracks, completing initial preload, or importing an MP3!
+        bool waitingForPreload = false;
+        const CustomAudioTrack48k* desiredTrack = resolveSlotTrack(curSlot, waitingForPreload);
+        if (desiredTrack != appliedTrack || curSwitchGen != appliedSwitchGen) {
+            appliedTrack = desiredTrack;
+            appliedSwitchGen = curSwitchGen;
+            synth.setCustomTrack(appliedTrack);
+            synth.seekTo(appliedTrack ? 0ULL : pendingPhaseSample_.load(std::memory_order_relaxed));
+            if (appliedTrack) {
+                lastSongSamplePos_.store(0ULL, std::memory_order_relaxed);
+            }
+        }
+
+        // 3. Consume transport seek/loop phase resets on the procedural synth while keeping song tracks continuous across scene cuts!
         const uint64_t reqGen = phaseResetGen_.load(std::memory_order_acquire);
         if (reqGen != appliedPhaseGen) {
             const uint64_t targetSample = pendingPhaseSample_.load(std::memory_order_relaxed);
             appliedPhaseGen = reqGen;
-            synth.seekTo(targetSample);
+            if (appliedTrack == nullptr && !waitingForPreload) {
+                synth.seekTo(targetSample);
+            }
         }
 
-        const bool isMuted = muted_.load(std::memory_order_relaxed);
+        const bool isMuted = muted_.load(std::memory_order_relaxed) || waitingForPreload;
         const float masterVol = masterVolume_.load(std::memory_order_relaxed);
         const bool ambientPlay = isPaused && exploreAmbient_.load(std::memory_order_relaxed);
 
@@ -1698,6 +1942,9 @@ void AudioEngine::audioThreadMain() noexcept {
             isMuted,
             masterVol,
             &bands);
+        if (appliedTrack != nullptr) {
+            lastSongSamplePos_.store(synth.primarySamplePosition(), std::memory_order_relaxed);
+        }
         const uint32_t timelineAdvanced = isPaused ? 0u : synthAdvanced;
 
         rmsEnvelope_.store(bands.rms, std::memory_order_relaxed);

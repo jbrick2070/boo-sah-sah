@@ -2823,6 +2823,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         const float barMinX  = 0.5 * (res.x - barSize.x);
         const float barMinY  = (hudMode == 1u) ? (res.y - 60.0 * u) : (res.y - 104.0 * u);
         const float2 barMin  = float2(barMinX, barMinY);
+        const uint   trkSlot = gInteractiveMeta.z & 0xFFu;
+        const float  trkToastAlpha = saturate((float)((gInteractiveMeta.z >> 8u) & 0xFFu) / 255.0);
 
         if (px.x >= barMin.x && px.x <= barMin.x + barSize.x &&
             px.y >= barMin.y && px.y <= barMin.y + barSize.y)
@@ -3020,18 +3022,22 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
                 sdr = colEnamel;
 
-            // [MP3] Import Custom Soundtrack Button (rx = 312..350; LMB opens picker, RMB/Shift+Click restores built-in score)
-            float2 bMp3Min = barMin + float2(312.0 * u, 29.5 * u);
-            float2 bMp3Max = bMp3Min + float2(38.0 * u, 17.5 * u);
-            float3 mp3C = customMp3 ? colJade : colCyan;
+            // [TRK1..4 / SYNT / MP3+] Built-In Soundtrack Selector (rx = 310..350; LMB/Z cycles tracks, Shift+Click imports MP3)
+            float2 bMp3Min = barMin + float2(310.0 * u, 29.5 * u);
+            float2 bMp3Max = bMp3Min + float2(40.0 * u, 17.5 * u);
+            bool isSongTrack = (trkSlot >= 1u && trkSlot <= 5u) || customMp3;
+            float3 mp3C = (trkSlot == 5u || (customMp3 && trkSlot == 0u)) ? colOrchid : (isSongTrack ? colJade : colCyan);
             if (px.x >= bMp3Min.x && px.x <= bMp3Max.x && px.y >= bMp3Min.y && px.y <= bMp3Max.y)
             {
-                sdr = lerp(sdr, mp3C * (customMp3 ? 0.34 : 0.14), 0.86);
+                sdr = lerp(sdr, mp3C * (isSongTrack ? 0.30 : 0.16), 0.86);
                 if ((px.x - bMp3Min.x < 1.1) || (bMp3Max.x - px.x < 1.1) || (px.y - bMp3Min.y < 1.1) || (bMp3Max.y - px.y < 1.1))
                     sdr = mp3C;
             }
-            float tMp3 = sampleWord4(px, bMp3Min + float2(7.5 * u, 4.8 * u), 1.35 * u, 77u, 80u, 51u, 32u); // MP3
-            sdr = lerp(sdr, customMp3 ? colEnamel : mp3C, tMp3);
+            uint tc0 = 83u, tc1 = 89u, tc2 = 78u, tc3 = 84u; // SYNT
+            if (trkSlot >= 1u && trkSlot <= 4u) { tc0 = 84u; tc1 = 82u; tc2 = 75u; tc3 = 48u + trkSlot; } // TRK1..TRK4
+            else if (trkSlot == 5u || customMp3) { tc0 = 77u; tc1 = 80u; tc2 = 51u; tc3 = 43u; }          // MP3+
+            float tMp3 = sampleWord4(px, bMp3Min + float2(7.0 * u, 4.8 * u), 1.35 * u, tc0, tc1, tc2, tc3);
+            sdr = lerp(sdr, isSongTrack ? colEnamel : mp3C, tMp3);
 
             // [MUSC] / [MUTE] Live Music Toggle Pill (rx = 354..396)
             float2 bMusMin = barMin + float2(354.0 * u, 29.5 * u);
@@ -3101,6 +3107,53 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float tMod = sampleWord8(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, b0, b1, b2, b3, b4, b5, b6, b7);
                 sdr = lerp(sdr, colAmber, tLbl);
                 sdr = lerp(sdr, colEnamel, tMod);
+            }
+        }
+
+        // Pass-4 Now-Playing Soundtrack Toast Banner (left-aligned above Studio Dock; fades out smoothly)
+        if (trkToastAlpha > 0.01)
+        {
+            float2 ostBoxSz  = float2(176.0 * u, 20.0 * u);
+            float2 ostBoxMin = float2(barMin.x, max(12.0 * u, barMin.y - 25.0 * u));
+            if (px.x >= ostBoxMin.x && px.x <= ostBoxMin.x + ostBoxSz.x &&
+                px.y >= ostBoxMin.y && px.y <= ostBoxMin.y + ostBoxSz.y)
+            {
+                float3 bdrC = (trkSlot == 5u) ? colOrchid : ((trkSlot >= 1u && trkSlot <= 4u) ? colJade : colCyan);
+                sdr = lerp(sdr, float3(0.010, 0.022, 0.040), 0.90 * trkToastAlpha);
+                if ((px.x - ostBoxMin.x < 1.3) || (ostBoxMin.x + ostBoxSz.x - px.x < 1.3) ||
+                    (px.y - ostBoxMin.y < 1.3) || (ostBoxMin.y + ostBoxSz.y - px.y < 1.3))
+                    sdr = lerp(sdr, bdrC, trkToastAlpha);
+
+                uint w0a=80u, w0b=82u, w0c=79u, w0d=67u, w0e=69u, w0f=68u, w0g=85u, w0h=82u; // PROCEDUR
+                uint w1a=65u, w1b=76u, w1c=32u, w1d=82u, w1e=84u, w1f=88u, w1g=32u, w1h=83u; // AL RTX S
+                uint w2a=89u, w2b=78u, w2c=84u, w2d=72u, w2e=32u, w2f=32u, w2g=32u, w2h=32u; // YNTH
+                if (trkSlot == 1u) {
+                    w0a=49u; w0b=47u; w0c=52u; w0d=32u; w0e=78u; w0f=69u; w0g=79u; w0h=78u; // 1/4 NEON
+                    w1a=32u; w1b=79u; w1c=82u; w1d=67u; w1e=72u; w1f=73u; w1g=68u; w1h=32u; //  ORCHID
+                    w2a=83u; w2b=80u; w2c=89u; w2d=32u; w2e=74u; w2f=65u; w2g=90u; w2h=90u; // SPY JAZZ
+                } else if (trkSlot == 2u) {
+                    w0a=50u; w0b=47u; w0c=52u; w0d=32u; w0e=65u; w0f=67u; w0g=73u; w0h=68u; // 2/4 ACID
+                    w1a=32u; w1b=76u; w1c=79u; w1d=84u; w1e=85u; w1f=83u; w1g=32u; w1h=84u; //  LOTUS T
+                    w2a=69u; w2b=67u; w2c=72u; w2d=78u; w2e=79u; w2f=32u; w2g=32u; w2h=32u; // ECHNO
+                } else if (trkSlot == 3u) {
+                    w0a=51u; w0b=47u; w0c=52u; w0d=32u; w0e=86u; w0f=69u; w0g=76u; w0h=86u; // 3/4 VELV
+                    w1a=69u; w1b=84u; w1c=32u; w1d=67u; w1e=73u; w1f=80u; w1g=72u; w1h=69u; // ET CIPHE
+                    w2a=82u; w2b=32u; w2c=70u; w2d=85u; w2e=78u; w2f=75u; w2g=32u; w2h=32u; // R FUNK
+                } else if (trkSlot == 4u) {
+                    w0a=52u; w0b=47u; w0c=52u; w0d=32u; w0e=71u; w0f=76u; w0g=65u; w0h=83u; // 4/4 GLAS
+                    w1a=83u; w1b=32u; w1c=68u; w1d=82u; w1e=65u; w1f=71u; w1g=79u; w1h=78u; // S DRAGON
+                    w2a=32u; w2b=69u; w2c=76u; w2d=69u; w2e=67u; w2f=84u; w2g=82u; w2h=79u; //  ELECTRO
+                } else if (trkSlot == 5u) {
+                    w0a=67u; w0b=85u; w0c=83u; w0d=84u; w0e=79u; w0f=77u; w0g=32u; w0h=69u; // CUSTOM E
+                    w1a=88u; w1b=84u; w1c=69u; w1d=82u; w1e=78u; w1f=65u; w1g=76u; w1h=32u; // XTERNAL
+                    w2a=77u; w2b=80u; w2c=51u; w2d=43u; w2e=32u; w2f=32u; w2g=32u; w2h=32u; // MP3+
+                }
+
+                float ostSc = 1.32 * u;
+                float ostM0 = sampleWord8(px, ostBoxMin + float2(8.5 * u, 6.0 * u), ostSc, w0a, w0b, w0c, w0d, w0e, w0f, w0g, w0h);
+                float ostM1 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 40.0 * ostSc, 6.0 * u), ostSc, w1a, w1b, w1c, w1d, w1e, w1f, w1g, w1h);
+                float ostM2 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 80.0 * ostSc, 6.0 * u), ostSc, w2a, w2b, w2c, w2d, w2e, w2f, w2g, w2h);
+                sdr = lerp(sdr, colEnamel, max(ostM0, max(ostM1, ostM2)) * trkToastAlpha);
             }
         }
     }
