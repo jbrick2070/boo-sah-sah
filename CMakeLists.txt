@@ -278,7 +278,12 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSSky -DM2_RT -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+
 add_custom_target(boo_shaders DEPENDS
+    "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"

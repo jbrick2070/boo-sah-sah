@@ -2255,11 +2255,12 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     linClampPs.ShaderRegister = 0;
     linClampPs.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // 1. Graphics root signature (Raster Scene, Bloom Down/Up, Composite): [0]=28 root constants (b0), [1]=2-SRV table (t0..t1)
+    // 1. Graphics root signature (Raster Scene, Bloom Down/Up, Composite): [0]=28 root constants (b0), [1]=3-SRV table (t0..t2)
+    //    Every table start used with this signature (2, 3..5, 4..6, 7) has three valid heap descriptors after it.
     {
         D3D12_DESCRIPTOR_RANGE srvRange{};
         srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        srvRange.NumDescriptors = 2;
+        srvRange.NumDescriptors = 3;
         srvRange.BaseShaderRegister = 0;
 
         D3D12_ROOT_PARAMETER gfxParams[2]{};
@@ -2984,10 +2985,13 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
         pc.bloomIntensity = 0.18f + 0.06f * revealOpen01;
+        // Composite lens flags: bit0 = autofocus bokeh DoF (needs the M2 linear scene-distance target),
+        // bit1 = lens ghosts + halo (suppressed under --reduced-motion / reduced-flash presentation).
+        pc.isFirstDownsample = (trilogy ? 1u : 0u) | (ctx.reducedFlash ? 0u : 2u);
 
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
-        cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(3u)); // [3]=sceneHdr + [4]=bloomMip0
+        cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(2u)); // [2]=sceneDistance (t0), [3]=sceneHdr (t1), [4]=bloomMip0 (t2)
         cmd->DrawInstanced(3, 1, 0, 0);
     }
     transitionResource(cmd, targetCanvas, D3D12_RESOURCE_STATE_RENDER_TARGET, kCanvasReadState);

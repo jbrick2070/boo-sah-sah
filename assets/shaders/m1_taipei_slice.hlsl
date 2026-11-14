@@ -1581,7 +1581,11 @@ float4 PSBloomUpsample(VSOut pin) : SV_Target
 #endif
 
 // =============================================================================
-// PASS 3: Clean 16:9 Canvas Composite (Chroma-Preserving Filmic + IEC sRGB + IGN)
+// PASS 3: Clean 16:9 Canvas Composite — Cinematic Lens Model
+//   Autofocus thin-lens bokeh depth of field (24-tap golden-angle scatter-as-gather, foreground-aware),
+//   lateral chromatic aberration, wide anamorphic streaks, pseudo lens ghosts + halo, film halation,
+//   vignette, chroma-preserving filmic tone curve, IEC sRGB, luminance-weighted film grain, TPDF dither.
+//   Every stochastic term is keyed on (pixel, gDitherSeed) so seeks reproduce identical frames.
 // =============================================================================
 #if defined(BOO_M1_COMPOSITE_PS)
 cbuffer M1PostCB : register(b0)
@@ -1589,34 +1593,151 @@ cbuffer M1PostCB : register(b0)
     float2 gCanvasInvSize;
     float  gBloomThreshold;
     float  gVignetteStrength;
-    uint   gIsFirstDownsample;
+    uint   gLensFlags;      // bit0 = autofocus bokeh DoF (scene distance valid), bit1 = lens ghosts + halo
     uint   gDitherSeed;
     float  gPreExposure;
     float  gBloomIntensity;
 };
 
-Texture2D<float4> gSceneHdrTex : register(t0);
-Texture2D<float4> gBloomMip0   : register(t1);
-SamplerState      gLinearClamp : register(s0);
+Texture2D<float>  gSceneDistTex : register(t0);
+Texture2D<float4> gSceneHdrTex  : register(t1);
+Texture2D<float4> gBloomMip0    : register(t2);
+SamplerState      gLinearClamp  : register(s0);
+
+int2 canvasSizePx()
+{
+    return int2(round(1.0 / gCanvasInvSize));
+}
+
+float loadDistance(int2 p, int2 size)
+{
+    return gSceneDistTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0));
+}
+
+float3 loadHdr(int2 p, int2 size)
+{
+    return min(gSceneHdrTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0)).rgb, 64.0.xxx);
+}
+
+// Harmonic mean of nine centre-weighted probes: biases focus toward the nearest subject in frame.
+float autofocusDistance(int2 size)
+{
+    float invSum = 0.0;
+    [unroll] for (int k = 0; k < 9; ++k)
+    {
+        float2 o = (k == 0) ? float2(0.0, 0.0) : float2(cos((float)k * 0.785398), sin((float)k * 0.785398)) * ((k & 1) != 0 ? 0.045 : 0.085);
+        float2 uv = float2(0.5, 0.53) + o * float2(0.5625, 1.0);
+        invSum += 1.0 / max(loadDistance(int2(uv * (float2)size), size), 0.05);
+    }
+    return 9.0 / invSum;
+}
+
+// Thin-lens circle of confusion in canvas pixels: |1 - f/d| / f, scaled to a 1440p reference frame.
+float circleOfConfusionPx(float d, float focus, float scale)
+{
+    return min(abs(1.0 - focus / max(d, 0.05)) * 34.0 / max(focus, 0.6), 14.0) * scale;
+}
+
+float3 bokehDepthOfField(float2 pxPos, int2 size, float3 centerColor, float centerD, float focus, float scale)
+{
+    float centerCoc = circleOfConfusionPx(centerD, focus, scale);
+    float radius = 14.0 * scale;
+    float rot = interleavedGradientNoise(pxPos, 0x5BD1E995u) * kTwoPi;
+    float3 acc = centerColor;
+    float wsum = 1.0;
+    [unroll] for (int k = 0; k < 24; ++k)
+    {
+        float r = sqrt(((float)k + 0.5) / 24.0) * radius;
+        float th = (float)k * 2.39996323 + rot;
+        int2 tp = int2(pxPos + float2(cos(th), sin(th)) * r);
+        float td = loadDistance(tp, size);
+        float3 tc = loadHdr(tp, size);
+        float tcoc = circleOfConfusionPx(td, focus, scale);
+        // Background taps may not smear across a sharper foreground (no halo of the backdrop over the subject).
+        float effCoc = (td > centerD) ? min(tcoc, centerCoc) : tcoc;
+        float w = saturate(effCoc - r + 1.0);
+        float lum = dot(tc, float3(0.2126, 0.7152, 0.0722));
+        w *= 1.0 + saturate((lum - 1.0) * 0.6); // bright points bloom into crisp bokeh discs
+        acc += tc * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
 
 float4 PSCompositeCanvas(VSOut pin) : SV_Target
 {
-    float3 hdr = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
-    float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+    int2 size = canvasSizePx();
+    float2 pxPos = floor(pin.position.xy);
+    float scale = (float)size.y / 1440.0;
+    float3 hdrCenter = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+    float3 hdr = hdrCenter;
+
+    if ((gLensFlags & 1u) != 0u)
+    {
+        float focus = autofocusDistance(size);
+        float centerD = loadDistance(int2(pxPos), size);
+        hdr = bokehDepthOfField(pxPos, size, min(hdrCenter, 64.0.xxx), centerD, focus, scale);
+    }
 
     float2 centered = (pin.uv - 0.5) * float2(1.7777778, 1.0);
-    float vignette = saturate(1.14 - gVignetteStrength * dot(centered, centered));
+    float r2 = dot(centered, centered);
 
-    // Restrained tinted anamorphic bloom streaks, purely spatial & sample-deterministic
-    float2 flareOffset = float2(gCanvasInvSize.x * 16.0, 0.0);
-    float3 flare = gBloomMip0.SampleLevel(gLinearClamp, pin.uv + flareOffset, 0.0).rgb * float3(0.55, 0.88, 1.0)
-                 + gBloomMip0.SampleLevel(gLinearClamp, pin.uv - flareOffset, 0.0).rgb * float3(1.0, 0.58, 0.86);
-    float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.018) * gPreExposure * vignette;
+    // Lateral chromatic aberration: red and blue image planes magnify slightly differently toward the corners.
+    float2 caShift = (pin.uv - 0.5) * (0.0022 * r2);
+    float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
+    float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
+    hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
+
+    float vignette = saturate(1.14 - gVignetteStrength * r2);
+    float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+
+    // Wide anamorphic streak: four symmetric horizontal tap pairs with falling weights and a cool cast.
+    float3 streak = 0.0.xxx;
+    [unroll] for (int s = 0; s < 4; ++s)
+    {
+        float offPx = 12.0 * pow(2.2, (float)s) * scale;
+        float wS = 1.0 / (1.0 + (float)s * 1.6);
+        float2 o = float2(gCanvasInvSize.x * offPx, 0.0);
+        streak += (gBloomMip0.SampleLevel(gLinearClamp, pin.uv + o, 0.0).rgb +
+                   gBloomMip0.SampleLevel(gLinearClamp, pin.uv - o, 0.0).rgb) * wS;
+    }
+    float3 flare = streak * float3(0.42, 0.70, 1.0);
+
+    // Pseudo lens ghosts mirrored through the optical centre, plus a thin chromatic halo ring.
+    if ((gLensFlags & 2u) != 0u)
+    {
+        float2 ghostVec = (0.5 - pin.uv) * 0.46;
+        static const float3 kGhostTint[4] = {
+            float3(0.90, 0.55, 1.00), float3(0.45, 0.95, 0.85), float3(1.00, 0.80, 0.45), float3(0.55, 0.70, 1.00)
+        };
+        [unroll] for (int g = 1; g <= 4; ++g)
+        {
+            float2 guv = frac(pin.uv + ghostVec * (float)g);
+            float wG = pow(1.0 - saturate(length(0.5 - guv) / 0.70710678), 8.0);
+            flare += gBloomMip0.SampleLevel(gLinearClamp, guv, 0.0).rgb * kGhostTint[g - 1] * wG * 0.55;
+        }
+        float2 haloDir = (0.5 - pin.uv) * float2(1.7777778, 1.0);
+        haloDir = haloDir * rsqrt(max(dot(haloDir, haloDir), 1e-6)) * float2(0.5625, 1.0) * 0.36;
+        float2 huv = pin.uv + haloDir;
+        float wH = pow(1.0 - saturate(abs(length((huv - 0.5) * float2(1.7777778, 1.0)) - 0.36) * 9.0), 3.0);
+        flare += float3(gBloomMip0.SampleLevel(gLinearClamp, huv + haloDir * 0.03, 0.0).r,
+                        gBloomMip0.SampleLevel(gLinearClamp, huv, 0.0).g,
+                        gBloomMip0.SampleLevel(gLinearClamp, huv - haloDir * 0.03, 0.0).b) * wH * 0.35;
+    }
+
+    // Film halation: highlights scatter a warm red fringe back through the emulsion base.
+    float3 halation = bloom * float3(0.050, 0.012, 0.002);
+
+    float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.012 + halation) * gPreExposure * vignette;
     float3 sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
 
+    // Luminance-weighted film grain (strongest in the mid-tones, absent in pure black and white).
+    float lumS = dot(sdr, float3(0.2126, 0.7152, 0.0722));
+    float grain = triangularDither(pxPos * 0.5 + 7.0, gDitherSeed ^ 0x2545F491u);
+    sdr += grain * 0.028 * lumS * (1.0 - lumS) * 4.0 * 0.5;
+
     // Sample-deterministic 10-bit Triangular-PDF IGN dither (zero dependency on presentationFrame!)
-    float2 pixelXY = floor(pin.position.xy);
-    float dither = triangularDither(pixelXY, gDitherSeed) / 1023.0;
+    float dither = triangularDither(pxPos, gDitherSeed) / 1023.0;
     sdr = saturate(sdr + dither.xxx);
 
     return float4(sdr, 1.0);

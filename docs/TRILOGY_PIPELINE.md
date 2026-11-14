@@ -38,6 +38,10 @@ The M2 shader counts actual issued ray queries using wave reductions into a GPU 
 
 The 180-second synth has a separate duration-gated branch: rail pulse/minor ninths, warm major aerial movement, then sanctuary/bloom/finale. The 60-second synthesis arithmetic is retained. WASAPI presentation tracking, migration observer, 768-sample seek crossfade, and 576-sample gain ramps remain in place.
 
+## RTX Showcase pass (v1.1.0)
+
+`TrilogyMeshRenderer` now records a VS-only depth pre-pass, then the shading pass (`LESS_EQUAL`, no depth writes), then the sky at the far plane. Per visible pixel the DXR shading path issues: one glossy reflection ray (Showcase adds a shadow ray at the reflection hit), soft key-light shadow rays (1 or 2), one ambient-occlusion ray, and 2–4 volumetric visibility rays; glass issues one reflection ray plus three dispersion rays (one on 4K Experimental). The composite pass binds `[2]=sceneDistance, [3]=sceneHdr, [4]=bloomMip0` for autofocus bokeh depth of field. Frame timings in the table below predate this pass and must be re-measured.
+
 ## Candid visual weaknesses and scope boundaries
 
 - **Stylized procedural geometry, not survey-accurate CAD**: Landmarks (Oriental Pearl, Jin Mao, Shanghai Tower, SWFC, Houhai supertall, Taipei 101) and urban blocks are stylized low-to-mid-poly procedural interpretations rather than survey-verified architectural models, photogrammetry, or botanical CT scans. Surrounding mid-rise/high-rise blocks still rely on procedural curtain-wall UV/world-space mullion and room-occupancy patterns rather than bespoke per-building facade textures, street furniture, or vehicular traffic.

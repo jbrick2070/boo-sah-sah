@@ -2,6 +2,21 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## [1.1.0 — RTX Showcase Pass] — Ray-Traced Lighting & Cinematic Lens
+### Added
+- **Ray-traced lighting in `m2_mesh.hlsl` (DXR 1.1 inline `RayQuery`)**: stochastic soft key-light shadows (sun/moon disk cone sampling, 90-unit reach, replacing the old 3-unit binary contact test), ray-traced ambient occlusion (cosine-weighted, distance-adaptive radius), roughness-driven glossy reflections with grazing-angle anisotropic stretch (rain-street light streaks on wet asphalt, water and curtain walls), and reflection hits shaded with interpolated vertex normals, key light and (Showcase) a hit-point shadow ray.
+- **Ray-marched volumetric light shafts**: each march step fires a BVH visibility ray toward the key light through a height-falling medium with Henyey-Greenstein phase; a new `m2_sky_rt_ps.cso` sky pipeline continues the shafts across silhouettes into open sky.
+- **Spectral glass**: separate R/G/B refraction rays (IOR 1.455 / 1.49 / 1.535) for chromatic dispersion through the Glass Orchid, plus thin-film interference iridescence on petal rims.
+- **Physically based shading**: GGX / Smith height-correlated specular with per-material metal/dielectric F0 (24k gold, structural steel, obsidian stela, titanium, water), specular occlusion, wrapped-diffuse subsurface on the ruby labellum, back-lit enamel, and a velvet sheen lobe on the Neural Velvet ribbon.
+- **Sky and weather**: Rayleigh + Mie aureole, a textured moon disk with Mie halo aligned to the act-2 key light, an anti-aliased procedural star field (kept out of aerial-perspective fog), and procedural rain-impact ripples on puddles and open water.
+- **Depth pre-pass** in `TrilogyMeshRenderer` (VS-only PSO, `precise` clip-space math) so the ray-query shading pass runs exactly once per visible pixel; the sky now draws last at the far plane.
+- **Cinematic lens composite (`PSCompositeCanvas`)**: autofocus thin-lens bokeh depth of field (24-tap golden-angle gather, foreground-aware, driven by the M2 linear distance target), lateral chromatic aberration, wide four-octave anamorphic streaks, pseudo lens ghosts + chromatic halo (suppressed under reduced-flash), film halation, and luminance-weighted film grain.
+- **Ray budget tiers** via 4 new scene root constants (`quality`, `frameSeed`, `sunCone`, `fxStrength`; 24 -> 28 DWORDs): Balanced 1 shadow / 1 AO / 3 shaft steps, Showcase 2 / 1 / 4 plus hit shadows and 3-ray dispersion, 4K Experimental 1 / 1 / 2. Issued-ray telemetry now counts every query per lane.
+
+### Notes
+- All stochastic terms hash `(pixel, samplePosition / 800)`; there is no temporal history, so direct seeks still reproduce identical `CanvasClean` frames.
+- These shader and pipeline changes were authored without access to a Windows DXC / MSVC toolchain. Run `scripts/run_smoke.ps1` and the timing captures before release; the existing `QualityLadder` downgrade path remains the safety net if Showcase exceeds its frame budget.
+
 ## [1.0.0 — Milestone M10] — Portable Release & Complete Hardware Orchestra
 ### Added
 - **M10 Single-App Native Installer & Portable Release**: Added `tools/installer/setup_main.cpp` (`boo_installer_stub.exe`, native Win32 + inbox `cabinet.dll` LZMS self-extracting installer/uninstaller) and `scripts/package_release.ps1` producing a single-file Windows installer `BooSahSah-Setup-win64.exe` (~`12.1 MB`) plus companion `boo-sah-sah-win64-portable.zip` around the unified single application executable `boo_sah_sah.exe` (`--validate-cues`, `--bench`, compiled `.cso` shaders, `.bmesh` geometry, `madame_n` IR model, compact `openvino\` NPU runtime sidecar, cues, configs, `USER_GUIDE.md`, `LICENSES.md`, `CHANGELOG.md`). Updated `scripts/run_smoke.ps1` with automatic `dumpbin.exe` discovery and full M0–M10 verification gates.

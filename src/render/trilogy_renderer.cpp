@@ -29,7 +29,9 @@ void transition(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r,D3D12_RESOURCE_
 }
 void uav(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r) {D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;b.UAV.pResource=r;cmd->ResourceBarrier(1,&b);}
 struct DrawConstants {float rows[12]{};uint32_t first=0,mat=0,part=0,pad=0;};
-struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;};
+struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;uint32_t quality,frameSeed;float sunCone,fxStrength;};
+static_assert(sizeof(SceneConstants)==112,"M2 scene constants must be 28 DWORDs");
+constexpr UINT kSceneConstantDwords=sizeof(SceneConstants)/4;
 void normalize(float v[3]) {float l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(int c=0;c<3;++c)v[c]/=std::max(l,1e-6f);}
 void cross(const float a[3],const float b[3],float r[3]) {r[0]=a[1]*b[2]-a[2]*b[1];r[1]=a[2]*b[0]-a[0]*b[2];r[2]=a[0]*b[1]-a[1]*b[0];}
 }
@@ -41,7 +43,7 @@ struct TrilogyMeshRenderer::Impl {
     ComPtr<ID3D12Resource> vb,ib,scratch,tlas,tlasScratch,instances,depth;
     ComPtr<ID3D12DescriptorHeap> rtv,dsv;
     ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> raster,rt,sky;
+    ComPtr<ID3D12PipelineState> raster,rt,sky,skyRt,prepass;
     std::array<ComPtr<ID3D12Resource>,4> counters,readbacks;
     ComPtr<ID3D12Resource> zero;
     std::array<bool,4> pending{};
@@ -197,7 +199,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         s.ib=buffer(d,indices.size()*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);upload(s.ib.Get(),indices.data(),indices.size()*4);
         D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=3;
         D3D12_ROOT_PARAMETER params[7]{};
-        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:24;}
+        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:kSceneConstantDwords;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
         params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={1,&range};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
@@ -210,11 +212,19 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;pd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;pd.RasterizerState.DepthClipEnable=TRUE;
         pd.DepthStencilState.DepthEnable=TRUE;pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
         pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;pd.NumRenderTargets=2;pd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
+        {
+            // Depth pre-pass: VS only, no colour writes. The shading pass then runs its ray queries once per visible pixel.
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pre=pd;pre.PS={nullptr,0};
+            pre.BlendState.RenderTarget[0].RenderTargetWriteMask=0;pre.BlendState.RenderTarget[1].RenderTargetWriteMask=0;
+            check(d->CreateGraphicsPipelineState(&pre,IID_PPV_ARGS(&s.prepass)));
+        }
+        pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
         check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.raster)));
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};ComPtr<ID3D12Device5> d5;
         s.rtReady=!s.context.isWarp()&&SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,&options,sizeof(options)))&&options.RaytracingTier>=D3D12_RAYTRACING_TIER_1_1&&SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&d5)));
         if(s.rtReady) {auto rps=shader("m2_mesh_rt_ps.cso");pd.PS={rps.data(),rps.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.rt)));}
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.sky)));
+        if(s.rtReady) {auto skyrps=shader("m2_sky_rt_ps.cso");pd.PS={skyrps.data(),skyrps.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.skyRt)));}
         D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
@@ -295,9 +305,23 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         c.moodAccent=isHijack?0.5f:std::clamp(f.moodPaletteAccent,0.0f,1.0f);
     }
     c.pulse=camera.emissivePulse;
-    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,24,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,D3D12_GPU_DESCRIPTOR_HANDLE{tensor});cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd->SetPipelineState(s.sky.Get());cmd->DrawInstanced(3,1,0,0);cmd->SetPipelineState(useRt?s.rt.Get():s.raster.Get());
+    // RT ray budget tier (shader: 1 = Balanced, 2 = Showcase, 3 = 4K Experimental, 0 = raster substitute).
+    switch(f.qualityPreset) {
+        case QualityPresetId::Showcase:       c.quality=2u;break;
+        case QualityPresetId::Experimental4K: c.quality=3u;break;
+        default:                              c.quality=1u;break;
+    }
+    if(!useRt)c.quality=0u;
+    c.frameSeed=static_cast<uint32_t>(static_cast<uint64_t>(std::max<int64_t>(0,f.samplePosition)/800)&0xFFFFFFFFull);
+    c.sunCone=0.0045f+0.0075f*(1.0f-std::clamp(c.day,0.0f,1.0f)); // Night key (moon + city haze) casts softer penumbrae
+    c.fxStrength=f.reducedFlash?0.6f:1.0f;
+    cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,kSceneConstantDwords,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,D3D12_GPU_DESCRIPTOR_HANDLE{tensor});cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // 1) Depth pre-pass  2) shading pass (LESS_EQUAL, no depth writes, one RT shade per pixel)  3) sky at the far plane.
+    cmd->SetPipelineState(s.prepass.Get());
     for(size_t i=0;i<s.parts.size();++i)if(inst[i].InstanceMask) {cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);}
+    cmd->SetPipelineState(useRt?s.rt.Get():s.raster.Get());
+    for(size_t i=0;i<s.parts.size();++i)if(inst[i].InstanceMask) {cmd->SetGraphicsRoot32BitConstants(1,16,&draws[i],0);cmd->DrawInstanced(s.parts[i].sub.indexCount,1,0,0);}
+    cmd->SetPipelineState((useRt&&s.skyRt)?s.skyRt.Get():s.sky.Get());cmd->DrawInstanced(3,1,0,0);
     transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
     if(canonical&&useRt) {cmd->CopyBufferRegion(s.readbacks[slot].Get(),0,s.counters[slot].Get(),0,8);s.pending[slot]=true;}
