@@ -1,5 +1,6 @@
 #include "boo/api.hpp"
 #include "boo/audio.hpp"
+#include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
 #include <fstream>
 #include "boo/clock.hpp"
@@ -13,6 +14,7 @@
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -1118,6 +1120,71 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     return true;
 }
 
+bool testAudioReactiveFollowerBeatAndFlashSafety() {
+    using boo::AudioReactiveFollower;
+    using boo::AudioReactiveState;
+    const double dt = 1.0 / 60.0;
+
+    // 1. A quiet 2 Hz kick is auto-levelled and yields roughly one beat per kick.
+    AudioReactiveFollower f;
+    int beats = 0;
+    float prevBeat = 0.0f, maxLow = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.5);
+        const AudioReactiveState s = f.update(0.02f + 0.10f * static_cast<float>(std::exp(-ph / 0.08)), 0.2f, 0.05f, 0.3f, dt, false);
+        BOO_CHECK(s.low >= 0.0f && s.low <= 1.0f && s.beat >= 0.0f && s.beat <= 1.0f);
+        if (i > 120) {
+            if (s.beat > prevBeat + 0.2f) ++beats;
+            maxLow = std::max(maxLow, s.low);
+        }
+        prevBeat = s.beat;
+    }
+    BOO_CHECK(beats >= 13 && beats <= 17); // 8 s of 2 Hz kicks
+    BOO_CHECK(maxLow > 0.5f);              // 0.12 raw peak normalised by automatic gain
+
+    // 2. Flash safety: an 8 Hz kick can never retrigger the beat 3 or more times per second.
+    f.reset();
+    beats = 0;
+    prevBeat = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.125);
+        const AudioReactiveState s = f.update(0.05f + 0.5f * static_cast<float>(std::exp(-ph / 0.02)), 0.2f, 0.1f, 0.3f, dt, false);
+        if (s.beat > prevBeat + 0.05f) ++beats;
+        prevBeat = s.beat;
+    }
+    BOO_CHECK(beats < 30);
+
+    // 3. Reduced flash: no beat envelope, band signals halved.
+    f.reset();
+    float maxBeat = 0.0f;
+    maxLow = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.5);
+        const AudioReactiveState s = f.update(0.02f + 0.5f * static_cast<float>(std::exp(-ph / 0.08)), 0.2f, 0.1f, 0.3f, dt, true);
+        maxBeat = std::max(maxBeat, s.beat);
+        maxLow = std::max(maxLow, s.low);
+    }
+    BOO_CHECK(maxBeat == 0.0f);
+    BOO_CHECK(maxLow <= 0.5f);
+
+    // 4. Silence stays silent, hold glides to rest, non-finite input is ignored, packing is RGBA8.
+    f.reset();
+    AudioReactiveState s{};
+    for (int i = 0; i < 300; ++i) s = f.update(0.0f, 0.0f, 0.0f, 0.0f, dt, false);
+    BOO_CHECK(s.low == 0.0f && s.mid == 0.0f && s.high == 0.0f && s.beat == 0.0f);
+    for (int i = 0; i < 60; ++i) s = f.update(0.9f, 0.9f, 0.9f, 0.9f, dt, false);
+    BOO_CHECK(s.low > 0.5f);
+    for (int i = 0; i < 180; ++i) s = f.update(0.9f, 0.9f, 0.9f, 0.9f, dt, false, true);
+    BOO_CHECK(s.low < 0.01f && s.beat < 0.01f);
+    s = f.update(std::nanf(""), std::nanf(""), std::nanf(""), std::nanf(""), dt, false);
+    BOO_CHECK(std::isfinite(s.low) && std::isfinite(s.mid) && std::isfinite(s.high) && std::isfinite(s.beat));
+    AudioReactiveState full{};
+    full.low = 1.0f; full.mid = 0.5f; full.high = 0.0f; full.beat = 1.0f;
+    BOO_CHECK(AudioReactiveFollower::pack(full) == 0xFF0080FFu);
+    BOO_CHECK(AudioReactiveFollower::pack(AudioReactiveState{}) == 0u);
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1141,6 +1208,7 @@ int main() {
     runTest("SettingsAndPathRedaction", testSettingsAndPathRedaction);
     runTest("M1CameraLetterboxAndFlashSafety", testM1CameraLetterboxAndFlashSafety);
     runTest("AudioClicklessCrossfadeAndGainRamps", testAudioClicklessCrossfadeAndGainRamps);
+    runTest("AudioReactiveFollowerBeatAndFlashSafety", testAudioReactiveFollowerBeatAndFlashSafety);
     runTest("TimelineClockSwitchAndTaipei101FinaleFraming", testTimelineClockSwitchAndTaipei101FinaleFraming);
 
     std::cout << "\nUnit Test Summary: " << (gTestsRun - gTestsFailed) << "/" << gTestsRun << " passed.\n";

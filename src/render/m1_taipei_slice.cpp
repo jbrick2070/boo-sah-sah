@@ -3051,6 +3051,12 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
             pc.bloomIntensity *= 0.85f + 0.30f * std::clamp(ctx.moodBloomStrength, 0.f, 1.f);
         }
 
+        // Lens breathes with the music: the beat envelope pumps bloom slightly and feeds the composite's
+        // streak / chromatic-fringe gain. Zero in AOV modes, under reduced flash and in deterministic contexts.
+        const float audioKick = (curAov == 0u && !ctx.reducedFlash) ? std::clamp(ctx.audioReactive.beat, 0.0f, 1.0f) : 0.0f;
+        pc.bloomThreshold = audioKick; // Composite reads this slot as gAudioKick (bloom passes use their own constants)
+        pc.bloomIntensity *= 1.0f + 0.20f * audioKick + 0.08f * std::clamp(ctx.audioReactive.low, 0.0f, 1.0f) * (curAov == 0u ? 1.0f : 0.0f);
+
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
         cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(2u)); // [2]=sceneDistance (t0), [3]=sceneHdr (t1), [4]=bloomMip0 (t2)

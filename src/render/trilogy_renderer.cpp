@@ -1,4 +1,5 @@
 #include "boo/trilogy_renderer.hpp"
+#include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
 #include "boo/btex.hpp"
 #include "boo/nrd_bridge.hpp"
@@ -840,6 +841,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         c.moodCut=isHijack?0.f:std::clamp(f.moodCutAccent,0.f,1.f);
     }
     c.pulse=camera.emissivePulse;
+    // Audio drive packed as RGBA8 into the one spare scene DWORD (low, mid, high, beat). Debug AOVs and progressive accumulation stay static.
+    {const uint32_t packed=(f.interactive.aovMode==0u&&!f.interactive.accumulate)?AudioReactiveFollower::pack(f.audioReactive):0u;std::memcpy(&c.pad,&packed,sizeof(packed));}
 
     const uint32_t curAov = std::min<uint32_t>(iv.aovMode, 7u);
     const bool accumulate = canonical && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;

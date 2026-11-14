@@ -378,6 +378,7 @@ add_library(boo_core STATIC
     src/inference/scripted_director.cpp
     src/inference/openvino_director.cpp
     src/audio/engine.cpp
+    src/audio/audio_reactive.cpp
     src/render/d3d12_context.cpp
     src/render/live_accelerators.cpp
     src/render/m0_test_visual.cpp

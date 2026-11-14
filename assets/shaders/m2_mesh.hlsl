@@ -18,7 +18,7 @@ cbuffer Scene : register(b0) {
     float3 forward;  float reveal;
     uint width;      uint height;   uint act;       uint canonical;
     float daylight;  float pulse;   uint showFlags; float moodAccent;
-    float moodBloom; float moodLight; float moodCut; float scenePadding;
+    float moodBloom; float moodLight; float moodCut; uint audioPacked; // RGBA8: low, mid, high, beat
     float3 sunOverrideDir; float sunOverrideScale;   // Explore-mode interactive sun (interFlags bit 0)
     uint accumFrame; uint interFlags; float2 jitterNdc; // bit1 = progressive accumulation, bit2 = lamps off
 };
@@ -159,6 +159,17 @@ float3 unpackDrawMotion() {
 }
 
 // Scripted dawn ramp over film time, or (in Explore mode) driven by the interactive sun elevation.
+// Live audio drive (smoothed, auto-levelled, flash-safe; all zero in deterministic captures and AOVs).
+float audioLow()  { return (float)(audioPacked & 0xFFu) / 255.0; }
+float audioMid()  { return (float)((audioPacked >> 8u) & 0xFFu) / 255.0; }
+float audioHigh() { return (float)((audioPacked >> 16u) & 0xFFu) / 255.0; }
+float audioBeat() { return (float)(audioPacked >> 24u) / 255.0; }
+// Skyline spectrum: every building listens to one band (bass / mids / treble), chosen by its hash.
+float audioBandForBuilding(float bldgId) {
+    float pick = hash21(float2(bldgId * 0.37, 91.7));
+    return (pick < 0.34) ? audioLow() : ((pick < 0.67) ? audioMid() : audioHigh());
+}
+
 float timeRamp(float a, float b) {
     if (sunOverridden()) {
         return smoothstep(-0.10, 0.30, norm(sunOverrideDir).y);
@@ -311,7 +322,7 @@ float3 emissive(uint m, float3 p, float filterW) {
         nightFactor *= 0.22;
     }
     if (m == 6u) {
-        return float3(0.05, 0.86, 0.66) * (0.62 + 0.18 * pulse) * (0.08 + 0.92 * nightFactor);
+        return float3(0.05, 0.86, 0.66) * (0.62 + 0.18 * pulse + 0.34 * audioHigh()) * (0.08 + 0.92 * nightFactor);
     }
     if (m == 15u) {
         return float3(0.56, 0.36, 0.16) * (0.08 + 0.92 * nightFactor) * (1.0 + 0.08 * pulse);
@@ -350,18 +361,23 @@ float3 emissive(uint m, float3 p, float filterW) {
                       : ((m == 5u) ? lerp(ivoryTint, float3(0.42, 0.84, 0.74), 0.42 + 0.30 * rRoom)
                                    : lerp(coolTint, ivoryTint, rRoom * 0.55));
         float intensity = (m == 5u) ? 0.70 : 0.58;
-        return winCol * (winFactor * intensity * nightFactor);
+        // Skyline as a spectrum analyser: each tower's lit rooms swell with its band, and the level
+        // climbs the facade like a VU meter (lower storeys respond first).
+        float band = audioBandForBuilding(bldgId);
+        float meter = smoothstep(0.0, 0.35, band - frac(flr / 40.0) * 0.75);
+        float audioGain = 1.0 + (0.16 * band + 0.30 * meter) * (1.0 - lodBlend * 0.5);
+        return winCol * (winFactor * intensity * nightFactor * audioGain);
     }
     if (m == 21u) {
         float2 tuv = frac(p.xz * 0.095 + float2(time * 0.028, -time * 0.018));
         float3 nSample = tensorField.SampleLevel(linearClamp, tuv, 0.0).rgb;
         float3 accent = ((showFlags & 2u) != 0u) ? float3(1.15, 0.42, 1.05) : float3(0.35, 1.15, 0.96);
-        return nSample * accent * (0.42 + 0.12 * pulse);
+        return nSample * accent * (0.42 + 0.12 * pulse + 0.26 * audioMid());
     }
     if (m == 22u) {
         float3 floraTint = lerp(float3(0.08, 0.88, 0.64), float3(0.96, 0.62, 0.20), clamp(moodAccent, 0.0, 1.0));
         if ((showFlags & 2u) != 0u) floraTint = lerp(floraTint, float3(0.88, 0.24, 0.74), 0.45);
-        return floraTint * (0.045 + 0.05 * moodBloom + 0.025 * pulse) * (0.25 + 0.75 * nightFactor);
+        return floraTint * (0.045 + 0.05 * moodBloom + 0.025 * pulse + 0.05 * audioBeat()) * (0.25 + 0.75 * nightFactor);
     }
     return (float3)0.0;
 }
@@ -960,7 +976,7 @@ float3 rtLightShafts(float3 dir, float maxT, float jitter, inout uint queries) {
     float phase = lerp(0.0796, henyeyGreensteinPhase(dot(dir, sd), 0.62), 0.82);
     float3 tint = sceneSunRadiance();
     if ((showFlags & 2u) != 0u) tint = lerp(tint, float3(0.62, 0.32, 0.84), 0.35);
-    return acc * phase * tint * lerp(1.7, 2.6, daylight);
+    return acc * phase * tint * lerp(1.7, 2.6, daylight) * (0.90 + 0.28 * audioLow());
 }
 #endif
 
@@ -1084,7 +1100,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         base *= lerp(1.0, 0.58, wetPuddle);
     }
     if (matId == 7u || (matId == 1u && wetPuddle > 0.15)) {
-        float baseRip = (matId == 7u) ? 0.010 : (0.005 * wetPuddle);
+        float baseRip = ((matId == 7u) ? 0.010 : (0.005 * wetPuddle)) * (1.0 + 0.45 * audioLow());
         float ripScale = baseRip / (1.0 + dist * 0.022);
         float wx = sin(i.world.z * 5.7 + i.world.x * 2.3 + time * 2.4) * 0.55
                  + sin(i.world.z * 12.3 - i.world.x * 6.1 - time * 1.9) * 0.30
@@ -1094,7 +1110,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                  + sin(i.world.x * 13.7 + time * 2.7) * 0.15;
         n = norm(n + float3(wx * ripScale, 0.0, wz * ripScale));
         // Rain-impact rings on upward-facing wet exterior surfaces, faded out before they can alias.
-        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8);
+        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 1.1 * audioLow());
         if (ringAmt > 0.0 && !inBath) {
             float2 rg = rainRippleGrad(i.world.xz, time);
             n = norm(n - float3(rg.x, 0.0, rg.y) * ringAmt);
@@ -1655,7 +1671,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                     : float3(0.010, 0.015, 0.018) * (0.25 + 0.75 * midribDepth) * (inBath ? 0.30 : 1.0));
             float3 rimSheen = ((matId == 4u) ? float3(0.18, 0.30, 0.28) : float3(0.26, 0.32, 0.36))
                             * (edgeRim + 0.40 * crispMargin) * (inBath ? 0.32 : 1.0);
-            float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth;
+            float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth * (1.0 + 0.9 * audioBeat());
 
             float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.488), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.488)));
             float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.512), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.512)));
@@ -1667,7 +1683,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             // Thin-film iridescence on exterior orchid petals: thickness varies along the blade and midrib.
             float3 film = float3(1.0, 1.0, 1.0);
             if (!inBath && !isDynamicMarble && !isWaterDroplet) {
-                float filmNm = 280.0 + 220.0 * uBlade + 120.0 * abs(vBlade) + 40.0 * sin(time * 0.35 + uBlade * 6.0);
+                float filmNm = 280.0 + 220.0 * uBlade + 120.0 * abs(vBlade) + 40.0 * sin(time * 0.35 + uBlade * 6.0) + 110.0 * audioHigh();
                 film = lerp(float3(1.0, 1.0, 1.0), thinFilmInterference(ndotv, filmNm) * 1.25, saturate(0.10 + 0.55 * edgeRim));
             }
             color = lerp(glassTrans, specRadiance * float3(1.02, 1.04, 1.06) * film, reflMix)

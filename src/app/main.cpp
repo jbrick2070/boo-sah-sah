@@ -1,5 +1,6 @@
 #include "boo/api.hpp"
 #include "boo/audio.hpp"
+#include "boo/audio_reactive.hpp"
 #include "boo/benchmark.hpp"
 #include "boo/capabilities.hpp"
 #include "boo/clock.hpp"
@@ -1730,6 +1731,7 @@ int main(int argc, char** argv) {
 
     uint64_t peakVramBytes = 0;
     uint64_t frameCounter = 0;
+    AudioReactiveFollower audioReactive;
     double smoothFps = 60.0;
     double lastGpuMs = 0.25;
     bool appliedBenchBadges = false;
@@ -2549,6 +2551,10 @@ int main(int argc, char** argv) {
         fctx.actIndex = static_cast<uint32_t>(actIdx);
         fctx.actProgress = actProg;
         fctx.audioEnvelope = bands.rms;
+        // Live audio reactivity: follows whatever is actually playing (score, OST or imported track).
+        fctx.audioReactive = audioReactive.update(
+            bands.low, bands.mid, bands.high, bands.rms, tick.dtSeconds, settings.reducedFlash,
+            tick.state == TransportState::Seeking);
         fctx.edition = settings.edition;
         fctx.qualityPreset = qualityLadder.currentPreset();
         fctx.showOverlay = settings.showOverlay;

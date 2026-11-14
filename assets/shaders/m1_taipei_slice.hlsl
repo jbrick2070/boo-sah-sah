@@ -1586,13 +1586,14 @@ float4 PSBloomUpsample(VSOut pin) : SV_Target
 //   bit8 = autofocus bokeh DoF (scene distance valid), bit9 = lens ghosts + halo (off under reduced flash).
 //   Film mode adds: 24-tap golden-angle foreground-aware bokeh DoF, lateral chromatic aberration,
 //   four-octave anamorphic streaks, pseudo lens ghosts + chromatic halo, halation and film grain.
+//   The live beat envelope (gAudioKick) gently pumps bloom, streaks and chromatic fringing.
 //   Every stochastic term is keyed on (pixel, gDitherSeed) so seeks reproduce identical frames.
 // =============================================================================
 #if defined(BOO_M1_COMPOSITE_PS)
 cbuffer M1PostCB : register(b0)
 {
     float2 gCanvasInvSize;
-    float  gBloomThreshold;
+    float  gAudioKick;      // live beat envelope [0,1] (0 in AOV, reduced-flash and deterministic contexts)
     float  gVignetteStrength;
     uint   gIsFirstDownsample;
     uint   gDitherSeed;
@@ -1703,7 +1704,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         float r2 = dot(centered, centered);
 
         // Lateral chromatic aberration: red and blue image planes magnify slightly differently toward the corners.
-        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2);
+        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 1.5 * gAudioKick));
         float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
         float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
         hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
@@ -1721,7 +1722,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
             streak += (gBloomMip0.SampleLevel(gLinearClamp, pin.uv + o, 0.0).rgb +
                        gBloomMip0.SampleLevel(gLinearClamp, pin.uv - o, 0.0).rgb) * wS;
         }
-        float3 flare = streak * float3(0.42, 0.70, 1.0);
+        float3 flare = streak * float3(0.42, 0.70, 1.0) * (1.0 + 0.6 * gAudioKick);
 
         // Pseudo lens ghosts mirrored through the optical centre, plus a thin chromatic halo ring.
         if ((lensFlags & 2u) != 0u)

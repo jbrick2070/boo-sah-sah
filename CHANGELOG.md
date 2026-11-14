@@ -2,6 +2,18 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## [Unreleased] — Live Audio Reactivity
+
+### Added
+- **`AudioReactiveFollower`** (`include/boo/audio_reactive.hpp`, `src/audio/audio_reactive.cpp`): converts the audio engine's measured low / mid / high band RMS of the real mixed output (procedural score, bundled OST or imported track) into smoothed drive signals with per-band automatic gain, asymmetric attack / release, and low-band onset beat detection. Beat retriggers are capped below 3 Hz; `--reduced-flash` disables the beat and halves / slows the bands. Carried on `FrameContext::audioReactive`.
+- **Skyline spectrum analyser**: each tower's lit windows listen to one band (bass, mids or treble, chosen by building hash), with the level climbing the facade like a VU meter.
+- **Scene response** in `m2_mesh.hlsl`: jade accents shimmer with treble, the Neural Velvet ribbon swells with mids, micro-flora and the orchid's nectar glow pulse on the beat, light shafts and water chop / rain rings breathe with bass, and the orchid's thin-film colours shift with treble.
+- **Lens response**: the beat gently pumps bloom, anamorphic streaks and chromatic fringing in the composite.
+- Unit test `AudioReactiveFollowerBeatAndFlashSafety`.
+
+### Notes
+- The drive is packed as RGBA8 into the one spare scene DWORD (root signature size unchanged). It is zero in test / capture contexts, debug AOV modes and progressive accumulation, so deterministic seek captures are unaffected.
+
 ## [Unreleased] — RTX Showcase Additions (merged onto Film Quality & Robustness)
 
 ### Added

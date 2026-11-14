@@ -147,6 +147,17 @@ struct InteractiveView {
     uint32_t marbleMat[kMaxMarbles]{};     // Material ID (3 crystal, 4 celadon, 35 amber, 8 gold, 23 nickel)
 };
 
+// Smoothed, auto-levelled, flash-safe drive signals derived from the live audio bands (see
+// boo/audio_reactive.hpp). All zero means "no audio reactivity", which is what deterministic
+// capture and test contexts use.
+struct AudioReactiveState {
+    float low = 0.0f;   // bass energy [0,1]
+    float mid = 0.0f;   // mid-range energy [0,1]
+    float high = 0.0f;  // treble energy [0,1]
+    float beat = 0.0f;  // decaying kick / onset envelope [0,1], retriggers capped below 3 Hz
+    float level = 0.0f; // overall loudness [0,1]
+};
+
 struct FrameContext {
     InteractiveView interactive{};
     uint64_t presentationFrame = 0;
@@ -160,6 +171,7 @@ struct FrameContext {
     uint32_t actIndex = 0;
     float actProgress = 0.0f;
     float audioEnvelope = 0.0f;
+    AudioReactiveState audioReactive{}; // Live-playback only; never part of deterministic contexts
     float moodIrisAngle = 0.5f;
     float moodIntensity = 0.5f;
     float moodPaletteAccent = 0.5f;
