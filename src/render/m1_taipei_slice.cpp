@@ -1094,6 +1094,7 @@ struct M1TaipeiSliceEffect::Impl {
 
     // Root signatures & PSOs
     ComPtr<ID3D12RootSignature> gfxRootSig;
+    ComPtr<ID3D12RootSignature> compositeRootSig;
     ComPtr<ID3D12RootSignature> presentRootSig;
     ComPtr<ID3D12RootSignature> particlesGfxRootSig;
     ComPtr<ID3D12RootSignature> auxComputeRootSig;
@@ -2258,13 +2259,12 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     linClampPs.ShaderRegister = 0;
     linClampPs.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // 1. Graphics root signature (Raster Scene, Bloom Down/Up, Composite): [0]=28 root constants (b0), [1]=3-SRV table (t0..t2)
-    {
+    // 1. Graphics root signature (Raster Scene, Bloom Down/Up): [0]=28 root constants (b0), [1]=1-SRV table (t0)
+    //    Composite gets its own 3-SRV root signature (1b) so Bloom Down/Up never bind an SRV range overlapping a bound RTV.
+    auto buildPostRootSig = [&](uint32_t srvCount, ComPtr<ID3D12RootSignature>& outSig) -> bool {
         D3D12_DESCRIPTOR_RANGE srvRange{};
         srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        // 3-SRV table (t0..t2). Every table start used with this signature (2, 3..5, 4..6, 7) has three
-        // valid heap descriptors after it; the composite binds [2]=sceneDistance, [3]=sceneHdr, [4]=bloomMip0.
-        srvRange.NumDescriptors = 3;
+        srvRange.NumDescriptors = srvCount;
         srvRange.BaseShaderRegister = 0;
 
         D3D12_ROOT_PARAMETER gfxParams[2]{};
@@ -2285,14 +2285,16 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         rsDesc.pStaticSamplers = &linClampPs;
 
         ComPtr<ID3DBlob> sigBlob, errBlob;
-        if (FAILED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &errBlob)) || !sigBlob ||
-            FAILED(dev->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&impl_->gfxRootSig)))) {
-            res.status = BackendStatus::Faulted;
-            res.health = HealthState::Faulted;
-            res.diagnosticCode = "M1_GFX_ROOTSIG_FAILED";
-            res.humanReadableReason = "Failed to create M1 graphics root signature.";
-            return res;
-        }
+        return SUCCEEDED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &errBlob)) && sigBlob &&
+               SUCCEEDED(dev->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&outSig))) && outSig;
+    };
+    if (!buildPostRootSig(1u, impl_->gfxRootSig) ||
+        !buildPostRootSig(3u, impl_->compositeRootSig)) {
+        res.status = BackendStatus::Faulted;
+        res.health = HealthState::Faulted;
+        res.diagnosticCode = "M1_GFX_ROOTSIG_FAILED";
+        res.humanReadableReason = "Failed to create M1 graphics root signature.";
+        return res;
     }
 
     // 2. Present root signature (288-byte Root CBV + 3-SRV table t0..t2 for CanvasClean, CanvasAbCompare, CodecDecoded)
@@ -2462,7 +2464,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, false, impl_->psoBloomDown) ||
         !makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomUpBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, true, impl_->psoBloomUpAdditive) ||
-        !makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psCompositeBytes,
+        !makeGfxPso(impl_->compositeRootSig.Get(), impl_->vsFullscreenBytes, impl_->psCompositeBytes,
                     DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_UNKNOWN, false, impl_->psoCompositeCanvas) ||
         !makeGfxPso(impl_->particlesGfxRootSig.Get(), impl_->vsParticlesBytes, impl_->psParticlesBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, true, impl_->psoParticles3D) ||
@@ -3052,11 +3054,13 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         }
 
         // Lens breathes with the music: the beat envelope pumps bloom slightly and feeds the composite's
-        // streak / chromatic-fringe gain. Zero in AOV modes, under reduced flash and in deterministic contexts.
-        const float audioKick = (curAov == 0u && !ctx.reducedFlash) ? std::clamp(ctx.audioReactive.beat, 0.0f, 1.0f) : 0.0f;
+        // streak / chromatic-fringe gain. Zero in AOV modes, progressive accumulation, reduced flash and deterministic contexts.
+        const bool allowAudioDrive = (curAov == 0u) && !ctx.interactive.accumulate;
+        const float audioKick = (allowAudioDrive && !ctx.reducedFlash) ? std::clamp(ctx.audioReactive.beat, 0.0f, 1.0f) : 0.0f;
         pc.bloomThreshold = audioKick; // Composite reads this slot as gAudioKick (bloom passes use their own constants)
-        pc.bloomIntensity *= 1.0f + 0.20f * audioKick + 0.08f * std::clamp(ctx.audioReactive.low, 0.0f, 1.0f) * (curAov == 0u ? 1.0f : 0.0f);
+        pc.bloomIntensity *= 1.0f + 0.12f * audioKick + 0.06f * (allowAudioDrive ? std::clamp(ctx.audioReactive.low, 0.0f, 1.0f) : 0.0f);
 
+        cmd->SetGraphicsRootSignature(compositeRootSig.Get());
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
         cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(2u)); // [2]=sceneDistance (t0), [3]=sceneHdr (t1), [4]=bloomMip0 (t2)
@@ -4348,6 +4352,7 @@ bool M1TaipeiSliceEffect::captureClean(const FrameContext& ctx, const std::files
         FrameContext clean = ctx;
         clean.hudMode = 3;
         clean.showOverlay = false;
+        clean.audioReactive = {};
         std::vector<uint8_t> rgba;
         uint32_t w = 0, h = 0;
         if (!renderHeadlessCanvasForTest(clean, rgba, w, h, error)) return false;
