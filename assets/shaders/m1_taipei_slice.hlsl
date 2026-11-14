@@ -1621,17 +1621,43 @@ float3 loadHdr(int2 p, int2 size)
     return min(gSceneHdrTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0)).rgb, 64.0.xxx);
 }
 
-// Harmonic mean of nine centre-weighted probes: biases focus toward the nearest subject in frame.
+float sampleInvDistanceBilinear(float2 uv, int2 size)
+{
+    float2 fp = uv * (float2)size - 0.5;
+    int2 ip = int2(floor(fp));
+    float2 f = fp - (float2)ip;
+    float i00 = 1.0 / max(loadDistance(ip, size), 0.05);
+    float i10 = 1.0 / max(loadDistance(ip + int2(1, 0), size), 0.05);
+    float i01 = 1.0 / max(loadDistance(ip + int2(0, 1), size), 0.05);
+    float i11 = 1.0 / max(loadDistance(ip + int2(1, 1), size), 0.05);
+    return lerp(lerp(i00, i10, f.x), lerp(i01, i11, f.x), f.y);
+}
+
+// Weighted harmonic mean of thirteen sub-pixel bilinear probes: biases focus smoothly toward the nearest
+// central subject without single-pixel silhouette step jumps as stems or petal edges cross a probe.
 float autofocusDistance(int2 size)
 {
+    static const float2 kOffsets[13] = {
+        float2( 0.000,  0.000),
+        float2( 0.038,  0.000), float2(-0.038,  0.000), float2( 0.000,  0.038), float2( 0.000, -0.038),
+        float2( 0.042,  0.042), float2(-0.042,  0.042), float2( 0.042, -0.042), float2(-0.042, -0.042),
+        float2( 0.085,  0.000), float2(-0.085,  0.000), float2( 0.000,  0.085), float2( 0.000, -0.085)
+    };
+    static const float kWeights[13] = {
+        1.50,
+        1.10, 1.10, 1.10, 1.10,
+        0.85, 0.85, 0.85, 0.85,
+        0.65, 0.65, 0.65, 0.65
+    };
     float invSum = 0.0;
-    [unroll] for (int k = 0; k < 9; ++k)
+    float wSum = 0.0;
+    [unroll] for (int k = 0; k < 13; ++k)
     {
-        float2 o = (k == 0) ? float2(0.0, 0.0) : float2(cos((float)k * 0.785398), sin((float)k * 0.785398)) * ((k & 1) != 0 ? 0.045 : 0.085);
-        float2 uv = float2(0.5, 0.53) + o * float2(0.5625, 1.0);
-        invSum += 1.0 / max(loadDistance(int2(uv * (float2)size), size), 0.05);
+        float2 uv = float2(0.5, 0.53) + kOffsets[k] * float2(0.5625, 1.0);
+        invSum += sampleInvDistanceBilinear(uv, size) * kWeights[k];
+        wSum += kWeights[k];
     }
-    return 9.0 / invSum;
+    return wSum / invSum;
 }
 
 // Thin-lens circle of confusion in canvas pixels: |1 - f/d| / f, scaled to a 1440p reference frame.
@@ -1704,7 +1730,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         float r2 = dot(centered, centered);
 
         // Lateral chromatic aberration: red and blue image planes magnify slightly differently toward the corners.
-        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 1.5 * gAudioKick));
+        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 0.45 * gAudioKick));
         float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
         float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
         hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
@@ -1722,9 +1748,10 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
             streak += (gBloomMip0.SampleLevel(gLinearClamp, pin.uv + o, 0.0).rgb +
                        gBloomMip0.SampleLevel(gLinearClamp, pin.uv - o, 0.0).rgb) * wS;
         }
-        float3 flare = streak * float3(0.42, 0.70, 1.0) * (1.0 + 0.6 * gAudioKick);
+        float3 flare = streak * float3(0.42, 0.70, 1.0) * (1.0 + 0.40 * gAudioKick);
 
         // Pseudo lens ghosts mirrored through the optical centre, plus a thin chromatic halo ring.
+        // Gated on compact high-intensity highlights so broad daylight skies do not print bands onto water or shadows.
         if ((lensFlags & 2u) != 0u)
         {
             float2 ghostVec = (0.5 - pin.uv) * 0.46;
@@ -1733,17 +1760,23 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
             };
             [unroll] for (int g = 1; g <= 4; ++g)
             {
-                float2 guv = frac(pin.uv + ghostVec * (float)g);
-                float wG = pow(1.0 - saturate(length(0.5 - guv) / 0.70710678), 8.0);
-                flare += gBloomMip0.SampleLevel(gLinearClamp, guv, 0.0).rgb * kGhostTint[g - 1] * wG * 0.55;
+                float2 guv = pin.uv + ghostVec * (float)g;
+                float2 edge = smoothstep(0.0, 0.08, guv) * smoothstep(0.0, 0.08, 1.0 - guv);
+                float inBounds = edge.x * edge.y;
+                float wG = pow(1.0 - saturate(length(0.5 - guv) / 0.70710678), 8.0) * inBounds;
+                float3 gCol = gBloomMip0.SampleLevel(gLinearClamp, saturate(guv), 0.0).rgb;
+                float gKnee = saturate((dot(gCol, float3(0.2126, 0.7152, 0.0722)) - 1.15) * 0.65);
+                flare += gCol * kGhostTint[g - 1] * (wG * gKnee * 0.24);
             }
-            float2 haloDir = (0.5 - pin.uv) * float2(1.7777778, 1.0);
-            haloDir = haloDir * rsqrt(max(dot(haloDir, haloDir), 1e-6)) * float2(0.5625, 1.0) * 0.36;
-            float2 huv = pin.uv + haloDir;
-            float wH = pow(1.0 - saturate(abs(length((huv - 0.5) * float2(1.7777778, 1.0)) - 0.36) * 9.0), 3.0);
-            flare += float3(gBloomMip0.SampleLevel(gLinearClamp, huv + haloDir * 0.03, 0.0).r,
-                            gBloomMip0.SampleLevel(gLinearClamp, huv, 0.0).g,
-                            gBloomMip0.SampleLevel(gLinearClamp, huv - haloDir * 0.03, 0.0).b) * wH * 0.35;
+            float r = sqrt(r2);
+            float wH = pow(1.0 - saturate(abs(r - 0.36) * 9.0), 3.0);
+            float2 huv = 1.0 - pin.uv;
+            float2 hDisp = (0.5 - huv) * 0.035;
+            float3 hCenter = gBloomMip0.SampleLevel(gLinearClamp, huv, 0.0).rgb;
+            float hKnee = saturate((dot(hCenter, float3(0.2126, 0.7152, 0.0722)) - 1.15) * 0.65);
+            flare += float3(gBloomMip0.SampleLevel(gLinearClamp, saturate(huv + hDisp), 0.0).r,
+                            hCenter.g,
+                            gBloomMip0.SampleLevel(gLinearClamp, saturate(huv - hDisp), 0.0).b) * (wH * hKnee * 0.16);
         }
 
         // Film halation: highlights scatter a warm red fringe back through the emulsion base.

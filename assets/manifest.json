@@ -28,7 +28,7 @@
       "provenance": "Original M1 4-pass DXR 1.1 RayQuery + Raster + Dual-Kawase HDR Bloom + ACES + Letterbox HUD shader suite",
       "license": "Proprietary / Project First-Party",
       "attribution_required": false,
-      "sha256": "911029d4ac43d06108dab864b83c117a2971fbd26aaca31c1797fbfd71e6b705"
+      "sha256": "1d2585b1ca1aeda5549bb86a146f5e63358ac70295cc40cb98c47bbf324d472f"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -100,7 +100,7 @@
       "provenance": "Original project-authored M2 trilogy",
       "license": "Proprietary / Project First-Party",
       "attribution_required": false,
-      "sha256": "ae074dc6adad1d70491253fdc9dbdea55f3ed52778c4795345bd2cc9bd651ccd"
+      "sha256": "1f43fc207734b396499f597bf6a8744a35dd377e41e334e2ba376ecbb0596ce8"
     },
     {
       "id": "model_madame_n_director_xml",

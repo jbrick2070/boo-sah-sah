@@ -247,7 +247,7 @@ float3 sampleIblEnv(float3 d, float rough, bool insideBathroom) {
     return s0;
 }
 
-float3 sky(float3 d) {
+float3 skyImpl(float3 d, bool includeCelestialAndClouds) {
     float3 dn = norm(d);
     if (isDawnFinale()) {
         float dawnT = timeRamp(336.0, 346.0);
@@ -261,6 +261,10 @@ float3 sky(float3 d) {
         float3 clearDawn = lerp(zenithCol, lerp(horizCool, horizWarm, pow(azim, 1.20)), horiz);
         float3 basinMist = lerp(float3(0.05, 0.08, 0.14), float3(1.26, 1.14, 1.04), dawnT);
         clearDawn = lerp(clearDawn, basinMist, saturate(-dn.y * 5.0));
+        float sunGlow = pow(sunDot, 12.0) * 0.62 * dawnT;
+        if (!includeCelestialAndClouds) {
+            return clearDawn + float3(1.0, 0.76, 0.52) * sunGlow;
+        }
         // Blend authentic CC0 Qwantani Dawn PureSky HDRI across the east/southeast window vista for Cycles parity
         float2 tuv = dirToEquirectUv(dn);
         float hdriWinMask = smoothstep(0.14, 0.52, dn.x) * (1.0 - smoothstep(0.16, 0.48, dn.y)) * smoothstep(-0.14, -0.01, dn.y) * dawnT;
@@ -269,7 +273,6 @@ float3 sky(float3 d) {
             clearDawn = lerp(clearDawn, hdriSky, hdriWinMask * 0.78);
         }
         float sunDisc = pow(sunDot, 260.0) * 6.0 * dawnT;
-        float sunGlow = pow(sunDot, 12.0) * 0.62 * dawnT;
         float3 neural = tensorField.SampleLevel(linearClamp, tuv, 0.0).rgb;
         float nLum = dot(neural, float3(0.2126, 0.7152, 0.0722));
         float cloudBand = smoothstep(0.02, 0.28, dn.y) * (1.0 - smoothstep(0.36, 0.82, dn.y));
@@ -295,21 +298,31 @@ float3 sky(float3 d) {
     float3 clearSky = lerp(lerp(night, day, daylight), dusk, twilight * 0.55);
 
     float3 sunDir = sunOverridden() ? sceneSunDir() : norm(float3(-0.48, 0.16 + 0.22 * daylight, 0.72));
-    float sun = pow(saturate(dot(dn, sunDir)), 180.0);
+    float sun = includeCelestialAndClouds ? pow(saturate(dot(dn, sunDir)), 180.0) : 0.0;
     float sunHalo = pow(saturate(dot(dn, sunDir)), 10.0);
     float3 c = clearSky + (sun * float3(3.2, 1.9, 0.85) + sunHalo * float3(0.32, 0.16, 0.06)) * daylight;
 
-    float2 uv = dirToEquirectUv(dn);
-    float3 neural = tensorField.SampleLevel(linearClamp, uv, 0.0).rgb;
-    float nLum = dot(neural, float3(0.2126, 0.7152, 0.0722));
-    float highCloud = smoothstep(0.04, 0.34, dn.y) * (1.0 - smoothstep(0.45, 0.88, dn.y));
-    c += lerp(float3(0.018, 0.034, 0.052), float3(0.18, 0.12, 0.07), daylight) * nLum * (0.28 + 0.55 * daylight) * highCloud;
+    if (includeCelestialAndClouds) {
+        float2 uv = dirToEquirectUv(dn);
+        float3 neural = tensorField.SampleLevel(linearClamp, uv, 0.0).rgb;
+        float nLum = dot(neural, float3(0.2126, 0.7152, 0.0722));
+        float highCloud = smoothstep(0.04, 0.34, dn.y) * (1.0 - smoothstep(0.45, 0.88, dn.y));
+        c += lerp(float3(0.018, 0.034, 0.052), float3(0.18, 0.12, 0.07), daylight) * nLum * (0.28 + 0.55 * daylight) * highCloud;
+    }
 
     if (showFlags == 0u) {
         float mist = 1.0 - smoothstep(0.0, 2.0, min(abs(time - 60.0), abs(time - 120.0)));
         c = lerp(c, float3(0.28, 0.33, 0.36), mist);
     }
     return c;
+}
+
+float3 sky(float3 d) {
+    return skyImpl(d, true);
+}
+
+float3 skyAerialFog(float3 d) {
+    return skyImpl(d, false);
 }
 
 float3 emissive(uint m, float3 p, float filterW) {
@@ -322,7 +335,7 @@ float3 emissive(uint m, float3 p, float filterW) {
         nightFactor *= 0.22;
     }
     if (m == 6u) {
-        return float3(0.05, 0.86, 0.66) * (0.62 + 0.18 * pulse + 0.34 * audioHigh()) * (0.08 + 0.92 * nightFactor);
+        return float3(0.05, 0.86, 0.66) * (0.62 + 0.18 * pulse + 0.26 * audioHigh()) * (0.08 + 0.92 * nightFactor);
     }
     if (m == 15u) {
         return float3(0.56, 0.36, 0.16) * (0.08 + 0.92 * nightFactor) * (1.0 + 0.08 * pulse);
@@ -364,8 +377,8 @@ float3 emissive(uint m, float3 p, float filterW) {
         // Skyline as a spectrum analyser: each tower's lit rooms swell with its band, and the level
         // climbs the facade like a VU meter (lower storeys respond first).
         float band = audioBandForBuilding(bldgId);
-        float meter = smoothstep(0.0, 0.35, band - frac(flr / 40.0) * 0.75);
-        float audioGain = 1.0 + (0.16 * band + 0.30 * meter) * (1.0 - lodBlend * 0.5);
+        float meter = smoothstep(0.0, 0.20, band - frac(flr / 40.0) * 0.92);
+        float audioGain = 1.0 + (0.14 * band + 0.38 * meter) * (1.0 - lodBlend * 0.5);
         return winCol * (winFactor * intensity * nightFactor * audioGain);
     }
     if (m == 21u) {
@@ -377,7 +390,7 @@ float3 emissive(uint m, float3 p, float filterW) {
     if (m == 22u) {
         float3 floraTint = lerp(float3(0.08, 0.88, 0.64), float3(0.96, 0.62, 0.20), clamp(moodAccent, 0.0, 1.0));
         if ((showFlags & 2u) != 0u) floraTint = lerp(floraTint, float3(0.88, 0.24, 0.74), 0.45);
-        return floraTint * (0.045 + 0.05 * moodBloom + 0.025 * pulse + 0.05 * audioBeat()) * (0.25 + 0.75 * nightFactor);
+        return floraTint * (0.045 + 0.05 * moodBloom + 0.025 * pulse + 0.042 * audioBeat()) * (0.25 + 0.75 * nightFactor);
     }
     return (float3)0.0;
 }
@@ -908,12 +921,16 @@ void getRtxdiEmitter(uint idx, float3 worldP, bool inBath, out float3 lightPos, 
 // ---------------------------------------------------------------------------------------------
 // RTX showcase additions: rain-impact ripples, thin-film interference, ray-marched light shafts.
 // ---------------------------------------------------------------------------------------------
-// Two decorrelated grids of expanding rain-impact rings; returns the height-field gradient in xz.
-float2 rainRippleGrad(float2 xz, float t) {
+// Two decorrelated grids of expanding rain-impact rings; returns the height-field gradient in xz,
+// band-limited by the projected pixel footprint pxWorld so shallow grazing angles do not speckle.
+float2 rainRippleGrad(float2 xz, float t, float pxWorld) {
     float2 g = float2(0.0, 0.0);
     [unroll] for (uint layer = 0u; layer < 2u; ++layer) {
         float fl = (float)layer;
         float scale = (layer == 0u) ? 2.6 : 4.3;
+        float pxCell = pxWorld * scale;
+        float bandFade = saturate(1.0 - pxCell * 3.2);
+        float invWidth = min(20.0, 0.48 / max(pxCell, 1e-4));
         float2 p = xz * scale + fl * 17.31;
         float2 cell = floor(p);
         float2 f = frac(p) - 0.5;
@@ -922,9 +939,9 @@ float2 rainRippleGrad(float2 xz, float t) {
         float2 d = f - off;
         float r = length(d);
         float phase = frac(t * (0.55 + 0.60 * h) + h * 7.0);
-        float x = (r - phase * 0.42) * 38.0;
-        float fade = (1.0 - phase) * (1.0 - phase);
-        float wave = sin(x * 2.2) * exp(-x * x) * fade;
+        float x = (r - phase * 0.42) * invWidth;
+        float fade = (1.0 - phase) * (1.0 - phase) * bandFade;
+        float wave = sin(x * 2.0) * exp(-x * x) * fade;
         g += (d / max(r, 1e-3)) * wave * scale;
     }
     return g;
@@ -976,7 +993,7 @@ float3 rtLightShafts(float3 dir, float maxT, float jitter, inout uint queries) {
     float phase = lerp(0.0796, henyeyGreensteinPhase(dot(dir, sd), 0.62), 0.82);
     float3 tint = sceneSunRadiance();
     if ((showFlags & 2u) != 0u) tint = lerp(tint, float3(0.62, 0.32, 0.84), 0.35);
-    return acc * phase * tint * lerp(1.7, 2.6, daylight) * (0.90 + 0.28 * audioLow());
+    return acc * phase * tint * lerp(1.7, 2.6, daylight) * (0.90 + 0.22 * audioLow());
 }
 #endif
 
@@ -1100,7 +1117,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         base *= lerp(1.0, 0.58, wetPuddle);
     }
     if (matId == 7u || (matId == 1u && wetPuddle > 0.15)) {
-        float baseRip = ((matId == 7u) ? 0.010 : (0.005 * wetPuddle)) * (1.0 + 0.45 * audioLow());
+        float baseRip = ((matId == 7u) ? 0.010 : (0.005 * wetPuddle)) * (1.0 + 0.28 * audioLow());
         float ripScale = baseRip / (1.0 + dist * 0.022);
         float wx = sin(i.world.z * 5.7 + i.world.x * 2.3 + time * 2.4) * 0.55
                  + sin(i.world.z * 12.3 - i.world.x * 6.1 - time * 1.9) * 0.30
@@ -1110,9 +1127,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                  + sin(i.world.x * 13.7 + time * 2.7) * 0.15;
         n = norm(n + float3(wx * ripScale, 0.0, wz * ripScale));
         // Rain-impact rings on upward-facing wet exterior surfaces, faded out before they can alias.
-        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 1.1 * audioLow());
+        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 0.55 * audioLow());
         if (ringAmt > 0.0 && !inBath) {
-            float2 rg = rainRippleGrad(i.world.xz, time);
+            float pxWorld = dist / (max(abs(nGeom.y) * saturate(dot(nGeom, v)), 0.06) * 900.0);
+            float2 rg = rainRippleGrad(i.world.xz, time, pxWorld);
             n = norm(n - float3(rg.x, 0.0, rg.y) * ringAmt);
         }
     }
@@ -1671,7 +1689,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                     : float3(0.010, 0.015, 0.018) * (0.25 + 0.75 * midribDepth) * (inBath ? 0.30 : 1.0));
             float3 rimSheen = ((matId == 4u) ? float3(0.18, 0.30, 0.28) : float3(0.26, 0.32, 0.36))
                             * (edgeRim + 0.40 * crispMargin) * (inBath ? 0.32 : 1.0);
-            float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth * (1.0 + 0.9 * audioBeat());
+            float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth * (1.0 + 0.65 * audioBeat());
 
             float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.488), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.488)));
             float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.512), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.512)));
@@ -1683,7 +1701,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             // Thin-film iridescence on exterior orchid petals: thickness varies along the blade and midrib.
             float3 film = float3(1.0, 1.0, 1.0);
             if (!inBath && !isDynamicMarble && !isWaterDroplet) {
-                float filmNm = 280.0 + 220.0 * uBlade + 120.0 * abs(vBlade) + 40.0 * sin(time * 0.35 + uBlade * 6.0) + 110.0 * audioHigh();
+                float filmNm = 280.0 + 220.0 * uBlade + 120.0 * abs(vBlade) + 40.0 * sin(time * 0.35 + uBlade * 6.0) + 75.0 * audioHigh();
                 film = lerp(float3(1.0, 1.0, 1.0), thinFilmInterference(ndotv, filmNm) * 1.25, saturate(0.10 + 0.55 * edgeRim));
             }
             color = lerp(glassTrans, specRadiance * float3(1.02, 1.04, 1.06) * film, reflMix)
@@ -1746,7 +1764,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float fogStart = isDawnFinale() ? 95.0 : 4.5;
         float fog = 1.0 - exp(-max(dist - fogStart, 0.0) * fogDensity);
         float fogW = fog * (isDawnFinale() ? 0.36 : 0.74);
-        float3 fogSky = sky(norm(i.world - eye));
+        float3 fogSky = skyAerialFog(norm(i.world - eye));
         color = lerp(color, fogSky, fogW);
         nonIndirectColor = lerp(nonIndirectColor, fogSky, fogW);
         transScale *= (1.0 - fogW);
