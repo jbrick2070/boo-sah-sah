@@ -32,12 +32,26 @@ Both `./scripts/run_smoke.ps1 -Preset x64-base-release` and `./scripts/run_smoke
 Windows Graphics Tools (`d3d12SDKLayers.dll`) is not installed on this machine, so `--d3d-debug` logs a clean warning (`d3d_debug_layer_active = false`). Direct inspection of descriptor heaps, barriers, root signatures, and PSO descriptions uncovered one live descriptor-range hazard and verified the other two focus areas clean:
 
 1. **3-Descriptor Graphics SRV Table (`src/render/m1_taipei_slice.cpp`) — FIXED:**
-   - **Finding:** Sharing a single 3-SRV `gfxRootSig` (`t0..t2`) across `psoRasterScene`, `psoBloomDown`, `psoBloomUpAdditive`, and `psoCompositeCanvas` caused `psoBloomDown` (which binds `srvGpuAt(3 + m)` while rendering into `bloomMips[m]` at descriptor `4 + m`) to include `bloomMips[m]` inside its bound 3-descriptor SRV range while `bloomMips[m]` was in `D3D12_RESOURCE_STATE_RENDER_TARGET` (a D3D12 debug-layer resource-state hazard on `D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND` tables without `DATA_VOLATILE` / `DESCRIPTORS_VOLATILE`).
+   - **Finding:** Sharing a single 3-SRV `gfxRootSig` (`t0..t2`) across `psoRasterScene`, `psoBloomDown`, `psoBloomUpAdditive`, and `psoCompositeCanvas` caused `psoBloomDown` (which binds `srvGpuAt(3 + m)` while rendering into `bloomMips[m]` at descriptor `4 + m`) to include `bloomMips[m]` inside its bound 3-descriptor SRV range while `bloomMips[m]` was in `D3D12_RESOURCE_STATE_RENDER_TARGET`. The shader never reads that descriptor, and root signature 1.0 treats descriptors as volatile, so it rendered correctly; but a bound SRV range covering a live render target is a resource-state hazard that GPU-based validation can flag and is fragile against later shader changes.
    - **Fix:** Kept `gfxRootSig` as a 1-SRV table (`t0`) for `psoRasterScene`, `psoBloomDown`, and `psoBloomUpAdditive`, and added a dedicated 3-SRV `compositeRootSig` (`t0..t2` bound at `srvGpuAt(2)`: `[2]=sceneDistance`, `[3]=sceneHdr`, `[4]=bloomMip0`) exclusively for `psoCompositeCanvas` (when all three resources are in `PIXEL_SHADER_RESOURCE`).
 2. **Sky PSO Drawing After Z-Prepass (`src/render/trilogy_renderer.cpp`, `assets/shaders/m2_mesh.hlsl`) — CLEAN:**
-   - Both `s.sky` (raster) and `s.skyRt` (DXR) draw after the Z-prepass and opaque passes with `VSFullscreen` outputting `z = 1.0`, `DepthEnable = TRUE`, `DepthWriteMask = ZERO`, `DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL`, and `DSVFormat = DXGI_FORMAT_D32_FLOAT` matching the cleared (`1.0f`) scene depth buffer. Only unoccluded far-plane pixels (`depth == 1.0`) pass depth test.
+   - Both `s.sky` (raster) and `s.skyRt` (DXR) draw after the Z-prepass and opaque passes with `VSSky` (`m2_mesh.hlsl`) outputting `z = 1.0`, `DepthEnable = TRUE`, `DepthWriteMask = ZERO`, `DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL`, and `DSVFormat = DXGI_FORMAT_D32_FLOAT` matching the cleared (`1.0f`) scene depth buffer. Only unoccluded far-plane pixels (`depth == 1.0`) pass depth test.
 3. **Render-Target vs PSO Format Mismatches — CLEAN:**
-   - Verified every `OMSetRenderTargets` call against `NumRenderTargets` and `RTVFormats[]`: `trilogy_renderer.cpp` binds 2 RTVs (`R16G16B16A16_FLOAT`, `R32_FLOAT`) for `s.opaque`/`s.sky` and 7 RTVs (`hdr`, `dist`, `diffRadHit`, `specRadHit`, `normalRough`, `viewZ`, `motionVec`) matching `makeScenePso(..., 7, ...)` for `s.opaqueRt`/`s.skyRt` (with `PSSky` writing `SV_Target0..6` when `BOOSAH_RT` is defined); `m1_taipei_slice.cpp` binds `R16G16B16A16_FLOAT` for bloom mips and `R10G10B10A2_UNORM` for `canvasClean` and swapchain backbuffers. Zero mismatches.
+   - Verified every `OMSetRenderTargets` call against `NumRenderTargets` and `RTVFormats[]`:
+     - **Raster path:** `trilogy_renderer.cpp` binds 2 RTVs (`R16G16B16A16_FLOAT`, `R32_FLOAT`) for `s.raster` / `s.rasterCutout` / `s.sky`, matching the 2-member `Targets` struct (`color`, `distance`) that `m2_mesh.hlsl` emits without `M2_RT`.
+     - **DXR path:** 7 RTVs for `s.rt` / `s.rtCutout` / `s.skyRt` (the `pdRt` PSO description), matching `Targets` with `M2_RT` defined:
+       - `color`, `R16G16B16A16_FLOAT`
+       - `distance`, `R32_FLOAT`
+       - `normRough`, `R16G16B16A16_FLOAT`
+       - `diffRadHit`, `R16G16B16A16_FLOAT`
+       - `specRadHit`, `R16G16B16A16_FLOAT`
+       - `modViewZ`, `R32G32B32A32_UINT`
+       - `worldMv`, `R16G16B16A16_FLOAT`
+
+       `PSSky` writes all seven when `M2_RT` is defined.
+     - **Post passes:** `m1_taipei_slice.cpp` binds `R16G16B16A16_FLOAT` for bloom mips and `R10G10B10A2_UNORM` for `canvasClean` and swapchain backbuffers.
+
+     Zero mismatches.
 
 ---
 
@@ -77,7 +91,7 @@ Measured on RTX 5080 Laptop GPU (Release, `--no-activate --mute --preset <preset
 
 ## 3. Visual Review & Shader Fixes
 
-38 clean `2560x1440` captures (`Family` and `Midnight` across all 10 `film_360s` timestamps, Dawn Finale `342, 345, 352, 355 s`, and all 6 `m2_trilogy_180s` timestamps, plus `+1` frame flicker pairs and AOV-7 ray-count heatmaps) and 18 1:1 inspection crops were generated via `boo_integration_tests.exe --validation-captures --no-activate` into `build/validation_captures/` and `build/validation_captures/crops/`:
+38 clean `2560x1440` captures (`Family` and `Midnight` across all 10 `film_360s` timestamps, Dawn Finale `342, 345, 352, 355 s`, and all 6 `m2_trilogy_180s` timestamps, plus `+1` frame flicker pairs and AOV-7 ray-count heatmaps) and 18 1:1 inspection crops were generated via `boo_integration_tests.exe --validation-captures --no-activate` into `build/validation_captures/` and `build/validation_captures/crops/`. These outputs are git-ignored and not committed, so regenerate them with that command to review. The gate itself asserts zero non-finite HDR components and byte-identical seek replay for every capture; the visual judgements below come from manual inspection of those captures and of windowed screenshots:
 
 - **Full-frame contact sheets:** `build/validation_captures/film360_family_montage.png`, `build/validation_captures/film360_midnight_montage.png`, `build/validation_captures/m2_180_family_montage.png`, `build/validation_captures/m2_180_midnight_montage.png`
 - **Ray-count heatmaps (AOV 7):** `build/validation_captures/film360_family_{15,168,176,320,345}s_aov7_rays.png`, `build/validation_captures/m2_180_family_{15,168,176}s_aov7_rays.png`
@@ -165,4 +179,9 @@ In `AudioSynthesizer48k::evaluateVoiceSample` (`src/audio/engine.cpp`), custom/O
 1. **Optional Windows Graphics Tools (`d3d12SDKLayers.dll`) not installed on host:** Live D3D12 debug-layer messages could not be collected at runtime because the OS optional feature requires administrator DISM installation; root signatures, descriptor ranges, barriers, and PSO formats were audited statically and verified across Debug and Release hardware runs.
 2. **Pre-existing analytical harbour caustic wave (`assets/shaders/m2_mesh.hlsl`):** Broad daylight water shots (`m2_180_family_75s.png`, `film360_family_260s.png`) show gentle concentric green/amber modulation from the authored `caustic = sin(length(world.xz) * 2.4 - time * 1.8)` + `tensorField` term; left untouched so the established Tensor-driven water look is preserved.
 3. **Minor 3-step `rtLightShafts()` IGN stipple (~1–2%):** Visible only under 1:1 magnification in high-contrast shadow-to-sun transitions (`75s`, `260s`); blends into the composite film grain at viewing scale and avoids adding film-mode temporal state or extra DXR ray steps.
-4. **`4k_experimental` (`3840x2160`) `p95` slightly above `16.6 ms` at two timestamps:** Peaks at `16.886 ms` (`176 s`) and `17.806 ms` (`345 s`) on this laptop GPU (`p50` remains `<= 16.862 ms`), which is expected for the experimental 4K tier while `showcase` (`2560x1440`) runs at `4.105–8.144 ms` `p95`.
+4. **`4k_experimental` (`3840x2160`) exceeds the `16.6 ms` budget at two timestamps:**
+   - At `345 s` the median is also over budget: `p50 16.862 ms`, `p95 17.806 ms`.
+   - At `176 s` only `p95` (`16.886 ms`) exceeds it; `p50` is `16.443 ms`.
+   - Cheapest candidate saving: the composite autofocus re-evaluates 13 bilinear probes (52 distance loads) for every pixel, although the result is identical across the frame.
+
+   This is acceptable for the experimental 4K tier while `showcase` (`2560x1440`) runs at `4.105–8.144 ms` `p95`.

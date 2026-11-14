@@ -2252,6 +2252,59 @@ bool testInteractiveExploreLightingAndNrdConvergence() {
     return true;
 }
 
+// Live audio drive must reach the image (mesh emissives via the packed scene DWORD, composite lens pump
+// via gAudioKick), stay deterministic for a given drive, and leave no state behind that could change a
+// later zero-drive render (seek determinism). Captures and the other gates always run with zero drive.
+bool testAudioReactiveDriveReachesCanvasDeterministically() {
+    using namespace boo;
+    D3D12Context d3d;
+    std::string err;
+    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    spec.renderWidth = 960;
+    spec.renderHeight = 540;
+    M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, ShowVisualMode::FullFilm360s);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+
+    // 05:20 night skyline: lit curtain-wall windows, jade accents and light shafts are all in frame.
+    auto ctxZero = makeM1TestContext(15360000LL, 6u);
+    ctxZero.randomSeed = 307001ULL;
+    ctxZero.edition = Edition::Family;
+    ctxZero.showOverlay = false;
+    ctxZero.hudMode = 3;
+    auto ctxFull = ctxZero;
+    ctxFull.audioReactive.low = 1.0f;
+    ctxFull.audioReactive.mid = 1.0f;
+    ctxFull.audioReactive.high = 1.0f;
+    ctxFull.audioReactive.beat = 1.0f;
+    ctxFull.audioReactive.level = 1.0f;
+    auto ctxBeat = ctxZero;
+    ctxBeat.audioReactive.beat = 1.0f;
+
+    uint32_t w = 0, h = 0;
+    std::vector<uint8_t> rgba;
+    std::vector<uint32_t> zero10, full10, fullRepeat10, beat10, zeroAgain10;
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxZero, rgba, w, h, &err, &zero10));
+    BOO_CHECK(w == 960 && h == 540);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxFull, rgba, w, h, &err, &full10));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxFull, rgba, w, h, &err, &fullRepeat10));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxBeat, rgba, w, h, &err, &beat10));
+    fx.resetTo(0.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxZero, rgba, w, h, &err, &zeroAgain10));
+
+    BOO_CHECK(full10 != zero10);        // band + beat drive reaches the canvas
+    BOO_CHECK(beat10 != zero10);        // beat alone reaches the canvas (composite lens pump)
+    BOO_CHECK(full10 == fullRepeat10);  // deterministic for a given drive
+    BOO_CHECK(zeroAgain10 == zero10);   // no residual state leaks into later zero-drive renders
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
+
 #include "film_capture_gate.hpp"
 #include "film_stress_gate.hpp"
 
@@ -2338,6 +2391,7 @@ int main(int argc, char** argv) {
     runTest("StandaloneHardwareSolosRtCudaTensor", testStandaloneHardwareSolosRtCudaTensor);
     runTest("MadameNNpuOpenVinoAndSoloNpuFailover", testMadameNNpuOpenVinoAndSoloNpuFailover);
     runTest("FullFilm360sRevealsEditionsAndM7CombinedFailover", testFullFilm360sRevealsEditionsAndM7CombinedFailover);
+    runTest("AudioReactiveDriveReachesCanvasDeterministically", testAudioReactiveDriveReachesCanvasDeterministically);
     runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
     runTest("SignalHijackMediaIngestCameraPrivacyAndFallback", testSignalHijackMediaIngestCameraPrivacyAndFallback);
     runTest("InteractiveExploreLightingAndNrdConvergence", testInteractiveExploreLightingAndNrdConvergence);

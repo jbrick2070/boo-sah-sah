@@ -1129,7 +1129,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         // Rain-impact rings on upward-facing wet exterior surfaces, faded out before they can alias.
         float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 0.55 * audioLow());
         if (ringAmt > 0.0 && !inBath) {
-            float pxWorld = dist / (max(abs(nGeom.y) * saturate(dot(nGeom, v)), 0.06) * 900.0);
+            // Projected pixel footprint on the surface, scaled by the real canvas height and field of view.
+            // 3.4888 = 1440 / (900 * tan(0.43)): identical to the hand-tuned value at the 1440p, 0.86 rad
+            // reference, while 4K now keeps ripple detail it can resolve and 720p filters a little harder.
+            float pxWorld = dist * tan(fov * 0.5) * 3.4888 / ((float)max(height, 1u) * max(abs(nGeom.y) * saturate(dot(nGeom, v)), 0.06));
             float2 rg = rainRippleGrad(i.world.xz, time, pxWorld);
             n = norm(n - float3(rg.x, 0.0, rg.y) * ringAmt);
         }

@@ -10,6 +10,11 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 - **Scene response** in `m2_mesh.hlsl`: jade accents shimmer with treble, the Neural Velvet ribbon swells with mids, micro-flora and the orchid's nectar glow pulse on the beat, light shafts and water chop / rain rings breathe with bass, and the orchid's thin-film colours shift with treble.
 - **Lens response**: the beat gently pumps bloom, anamorphic streaks and chromatic fringing in the composite.
 - Unit test `AudioReactiveFollowerBeatAndFlashSafety`.
+- Integration test `AudioReactiveDriveReachesCanvasDeterministically`. It checks three things:
+  - Band and beat drive both change the canvas.
+  - A given drive renders identically every time.
+  - A later zero-drive render is unaffected, so seek determinism holds.
+- Rain-ripple band-limiting now scales with the real canvas height and field of view. It is unchanged at the 1440p reference, keeps resolvable ripple detail at 4K, and filters slightly harder at 720p.
 
 ### Notes
 - The drive is packed as RGBA8 into the one spare scene DWORD (root signature size unchanged). It is zero in test / capture contexts, debug AOV modes and progressive accumulation, so deterministic seek captures are unaffected.
