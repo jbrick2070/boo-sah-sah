@@ -15,7 +15,7 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
 ### Notes
 - All stochastic terms hash `(pixel, samplePosition / 800)`; there is no temporal history, so direct seeks still reproduce identical `CanvasClean` frames.
-- These shader and pipeline changes were authored without access to a Windows DXC / MSVC toolchain. Run `scripts/run_smoke.ps1` and the timing captures before release; the existing `QualityLadder` downgrade path remains the safety net if Showcase exceeds its frame budget.
+- Every touched shader entry point (`m2_mesh` VS/PS/RT-PS/sky/RT-sky, M1 composite, bloom, raster and DXR scene) compiles cleanly with DXC 1.8 (`-Ges -WX -O3`, DXIL-validated). The C++ changes were not compiled (no MSVC / Windows SDK in the authoring environment). Run `scripts/run_smoke.ps1` and the timing captures before release; the existing `QualityLadder` downgrade path remains the safety net if Showcase exceeds its frame budget.
 
 ## [1.0.0 — Milestone M10] — Portable Release & Complete Hardware Orchestra
 ### Added
