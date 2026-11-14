@@ -721,7 +721,7 @@ void AudioSynthesizer48k::evaluateVoiceSample(
         const float sR = rawR * seam * kCustomGain;
         outLeft  = sL;
         outRight = sR;
-        outMono  = 0.5f * (sL + sR);
+        outMono  = 0.08f * (sL + sR);
         return;
     }
 

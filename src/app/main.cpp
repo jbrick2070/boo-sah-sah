@@ -2554,7 +2554,7 @@ int main(int argc, char** argv) {
         // Live audio reactivity: follows whatever is actually playing (score, OST or imported track).
         fctx.audioReactive = audioReactive.update(
             bands.low, bands.mid, bands.high, bands.rms, tick.dtSeconds, settings.reducedFlash,
-            tick.state == TransportState::Seeking);
+            tick.state == TransportState::Seeking || tick.state == TransportState::Paused || audio.isMuted());
         fctx.edition = settings.edition;
         fctx.qualityPreset = qualityLadder.currentPreset();
         fctx.showOverlay = settings.showOverlay;

@@ -18,7 +18,7 @@ namespace boo {
 // Portable and allocation-free; call once per presented frame on the main thread.
 class AudioReactiveFollower {
 public:
-    static constexpr double kMinBeatIntervalSeconds = 0.34; // < 3 retriggers per second
+    static constexpr double kMinBeatIntervalSeconds = 0.36; // < 3 retriggers per second
     static constexpr float  kBeatDecaySeconds       = 0.20f;
 
     void reset() noexcept;
