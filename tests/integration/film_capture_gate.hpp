@@ -752,3 +752,157 @@ bool testInteractiveShowcaseCaptureGate() {
     std::cout << "Interactive showcase captures saved to: " << outDir.string() << '\n';
     return true;
 }
+
+bool testValidationShowcaseCaptures() {
+    using namespace boo;
+    CaptureComScope com;
+    BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
+    const std::filesystem::path outDir =
+        (gFilmCaptureDirectory == std::filesystem::path("build/film_captures"))
+            ? std::filesystem::path("build/validation_captures")
+            : gFilmCaptureDirectory;
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    BOO_CHECK(!ec);
+
+    D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
+
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
+
+    JsonValue report(JsonValue::Object{});
+    report["schema"] = 1;
+    report["complete"] = false;
+    report["width"] = 2560;
+    report["height"] = 1440;
+    report["sample_rate"] = 48000;
+    report["adapter"] = d3d.adapterName();
+    report["frames"] = JsonValue::Array{};
+
+    struct ValSet {
+        const char* cueFile;
+        const char* prefix;
+        bool forceTrilogy;
+        std::vector<int> seconds;
+    };
+    const ValSet sets[] = {
+        {"film_360s", "film360", false, {15, 45, 75, 108, 168, 176, 200, 260, 320, 342, 345, 352, 355}},
+        {"m2_trilogy_180s", "m2_180", true, {15, 45, 75, 108, 168, 176}},
+    };
+
+    for (const auto& vs : sets) {
+        CueSheet cue;
+        ValidationReport validation;
+        const std::string cuePath = std::string("assets/cues/") + vs.cueFile + ".json";
+        BOO_CHECK(loadCueSheetFromFile(resolveResourcePath(cuePath), cue, validation) && validation.valid);
+        const auto mode = resolveShowVisualMode(cue);
+
+        M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, vs.forceTrilogy, false, mode);
+        BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+        fx.setDisableRt(false);
+
+        for (const auto edition : {Edition::Family, Edition::Midnight}) {
+            const std::string edName = (edition == Edition::Family) ? "family" : "midnight";
+            CaptureContactSheet sheet;
+            for (const int sec : vs.seconds) {
+                const int64_t sample = int64_t(sec) * cue.sampleRate;
+                auto ctx = makeFilmGateContext(cue, sample, edition);
+                fx.resetTo(ctx.filmTimeSeconds);
+
+                std::vector<uint8_t> rgba, rgbaNext, rgbaRepeat;
+                std::vector<uint32_t> rgb10, rgb10Repeat;
+                uint32_t w = 0, h = 0;
+                BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, w, h, &error, &rgb10));
+                BOO_CHECK(w == 2560 && h == 1440);
+
+                uint64_t nonFinite = 0;
+                BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &error) && nonFinite == 0);
+
+                // Count exact pure-black pixels (R==0 && G==0 && B==0)
+                uint64_t zeroBlackPixels = 0;
+                for (size_t p = 0; p < rgba.size(); p += 4u) {
+                    if (rgba[p] == 0u && rgba[p + 1u] == 0u && rgba[p + 2u] == 0u) ++zeroBlackPixels;
+                }
+
+                // Adjacent frame (+1/60 s = +800 samples) to inspect focus stability & single-frame flicker
+                const int64_t nextSample = std::min<int64_t>(sample + 800, cue.durationSamples - 1);
+                auto nextCtx = makeFilmGateContext(cue, nextSample, edition);
+                nextCtx.presentationFrame = 1;
+                BOO_CHECK(fx.renderHeadlessCanvasForTest(nextCtx, rgbaNext, w, h, &error));
+                uint64_t nonFiniteNext = 0;
+                BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFiniteNext, &error) && nonFiniteNext == 0);
+
+                std::vector<float> pixDiffs(size_t(w) * h, 0.0f);
+                double sumDiff = 0.0;
+                float maxPixDiff = 0.0f;
+                for (size_t i = 0; i < size_t(w) * h; ++i) {
+                    const float dr = std::abs(float(rgba[i * 4u]) - float(rgbaNext[i * 4u])) / 255.0f;
+                    const float dg = std::abs(float(rgba[i * 4u + 1u]) - float(rgbaNext[i * 4u + 1u])) / 255.0f;
+                    const float db = std::abs(float(rgba[i * 4u + 2u]) - float(rgbaNext[i * 4u + 2u])) / 255.0f;
+                    const float d = (dr + dg + db) / 3.0f;
+                    pixDiffs[i] = d;
+                    sumDiff += d;
+                    maxPixDiff = std::max(maxPixDiff, d);
+                }
+                std::nth_element(pixDiffs.begin(), pixDiffs.begin() + (pixDiffs.size() * 999u) / 1000u, pixDiffs.end());
+                const float p999Diff = pixDiffs[(pixDiffs.size() * 999u) / 1000u];
+                const double meanDiff = sumDiff / double(size_t(w) * h);
+
+                // Verify deterministic seek replay
+                fx.resetTo(0.0);
+                auto repCtx = ctx;
+                repCtx.presentationFrame = 777;
+                BOO_CHECK(fx.renderHeadlessCanvasForTest(repCtx, rgbaRepeat, w, h, &error, &rgb10Repeat));
+                BOO_CHECK(rgb10 == rgb10Repeat && rgba == rgbaRepeat);
+
+                const std::string fileName = std::string(vs.prefix) + "_" + edName + "_" + std::to_string(sec) + "s.png";
+                BOO_CHECK(writeCapturePng(outDir / fileName, rgba, w, h));
+                sheet.add(rgba, w, h, std::string(vs.prefix) + " " + edName + " " + std::to_string(sec) + "s");
+
+                // Save +1 frame at key focus/shaft shots for side-by-side flicker/DoF inspection
+                if (edition == Edition::Family && (sec == 15 || sec == 168 || sec == 176 || sec == 320 || sec == 345)) {
+                    const std::string nextName = std::string(vs.prefix) + "_" + edName + "_" + std::to_string(sec) + "s_plus1f.png";
+                    BOO_CHECK(writeCapturePng(outDir / nextName, rgbaNext, w, h));
+
+                    auto aov7Ctx = ctx;
+                    aov7Ctx.interactive.aovMode = 7u;
+                    std::vector<uint8_t> rgbaAov7;
+                    BOO_CHECK(fx.renderHeadlessCanvasForTest(aov7Ctx, rgbaAov7, w, h, &error));
+                    const std::string aovName = std::string(vs.prefix) + "_" + edName + "_" + std::to_string(sec) + "s_aov7_rays.png";
+                    BOO_CHECK(writeCapturePng(outDir / aovName, rgbaAov7, w, h));
+                }
+
+                const auto metrics = computeRgba8LumaMetrics(rgba);
+                JsonValue entry(JsonValue::Object{});
+                entry["file"] = fileName;
+                entry["cue"] = cuePath;
+                entry["edition"] = edName;
+                entry["seconds"] = sec;
+                entry["sample"] = sample;
+                entry["mean_luma"] = metrics.meanLuma;
+                entry["p99_luma"] = metrics.p99Luma;
+                entry["hdr_nonfinite_components"] = nonFinite;
+                entry["zero_black_pixels"] = static_cast<int64_t>(zeroBlackPixels);
+                entry["adj_frame_mean_diff"] = meanDiff;
+                entry["adj_frame_p999_diff"] = p999Diff;
+                entry["adj_frame_max_diff"] = maxPixDiff;
+                entry["rgb10_hash"] = capturePixelHash(rgb10);
+                entry["seek_repeat_equal"] = true;
+                report["frames"].asArrayMut().push_back(std::move(entry));
+            }
+            BOO_CHECK(sheet.save(outDir / (std::string(vs.prefix) + "_" + edName + "_montage.png"), 3));
+        }
+        fx.shutdown();
+    }
+
+    report["complete"] = true;
+    BOO_CHECK(writeFilmGateJson(outDir / "manifest.json", report));
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    std::cout << "Validation captures saved to: " << outDir.string() << '\n';
+    return true;
+}
