@@ -108,7 +108,17 @@ public:
     bool executeSingleCommandListAndWait(
         const std::function<void(void* cmdList)>& recordFn,
         std::string* outError = nullptr);
-    void waitForGpu() noexcept;
+    // A failed/expired fence wait quarantines this context until initialize().
+    bool waitForGpu() noexcept;
+    // Quarantine without reusing allocators, then drain submitted work even after
+    // a synchronization failure. If draining fails, remove this D3D12 device
+    // before callers release its resources. True means drained; false means removed.
+    bool retireGpuForShutdown() noexcept;
+
+    // Deterministic lifecycle fault; drains submitted work and simulates removal
+    // without resetting the physical GPU or affecting other applications.
+    bool injectDeviceLostForTest() noexcept;
+    bool injectSynchronizationFailureForTest() noexcept;
 
     bool checkDeviceHealthy(std::string* outReason = nullptr) const;
     uint64_t queryEstimatedAppVramBytes() const noexcept;
@@ -124,6 +134,8 @@ public:
     uint32_t currentBackBufferIndex() const noexcept;
     GpuPassTimingsMs lastPassTimings() const noexcept;
     uint32_t debugErrorCount() const;
+    uint32_t debugWarningCount() const;
+    bool debugLayerActive() const noexcept;
 
     const std::string& adapterName() const noexcept { return adapterName_; }
     int32_t adapterLuidLow() const noexcept { return luidLow_; }
@@ -233,6 +245,7 @@ public:
     uint32_t canvasWidth() const noexcept;
     uint32_t canvasHeight() const noexcept;
     uint32_t lastVerifiedRayHits() const noexcept;
+    uint32_t activeDenoiseMode() const noexcept;
 
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(
@@ -244,6 +257,8 @@ public:
         std::vector<uint32_t>* outRgb10 = nullptr);
 
     // Reads back the canonical CanvasClean texture produced by the most recent live swapchain render() without re-rendering.
+    // Tests inspect linear FP16 output before UNORM conversion can hide NaN/Inf.
+    bool readSceneHdrFiniteForTest(uint64_t& nonFiniteComponents, std::string* error = nullptr);
     bool readLastRenderedCanvasForTest(
         std::vector<uint8_t>& outRgba,
         uint32_t& outWidth,

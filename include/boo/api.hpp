@@ -110,7 +110,45 @@ struct SceneCue {
     bool allowDirectorModulation = true;
 };
 
+// Live "Explore" mode (NVIDIA-demo style): free-fly camera, interactive sun/time-of-day and
+// practical-lamp control, AOV buffer inspection, interactive ray-traced physics marbles, plus
+// NRD REBLUR motion denoising and NRD REFERENCE progressive accumulation while still.
+// Default-constructed (inactive) values leave the deterministic film output untouched.
+struct InteractiveView {
+    static constexpr uint32_t kMaxMarbles = 12;
+
+    bool exploreActive = false;          // Active interactive Explore session
+    float blendWeight = 0.0f;            // [0..1] camera blend (1=Explore, (0,1)=smooth cubic return to film)
+    float eye[3]{0.0f, 0.0f, 0.0f};
+    float target[3]{0.0f, 0.0f, 1.0f};
+    float up[3]{0.0f, 1.0f, 0.0f};
+    float fovYRadians = 0.92f;
+    bool sunOverride = false;            // Use sunDir/sunScale instead of the scripted sun
+    float sunDir[3]{0.80f, 0.34f, -0.49f};
+    float sunScale = 1.0f;
+    float sunElevation01 = 0.52f;        // [0..1] UI slider normalized elevation (night -> dawn -> day)
+    float sunAzimuth01 = 0.42f;          // [0..1] UI slider normalized azimuth
+    bool lampsOff = false;               // Switch off practical lamps (sconce / mirror halo / RTXDI emitters)
+    bool accumulate = false;             // Progressive temporal accumulation + sub-pixel jitter
+    uint32_t accumFrame = 0;             // 0 = reset history this frame
+    float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
+    uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark
+    uint32_t aovMode = 0;                // 0 = Final, 1..7 = AOV buffer inspection modes
+    uint32_t soloEngine = 0;             // 0 = All (Full Orchestra), 1 = RT, 2 = Tensor, 3 = NPU, 4 = CUDA, 5 = Codec
+    bool studioDrawerOpen = false;       // Keeps persistent bottom Studio Dock visible across Film/Explore/Wipe
+    bool customAudioActive = false;      // Highlights [MP3+] pill when external MP3/WAV/FLAC soundtrack is active
+    bool audioMuted = false;             // Reflects live [MUSC]/[MUTE] state on the Studio Dock
+    uint32_t audioTrackSlot = 0;         // 0 = SYNT, 1..4 = Bundled OST TRK1..4, 5 = External MP3+
+    float audioToastAlpha = 0.0f;        // [0..1] fade alpha for Now Playing track toast above Studio Dock
+    uint32_t marbleCount = 0;            // 0 = none (canonical), 1..kMaxMarbles = active physics spheres
+    float marblePosRad[kMaxMarbles][4]{};  // xyz = world position, w = sphere radius (m)
+    float marblePrevPos[kMaxMarbles][4]{}; // xyz = previous frame world position (for 3D motion vectors)
+    float marbleRotQuat[kMaxMarbles][4]{}; // xyzw = unit rotation quaternion for rolling grain/anisotropy
+    uint32_t marbleMat[kMaxMarbles]{};     // Material ID (3 crystal, 4 celadon, 35 amber, 8 gold, 23 nickel)
+};
+
 struct FrameContext {
+    InteractiveView interactive{};
     uint64_t presentationFrame = 0;
     int64_t samplePosition = 0;
     int32_t sampleRate = 48000;
@@ -125,6 +163,8 @@ struct FrameContext {
     float moodIrisAngle = 0.5f;
     float moodIntensity = 0.5f;
     float moodPaletteAccent = 0.5f;
+    float moodBloomStrength = 0.35f;
+    float moodCutAccent = 0.0f;
     Edition edition = Edition::Family;
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     uint32_t hudMode = 0; // Full, compact, A/B, off

@@ -21,16 +21,35 @@ Prerequisites: Visual Studio 2022 C++ x64 Build Tools, Windows 10/11 SDK (`10.0.
 # Run full automated CTest + PE import audit + multi-mode GUI smoke + benchmarks
 ./scripts/run_smoke.ps1 -Preset x64-base-release
 
-# Debug verification (D3D12 debug layer + unit/cue/integration smoke)
+# Debug verification (requests the D3D12 debug layer when installed)
 ./scripts/run_smoke.ps1 -Preset x64-base-debug -SkipBenchmarks
 
 # Build single-app native Windows installer (build/dist/BooSahSah-Setup-win64.exe) + portable ZIP
 ./scripts/package_release.ps1
 ```
 
-> **One App, One Installer (`BooSahSah-Setup-win64.exe`)**: Running `./scripts/package_release.ps1` packs the unified `boo_sah_sah.exe` application (including `--bench` and `--validate-cues`), compiled DXIL shaders, `.bmesh` geometry, cues, configs, and (when `.venv` OpenVINO is present) a compact `openvino\` Intel NPU runtime sidecar into a single ~`12 MB` LZMS-compressed per-user Windows installer (`%LOCALAPPDATA%\Programs\BooSahSah`, zero UAC elevation required, includes `Uninstall-BooSahSah.exe`). When OpenVINO DLLs are absent, playback runs seamlessly on the deterministic `ScriptedDirector`.
+> **One App, One Installer (`BooSahSah-Setup-win64.exe`)**: Running `./scripts/package_release.ps1` packs the unified `boo_sah_sah.exe` application (including `--bench` and `--validate-cues`), compiled DXIL shaders, seven `.bmesh` scenes, cues, configs, and (when `.venv` OpenVINO is present) a compact `openvino\` Intel NPU runtime sidecar into a single LZMS-compressed per-user Windows installer (`%LOCALAPPDATA%\Programs\BooSahSah`, zero UAC elevation required, includes `Uninstall-BooSahSah.exe`). When OpenVINO DLLs are absent, playback uses the deterministic `ScriptedDirector`.
+
+Setup runs extraction on a worker thread and keeps Cancel responsive. Cancellation waits for the current operation before rolling back. Upgrades preserve existing configuration by default; `--replace-config` explicitly installs the packaged defaults. Close the app before upgrading: setup rejects a running app or locked destination files. The application and native installer use the static MSVC runtime. Release and Debug CI build, validate cues, audit optional imports, and exercise packaging, upgrades, rollback, and native uninstallation.
 
 All automated GUI launches must pass `--no-activate` so test windows never steal foreground focus.
+
+### Film quality and robustness gates
+
+```powershell
+# 68 native 2560x1440 captures across both editions, hardware solos, and narrative cards
+./build/x64-release/boo_integration_tests.exe --film-captures --no-activate --capture-dir diagnostics/film-quality
+
+# 224 lifecycle iterations with memory, audio, and synthetic graphics-recovery receipts
+./build/x64-release/boo_integration_tests.exe --film-stress --no-activate --capture-dir diagnostics/film-stress
+
+# Require an active Windows Graphics Tools debug layer; fail if it is unavailable
+./build/x64-debug/boo_integration_tests.exe --film-stress --no-activate --require-debug-layer --capture-dir diagnostics/film-stress-debug
+```
+
+The capture gate writes 68 clean/narrative PNGs, two additional full-stats layout PNGs, four labeled montages, and `manifest.json`; the stress gate writes `stress.json` under its `--capture-dir`. These are opt-in hardware gates, separate from the short smoke suite. Capture checks cover repeatable seeks, finite HDR output, verified RT status, and clean-feed isolation. The capture director is sample-derived `ScriptedDirector`, so these images do not establish NPU execution.
+
+Debug-layer absence is recorded as unavailable, never as proof of zero warnings. The current RTX 5080 Laptop GPU / Intel AI Boost host lacks Windows Graphics Tools; strict debug validation requires another run with that component installed. See the [Film Quality & Robustness Report](docs/quality_upgrade_report.md) for measured results and remaining limits.
 
 ---
 
@@ -78,6 +97,12 @@ Capability detection and verified execution are strictly separate across all fiv
 5. **Codec & Opt-In Media (`V`, `W`)**: In-memory Hardware H.264 MFT encode -> Annex-B verification -> H.264 decode round-trip (`1280x720 NV12`), with optional `--media-input <path>` and `--camera-input` (displaying an always-visible crimson `LIVE CAMERA` indicator when webcam is open) and `SHADER SIGNAL` substitute fallback.
 6. **Spout2 Clean Sender (`O`, `--enable-spout`)**: Publishes Pass-3 `CanvasClean` (`16:9`) via LUID-matched shared `BGRA8` texture and `SpoutSenderNames` shared memory—completely free of Pass-4 HUD, captions, and A/B overlays.
 
+The seven-mesh pipeline adds `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove` to the four original city/orchid assets. Presentation typography uses 60 original capsule-SDF vector glyphs, including Latin lettering, 台北, and Chinese numerals 一 through 七 paired with Roman act numbers. This is a small title alphabet, not a general Chinese font.
+
+Glass shading uses a single geometry refraction ray with an environment-dispersion approximation. It is not a multi-bounce spectral path tracer. The raster substitute preserves the film's composition and palette but cannot reproduce full DXR geometry reflections. The score integrates modulated oscillator phase and crossfades edition voices to avoid abrupt changes when seeking or switching editions.
+
+Graphics failure triggers at most one teardown/recreation attempt while preserving the sample timeline. `--inject-device-lost` exercises this policy through a synthetic fault after queued GPU work has drained; it does not cause a physical GPU reset or validate recovery from a real driver TDR.
+
 ---
 
 ## CLI Examples
@@ -92,8 +117,8 @@ Capability detection and verified execution are strictly separate across all fiv
 ./build/x64-release/boo_sah_sah.exe --camera-input
 ./build/x64-release/boo_sah_sah.exe --reduced-flash --reduced-motion --no-captions
 ./build/x64-release/boo_sah_sah.exe --force-warp --preset safe
-./build/x64-release/boo_sah_sah.exe --validate-cues
-./build/x64-release/boo_sah_sah.exe --bench --bench-iterations 30 --export-bench diagnostics/bench.json --export-bench-csv diagnostics/bench.csv
+./build/x64-release/boo_sah_sah.exe --validate-cues --no-activate
+./build/x64-release/boo_sah_sah.exe --bench --no-activate --bench-iterations 30 --export-bench diagnostics/bench.json --export-bench-csv diagnostics/bench.csv
 ```
 
 ---
@@ -105,6 +130,7 @@ Capability detection and verified execution are strictly separate across all fiv
 - [Architecture Overview](docs/architecture.md)
 - [M2 Three-City Trilogy Visual Pipeline](docs/TRILOGY_PIPELINE.md)
 - [Engineering Upgrade Report](docs/engineering_upgrade_report.md)
+- [Film Quality & Robustness Report](docs/quality_upgrade_report.md)
 - [Historical M1 Verification Report](docs/m1_verification_report.md)
 - [Changelog (M0–M10)](CHANGELOG.md)
 - [Licenses & Asset Provenance](LICENSES.md)

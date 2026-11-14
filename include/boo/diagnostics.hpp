@@ -27,6 +27,13 @@ struct RuntimeDiagnosticsSummary {
 
     uint64_t renderedFrames = 0;
     uint64_t presentStalls = 0;
+    uint32_t deviceRecoveryAttempts = 0;
+    uint32_t deviceRecoverySuccesses = 0;
+    bool deviceLostInjected = false;
+    bool graphicsUnavailable = false;
+    bool d3dDebugLayerActive = false;
+    uint32_t d3dDebugErrors = 0;
+    uint32_t d3dDebugWarnings = 0;
     int64_t startSample = 0;
     int64_t finalSample = 0;
     double wallElapsedSeconds = 0.0;

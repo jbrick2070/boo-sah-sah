@@ -48,11 +48,14 @@ struct AppSettings {
     bool reducedFlash = false;
     float motionScale = 1.0f;
     bool legacyM0Visual = false;
+    bool startInExploreMode = false;
+    uint32_t initialExplorePreset = 0;
 
     int32_t sampleRate = 48000;
     bool mute = false;
-    float masterVolume = 0.25f;
+    float masterVolume = 0.75f;
     bool forceSilentClock = false;
+    std::filesystem::path audioInputPath;
 
     // Hardware & fault-injection flags (Section 8.3)
     bool enableSignalHijack = false;
@@ -67,6 +70,7 @@ struct AppSettings {
     bool injectAudioFail = false;
     bool injectVramPressure = false;
     bool injectNpuTimeout = false;
+    bool injectDeviceLost = false;
     bool enableD3DDebug = false;
 
     // Optional live-show integrations (Milestone M8 Spout2 clean sender & M9 Opt-In Media Ingest)

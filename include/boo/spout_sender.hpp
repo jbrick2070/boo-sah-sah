@@ -55,6 +55,11 @@ public:
         uint32_t canvasWidth,
         uint32_t canvasHeight) noexcept;
 
+    // Call after submitting the list. Retires the GPU blit before allowing a
+    // Spout receiver to read the shared texture. On false, retire/remove the D3D12
+    // context before shutdown: timed-out work retains receiver mutex ownership.
+    bool completePublish() noexcept;
+
     void shutdown() noexcept;
 
     bool isActive() const noexcept;

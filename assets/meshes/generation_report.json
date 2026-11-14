@@ -3,8 +3,8 @@
   "assets": [
     {
       "name": "shanghai_trestle",
-      "vertices": 127188,
-      "triangles": 42396,
+      "vertices": 131436,
+      "triangles": 43812,
       "submeshes": 36,
       "nonmanifold_edges": 0,
       "aabb": [
@@ -19,13 +19,13 @@
           157.0
         ]
       ],
-      "sha256": "d95885c632ada24ac07cfc5e42b608ff7841d73adc670ef296d21b855aa2bda8"
+      "sha256": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15"
     },
     {
       "name": "shenzhen_evtol",
-      "vertices": 112938,
-      "triangles": 37646,
-      "submeshes": 75,
+      "vertices": 128418,
+      "triangles": 42806,
+      "submeshes": 76,
       "nonmanifold_edges": 0,
       "aabb": [
         [
@@ -39,13 +39,13 @@
           155.0
         ]
       ],
-      "sha256": "cd29dd429c4161bc33d30f8ceeb9ab965c2ce0665333a2249b24d6f4f7953891"
+      "sha256": "9ea67989fd467beb75f93949fbfd8ea2f68b98c63f8db06888a2a205acffa1ac"
     },
     {
       "name": "taipei_101_hero",
-      "vertices": 263766,
-      "triangles": 87922,
-      "submeshes": 35,
+      "vertices": 471384,
+      "triangles": 157128,
+      "submeshes": 41,
       "nonmanifold_edges": 0,
       "aabb": [
         [
@@ -59,7 +59,7 @@
           1775.0
         ]
       ],
-      "sha256": "117572047b6f22c7bc905bf192945e8a986f8e38ad791b7c2972b943a9755831"
+      "sha256": "d1be86b40522ae31497b3f3c1142ee432d65ac14e29d7e5d58f8867ff97f475f"
     },
     {
       "name": "glass_orchid_hero",
@@ -71,15 +71,75 @@
         [
           -1.8182412385940552,
           -2.6948001384735107,
-          -0.7506248950958252
+          -0.7506244778633118
         ],
         [
           1.8182412385940552,
           1.7200000286102295,
-          0.5225464105606079
+          0.5225390195846558
         ]
       ],
-      "sha256": "5c98c7077ab39399e4015b59b504eea8f22af2980a8dcae2d9154f8f1238eb7e"
+      "sha256": "80aa114ecfc81b01dd14131faf0d631c97f882536ccd6e3d468560cd476894ea"
+    },
+    {
+      "name": "enamel_cathedral",
+      "vertices": 242448,
+      "triangles": 80816,
+      "submeshes": 72,
+      "nonmanifold_edges": 0,
+      "aabb": [
+        [
+          -5.634585380554199,
+          2.6500000953674316,
+          1.9759889841079712
+        ],
+        [
+          5.634585380554199,
+          8.775660514831543,
+          10.698820114135742
+        ]
+      ],
+      "sha256": "e75edac862d8c54306466a8c32d2eb7dfb9b6861a3b8f636437761ccfeae09a8"
+    },
+    {
+      "name": "microbial_sanctuary",
+      "vertices": 437928,
+      "triangles": 145976,
+      "submeshes": 50,
+      "nonmanifold_edges": 0,
+      "aabb": [
+        [
+          -5.651871681213379,
+          0.3483296036720276,
+          -0.15799999237060547
+        ],
+        [
+          5.694576263427734,
+          4.552167892456055,
+          9.041559219360352
+        ]
+      ],
+      "sha256": "5e2ad7ba0a6d45a00ddab681ebe0de232d2d9b8981480d48edfa11de2a87f2dd"
+    },
+    {
+      "name": "dawn_alcove",
+      "vertices": 284100,
+      "triangles": 94700,
+      "submeshes": 49,
+      "nonmanifold_edges": 0,
+      "aabb": [
+        [
+          -2.559999942779541,
+          2.559999942779541,
+          2.080000162124634
+        ],
+        [
+          2.6399998664855957,
+          5.980000019073486,
+          8.361532211303711
+        ]
+      ],
+      "sha256": "9c46c1941c6a5f01b8f32bb0dbdf202d268a3f79182e6101d85a27ffc082acfe"
     }
   ]
 }

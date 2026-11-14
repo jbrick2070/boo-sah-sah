@@ -639,11 +639,12 @@ M1CameraState evaluateShowCamera(
             c.fovYRadians = 0.78f;
             c.revealOpen01 = 1.0f;
         } else {
-            // Act 6 [275..360s): Silicon Rebellion 4-pillar synthesis -> final_everyday_care_reveal @ 342.000s (05:42.000) -> Dawn end card
+            // Act 6 [275..360s): Silicon Rebellion 4-pillar synthesis -> final_everyday_care_reveal @ 342.000s -> 10s architectural move -> Dawn end card
             const double u = t - 275.0;
-            const double sCare = smootherstep01((t - 336.0) / 8.5);
-            const double sFinale = smootherstep01((t - 346.0) / 7.5);
-            const double orbit = (std::min(u, 61.0) / 61.0) * 2.0 * kPi;
+            const double sCare = smootherstep01((t - 335.5) / 6.3);
+            const double sFinale = smootherstep01((t - 342.0) / 10.0);
+            const double holdDrift = smootherstep01((t - 352.0) / 8.0) * 0.025;
+            const double orbit = (std::min(u, 60.5) / 60.5) * 2.0 * kPi;
 
             const double synEye[3] = {
                 2.25 * mScale * std::sin(orbit) + irisShift * 0.25,
@@ -652,11 +653,13 @@ M1CameraState evaluateShowCamera(
             };
             const double synTgt[3] = {0.35 * mScale * std::cos(orbit), 5.75, 5.65};
 
-            const double careEye[3] = {0.62, 4.88, -0.78};
-            const double careTgt[3] = {0.20, 5.35, 6.20};
+            // 342.0s: Intimate 1:1 metric architectural three-quarter view inside the sunlit Taipei penthouse bathroom
+            const double careEye[3] = {-0.58, 3.88, 4.38};
+            const double careTgt[3] = {-0.06, 3.84, 6.38};
 
-            const double finEye[3] = {0.48, 4.80, -0.48};
-            const double finTgt[3] = {7.55, 16.95, 46.00};
+            // 352.0s..360.0s: 10-second slider pullback & subtle pan framing left plaster title zone, full oak vanity, mirror & Taipei 101 window
+            const double finEye[3] = {-0.36 + holdDrift * 0.6, 4.08 + holdDrift * 0.2, 3.48 - holdDrift * 0.5};
+            const double finTgt[3] = {-0.28, 4.06, 6.55};
 
             c.shotIndex = 6;
             for (int i = 0; i < 3; ++i) {
@@ -665,7 +668,7 @@ M1CameraState evaluateShowCamera(
                 c.eye[i] = static_cast<float>(e01 + (finEye[i] - e01) * sFinale);
                 c.target[i] = static_cast<float>(t01 + (finTgt[i] - t01) * sFinale);
             }
-            c.fovYRadians = lerpF(lerpF(0.80, 0.78, sCare), 0.78, sFinale);
+            c.fovYRadians = lerpF(lerpF(0.80, 0.58, sCare), 0.66, sFinale);
             c.revealOpen01 = 1.0f;
         }
         return c;

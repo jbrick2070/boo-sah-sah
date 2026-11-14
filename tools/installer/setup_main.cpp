@@ -12,9 +12,15 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
+#include <atomic>
+#include <functional>
+#include <set>
+#include <thread>
 #include <cstdint>
+#include <cwctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +29,8 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
 
@@ -133,7 +141,8 @@ bool isSafeRelativeArchivePath(const fs::path& rel) {
         return false;
     }
     for (const auto& part : rel) {
-        if (part == L".." || part == L".") {
+        if (part.empty() || part.wstring().find(L'\0') != std::wstring::npos || part == L".." || part == L"." || part.wstring().find_first_of(L":\"<>|?*\r\n") != std::wstring::npos ||
+            part.wstring().back() == L'.' || part.wstring().back() == L' ') {
             return false;
         }
     }
@@ -294,6 +303,7 @@ struct InstallOptions {
     bool registerUninstall = true;
     bool launchAfterInstall = false;
     bool noActivateLaunch = false;
+    bool preserveConfig = true;
 };
 
 void writeUninstallRegistry(const fs::path& installDir, uint64_t totalInstalledBytes) {
@@ -332,7 +342,140 @@ void writeUninstallRegistry(const fs::path& installDir, uint64_t totalInstalledB
     RegCloseKey(hKey);
 }
 
-bool performInstall(const InstallOptions& opts, std::wstring& outError) {
+// Reject junctions/symlinks in every existing ancestor before modifying a destination.
+bool safeDestination(const fs::path& path) {
+    for (fs::path p = fs::absolute(path).lexically_normal(); !p.empty();) {
+        const DWORD attrs = GetFileAttributesW(p.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        const fs::path parent = p.parent_path();
+        if (parent == p) break;
+        p = parent;
+    }
+    return true;
+}
+
+bool appIsRunning() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return true; // Cannot prove a safe upgrade.
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool running = false;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, kAppExeName) == 0) { running = true; break; }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return running;
+}
+
+struct InstallProgress {
+    std::atomic<bool> cancel{false};
+    std::function<void(int)> report;
+    bool checkpoint(std::wstring& error) const {
+        if (!cancel.load()) return true;
+        error = L"Installation cancelled. Previous files have been restored.";
+        return false;
+    }
+    void update(int percent) const { if (report) report(percent); }
+};
+
+struct SetupLock {
+    HANDLE handle = CreateMutexW(nullptr, FALSE, L"Local\\BooSahSah.SetupTransaction");
+    bool acquired = false;
+    SetupLock() {
+        if (handle) { const DWORD result = WaitForSingleObject(handle, 0); acquired = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED; }
+    }
+    ~SetupLock() { if (acquired) ReleaseMutex(handle); if (handle) CloseHandle(handle); }
+};
+
+// Files are journaled on the destination volume before replacement. A failed write,
+// exception, or Cancel restores old files and removes only newly-created paths.
+struct InstallTransaction {
+    fs::path root, backup;
+    std::wstring& error;
+    struct Entry { fs::path relative; bool hadOriginal; };
+    std::vector<Entry> journal;
+    std::vector<fs::path> createdDirs;
+    bool committed = false;
+    bool rollbackFailed = false;
+
+    InstallTransaction(fs::path destination, std::wstring& report) : root(std::move(destination)), error(report) {}
+    bool makeDirectories(const fs::path& dir) {
+        std::error_code ec;
+        if (fs::exists(dir, ec)) return fs::is_directory(dir, ec);
+        if (dir.empty() || dir == dir.parent_path() || !makeDirectories(dir.parent_path())) return false;
+        if (!fs::create_directory(dir, ec)) return false;
+        createdDirs.push_back(dir);
+        return true;
+    }
+    bool begin() {
+        if (!safeDestination(root) || !makeDirectories(root)) return false;
+        // Exclusive name: never reuse or delete somebody else's transaction folder.
+        for (unsigned n = 0; n < 100; ++n) {
+            backup = root / (L".boo-rollback-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(n));
+            std::error_code ec;
+            if (fs::create_directory(backup, ec)) return true;
+        }
+        backup.clear();
+        return false;
+    }
+    bool stash(const fs::path& relative) {
+        const fs::path dest = root / relative;
+        if (!isSafeRelativeArchivePath(relative) || !safeDestination(dest)) return false;
+        std::error_code ec;
+        const bool exists = fs::exists(dest, ec);
+        if (ec || (exists && !fs::is_regular_file(dest, ec))) return false;
+        journal.push_back({relative, exists}); // Allocate before moving the only original copy.
+        if (exists) {
+            fs::create_directories((backup / relative).parent_path(), ec);
+            if (ec) { journal.pop_back(); return false; }
+            fs::rename(dest, backup / relative, ec);
+            if (ec) { journal.pop_back(); return false; }
+        }
+        return true;
+    }
+    bool write(const fs::path& relative, const uint8_t* bytes, size_t size) {
+        if (!stash(relative) || !makeDirectories((root / relative).parent_path())) return false;
+        return writeWholeFile(root / relative, bytes, size);
+    }
+    void finish() noexcept {
+        std::error_code ec;
+        if (!committed) {
+            for (auto it = journal.rbegin(); it != journal.rend(); ++it) {
+                fs::remove(root / it->relative, ec);
+                if (ec) rollbackFailed = true;
+                if (it->hadOriginal) {
+                    fs::rename(backup / it->relative, root / it->relative, ec);
+                    if (ec) rollbackFailed = true;
+                }
+            }
+        }
+        // Retain backups if restore failed (e.g. another process locked a file).
+        if (!backup.empty() && !rollbackFailed) fs::remove_all(backup, ec);
+        if (rollbackFailed) error = L"Some files could not be restored. Close other applications and recover the original files from: " + backup.wstring();
+        if (!committed) for (auto it = createdDirs.rbegin(); it != createdDirs.rend(); ++it) fs::remove(*it, ec);
+        journal.clear();
+    }
+    ~InstallTransaction() { finish(); }
+};
+
+bool performInstall(const InstallOptions& opts, std::wstring& outError, InstallProgress* suppliedProgress = nullptr) {
+    SetupLock lock;
+    if (!lock.acquired) { outError = L"Another BOO SAH SAH setup is running. Wait for it to finish and try again."; return false; }
+    InstallProgress localProgress;
+    InstallProgress& progress = suppliedProgress ? *suppliedProgress : localProgress;
+    if (appIsRunning()) {
+        outError = L"Close BOO SAH SAH before installing or upgrading, then try again.";
+        return false;
+    }
+    if (!opts.installDir.is_absolute() || opts.installDir == opts.installDir.root_path() || !safeDestination(opts.installDir)) {
+        outError = L"Choose an absolute application folder without symbolic links or junctions.";
+        return false;
+    }
+    if (!progress.checkpoint(outError)) return false;
+    progress.update(-1); // Inbox LZMS is indivisible; marquee until decompression completes.
+
     const fs::path selfExe = currentExecutablePath();
     std::ifstream in(selfExe, std::ios::binary | std::ios::ate);
     if (!in) {
@@ -353,7 +496,8 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
         return false;
     }
 
-    if (footer.payloadOffset + footer.compressedBytes + sizeof(SfxFooter) != static_cast<uint64_t>(totalExeBytes) ||
+    if (footer.payloadOffset > static_cast<uint64_t>(totalExeBytes) - sizeof(SfxFooter) ||
+        footer.compressedBytes != static_cast<uint64_t>(totalExeBytes) - sizeof(SfxFooter) - footer.payloadOffset ||
         footer.uncompressedBytes == 0 || footer.uncompressedBytes > (1024ULL * 1024ULL * 1024ULL)) {
         outError = L"Installer payload bounds validation failed.";
         return false;
@@ -399,9 +543,11 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
         return false;
     }
 
+    if (!progress.checkpoint(outError)) return false;
+    progress.update(0);
     std::error_code ec;
-    fs::create_directories(opts.installDir, ec);
-    if (ec) {
+    InstallTransaction transaction(opts.installDir, outError);
+    if (!transaction.begin()) {
         outError = L"Cannot create destination folder: " + opts.installDir.wstring();
         return false;
     }
@@ -416,8 +562,30 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
     std::vector<std::wstring> installedRelFiles;
     installedRelFiles.reserve(fileCount + 2u);
     uint64_t totalBytesWritten = 0;
+    std::set<std::wstring> archivePaths;
+    std::vector<fs::path> previousFiles;
+    std::vector<fs::path> previousShortcuts;
+    bool previouslyRegistered = false;
+    {
+        std::ifstream oldManifest(opts.installDir / kManifestFile);
+        std::string line;
+        while (std::getline(oldManifest, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.rfind("FILE=", 0) == 0) {
+                fs::path rel(utf8ToWide(line.substr(5)));
+                if (isSafeRelativeArchivePath(rel)) previousFiles.push_back(rel);
+            } else if (line.rfind("SHORTCUT=", 0) == 0) {
+                const fs::path shortcut(utf8ToWide(line.substr(9)));
+                if (shortcut == knownShortcutFolder(FOLDERID_Programs) / L"BOO SAH SAH.lnk" ||
+                    shortcut == knownShortcutFolder(FOLDERID_Desktop) / L"BOO SAH SAH.lnk") previousShortcuts.push_back(shortcut);
+            } else if (line == "REGISTER_UNINSTALL=1") {
+                previouslyRegistered = true;
+            }
+        }
+    }
 
     for (uint32_t i = 0; i < fileCount; ++i) {
+        if (!progress.checkpoint(outError)) return false;
         uint32_t pathLen = 0;
         if (!readU32(rawArchive.data(), rawArchive.size(), pos, pathLen) || pathLen == 0 || pathLen > 1024u ||
             pos + pathLen > rawArchive.size()) {
@@ -428,7 +596,7 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
         pos += pathLen;
 
         uint64_t dataLen = 0;
-        if (!readU64(rawArchive.data(), rawArchive.size(), pos, dataLen) || pos + dataLen > rawArchive.size()) {
+        if (!readU64(rawArchive.data(), rawArchive.size(), pos, dataLen) || dataLen > rawArchive.size() - pos) {
             outError = L"Malformed setup archive entry payload.";
             return false;
         }
@@ -439,61 +607,79 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
             return false;
         }
 
+        std::wstring key = relPath.wstring();
+        std::transform(key.begin(), key.end(), key.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        if (!archivePaths.insert(key).second || key == kManifestFile || key == L"uninstall-boosahsah.exe") {
+            outError = L"Duplicate or reserved archive entry.";
+            return false;
+        }
         const fs::path destPath = opts.installDir / relPath;
-        if (!writeWholeFile(destPath, rawArchive.data() + pos, static_cast<size_t>(dataLen))) {
+        const bool keepConfig = opts.preserveConfig && _wcsicmp(relPath.begin()->c_str(), L"config") == 0 && fs::exists(destPath, ec);
+        if (!keepConfig && !transaction.write(relPath, rawArchive.data() + pos, static_cast<size_t>(dataLen))) {
             outError = L"Failed writing file (ensure BOO SAH SAH is closed): " + destPath.wstring();
             return false;
         }
 
-        installedRelFiles.push_back(relPath.wstring());
+        if (!keepConfig) installedRelFiles.push_back(relPath.wstring());
         totalBytesWritten += dataLen;
         pos += static_cast<size_t>(dataLen);
+        progress.update(static_cast<int>((i + 1ULL) * 90 / fileCount));
     }
+    if (pos != rawArchive.size()) { outError = L"Trailing archive data."; return false; }
 
     // Write lightweight uninstaller stub (without multi-MB payload)
-    const fs::path uninstallPath = opts.installDir / kUninstallExe;
-    if (writeWholeFile(uninstallPath, stubBytes.data(), stubBytes.size())) {
+    if (!progress.checkpoint(outError)) return false;
+    if (transaction.write(kUninstallExe, stubBytes.data(), stubBytes.size())) {
         installedRelFiles.push_back(kUninstallExe);
         totalBytesWritten += stubBytes.size();
+    } else { outError = L"Could not write uninstaller."; return false; }
+
+    // Remove obsolete files from earlier versions using the same rollback journal.
+    for (const auto& rel : previousFiles) {
+        std::wstring key = rel.wstring();
+        std::transform(key.begin(), key.end(), key.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        if (key == L"uninstall-boosahsah.exe" || key == kManifestFile || archivePaths.count(key) ||
+            (opts.preserveConfig && _wcsicmp(rel.begin()->c_str(), L"config") == 0)) continue;
+        if (fs::exists(opts.installDir / rel, ec) && !transaction.stash(rel)) {
+            outError = L"Could not replace obsolete files; close the application and retry."; return false;
+        }
+        archivePaths.insert(key); // Do not journal duplicate entries in an old manifest twice.
     }
+    if (!progress.checkpoint(outError)) return false;
 
     std::vector<fs::path> createdShortcuts;
     const fs::path appExePath = opts.installDir / kAppExeName;
     if (opts.createStartMenuShortcut) {
-        const fs::path programsDir = knownShortcutFolder(FOLDERID_Programs);
-        if (!programsDir.empty()) {
-            const fs::path lnk = programsDir / L"BOO SAH SAH.lnk";
-            if (createShellShortcut(lnk, appExePath, opts.installDir, kAppTitle)) {
-                createdShortcuts.push_back(lnk);
-            }
-        }
+        const fs::path folder = knownShortcutFolder(FOLDERID_Programs);
+        if (!folder.empty()) createdShortcuts.push_back(folder / L"BOO SAH SAH.lnk");
     }
     if (opts.createDesktopShortcut) {
-        const fs::path desktopDir = knownShortcutFolder(FOLDERID_Desktop);
-        if (!desktopDir.empty()) {
-            const fs::path lnk = desktopDir / L"BOO SAH SAH.lnk";
-            if (createShellShortcut(lnk, appExePath, opts.installDir, kAppTitle)) {
-                createdShortcuts.push_back(lnk);
-            }
-        }
+        const fs::path folder = knownShortcutFolder(FOLDERID_Desktop);
+        if (!folder.empty()) createdShortcuts.push_back(folder / L"BOO SAH SAH.lnk");
     }
-
     // Record exact installed files & shortcuts so uninstaller never deletes untracked user files
     {
         std::ostringstream manifest;
-        manifest << "REGISTER_UNINSTALL=" << (opts.registerUninstall ? "1" : "0") << "\n";
+        manifest << "REGISTER_UNINSTALL=" << ((opts.registerUninstall || previouslyRegistered) ? "1" : "0") << "\n";
         for (const auto& rel : installedRelFiles) {
             manifest << "FILE=" << wideToUtf8(rel) << "\n";
         }
         for (const auto& sc : createdShortcuts) {
             manifest << "SHORTCUT=" << wideToUtf8(sc.wstring()) << "\n";
         }
+        for (const auto& sc : previousShortcuts) {
+            if (std::find(createdShortcuts.begin(), createdShortcuts.end(), sc) == createdShortcuts.end())
+                manifest << "SHORTCUT=" << wideToUtf8(sc.wstring()) << "\n";
+        }
         const std::string mstr = manifest.str();
-        writeWholeFile(
-            opts.installDir / kManifestFile,
+        if (!transaction.write(
+            kManifestFile,
             reinterpret_cast<const uint8_t*>(mstr.data()),
-            mstr.size());
+            mstr.size())) { outError = L"Could not save install manifest."; return false; }
     }
+    transaction.committed = true;
+    progress.update(95);
+    for (const auto& shortcut : createdShortcuts) createShellShortcut(shortcut, appExePath, opts.installDir, kAppTitle);
 
     if (opts.registerUninstall) {
         writeUninstallRegistry(opts.installDir, totalBytesWritten);
@@ -524,10 +710,54 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError) {
         }
     }
 
+    progress.update(100);
     return true;
 }
 
+std::wstring quoteArgument(const std::wstring& value) {
+    std::wstring result = L"\"";
+    size_t slashes = 0;
+    for (const wchar_t c : value) {
+        if (c == L'\\') { ++slashes; continue; }
+        result.append(slashes * (c == L'"' ? 2 : 1), L'\\');
+        slashes = 0;
+        if (c == L'"') result += L'\\';
+        result += c;
+    }
+    result.append(slashes * 2, L'\\');
+    return result + L'"';
+}
+
+// Defer only the running uninstaller image. Content removal and its exit status
+// stay synchronous. Paths never pass through cmd.exe, so metacharacters are literal.
+bool launchUninstallHelper(const fs::path& target) {
+    wchar_t temp[MAX_PATH]{};
+    wchar_t name[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp) || !GetTempFileNameW(temp, L"boo", 0, name)) return false;
+    const fs::path helper(name);
+    if (!CopyFileW(currentExecutablePath().c_str(), helper.c_str(), FALSE)) { DeleteFileW(name); return false; }
+    std::wstring command = quoteArgument(helper.wstring()) + L" --cleanup-self " +
+        std::to_wstring(GetCurrentProcessId()) + L" " + quoteArgument(target.wstring());
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, temp, &si, &pi);
+    if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+    else DeleteFileW(name);
+    return ok != FALSE;
+}
+
 int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegistry) {
+    SetupLock lock;
+    if (!lock.acquired) return 8;
+    if (!targetDir.is_absolute() || targetDir == targetDir.root_path() || !safeDestination(targetDir)) return 3;
+    if (appIsRunning()) {
+        if (!silent) MessageBoxW(nullptr, L"Close BOO SAH SAH before uninstalling, then try again.", kSetupWindowTitle, MB_ICONWARNING | MB_OK);
+        return 4;
+    }
     const fs::path manifestPath = targetDir / kManifestFile;
     std::error_code ec;
     if (!fs::exists(manifestPath, ec)) {
@@ -546,12 +776,17 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
         if (ans != IDYES) return 0;
     }
 
+    const fs::path selfPath = currentExecutablePath();
+    const fs::path uninstallExe = targetDir / kUninstallExe;
+    const bool deferSelfRemoval = _wcsicmp(selfPath.c_str(), uninstallExe.c_str()) == 0;
+
     bool registeredInRegistry = false;
     std::vector<fs::path> relFiles;
     std::vector<fs::path> shortcuts;
 
     {
         std::ifstream f(manifestPath);
+        if (!f) return 2;
         std::string line;
         while (std::getline(f, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -564,25 +799,43 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
                 shortcuts.emplace_back(utf8ToWide(line.substr(9)));
             }
         }
+        if (f.bad()) return 2;
     }
 
     const fs::path selfExe = fs::weakly_canonical(currentExecutablePath(), ec);
 
+    // A manifest may only reference this product's two shortcut names.
+    const fs::path startShortcut = knownShortcutFolder(FOLDERID_Programs) / L"BOO SAH SAH.lnk";
+    const fs::path desktopShortcut = knownShortcutFolder(FOLDERID_Desktop) / L"BOO SAH SAH.lnk";
     for (const auto& sc : shortcuts) {
-        fs::remove(sc, ec);
+        if ((sc == startShortcut || sc == desktopShortcut) && safeDestination(sc)) fs::remove(sc, ec);
     }
 
-    bool deferSelfDelete = false;
+    bool removalFailed = false;
     for (const auto& rel : relFiles) {
+        if (_wcsicmp(rel.c_str(), kUninstallExe) == 0) continue; // Keep a retry route until all content was removed.
         const fs::path full = targetDir / rel;
         const fs::path canon = fs::weakly_canonical(full, ec);
         if (!selfExe.empty() && canon == selfExe) {
-            deferSelfDelete = true;
+            removalFailed = true;
             continue;
         }
+        if (!safeDestination(full)) { removalFailed = true; continue; }
         fs::remove(full, ec);
+        if (ec) removalFailed = true;
+    }
+    if (removalFailed) return 6; // Keep manifest so the uninstall can be retried.
+    if (!safeDestination(uninstallExe)) return 6;
+    if (deferSelfRemoval) {
+        // Start before removing the manifest so a failed helper launch is retryable.
+        // The helper preserves this executable if manifest removal below fails.
+        if (!launchUninstallHelper(targetDir)) return 5;
+    } else {
+        fs::remove(uninstallExe, ec);
+        if (ec) return 6;
     }
     fs::remove(manifestPath, ec);
+    if (ec) return 6;
 
     // Prune known empty subdirectories bottom-up without ever touching untracked user files
     const wchar_t* kKnownSubdirs[] = {
@@ -605,35 +858,7 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
         RegDeleteKeyW(HKEY_CURRENT_USER, kUninstallRegKey);
     }
 
-    if (deferSelfDelete) {
-        // Schedule asynchronous cleanup of the running uninstaller stub & empty root folder
-        const std::wstring cmd =
-            L"cmd.exe /C ping 127.0.0.1 -n 2 > nul & del /F /Q \"" + selfExe.wstring() +
-            L"\" > nul 2>&1 & rmdir \"" + targetDir.wstring() + L"\" > nul 2>&1";
-        std::wstring mutableCmd = cmd;
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi{};
-        const std::wstring tempWorkDir = fs::temp_directory_path().wstring();
-        if (CreateProcessW(
-                nullptr,
-                mutableCmd.data(),
-                nullptr,
-                nullptr,
-                FALSE,
-                CREATE_NO_WINDOW,
-                nullptr,
-                tempWorkDir.c_str(),
-                &si,
-                &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        }
-    } else if (fs::exists(targetDir, ec) && fs::is_empty(targetDir, ec)) {
-        fs::remove(targetDir, ec);
-    }
+    if (fs::exists(targetDir, ec) && fs::is_empty(targetDir, ec)) fs::remove(targetDir, ec);
 
     if (!silent) {
         MessageBoxW(nullptr, L"BOO SAH SAH has been uninstalled.", kSetupWindowTitle, MB_ICONINFORMATION | MB_OK);
@@ -649,7 +874,8 @@ enum DialogCtrlId : int {
     kIdChkLaunch     = 104,
     kIdLblStatus     = 105,
     kIdBtnInstall    = 106,
-    kIdBtnCancel     = 107
+    kIdBtnCancel     = 107,
+    kIdChkPreserve   = 108
 };
 
 struct GuiSetupState {
@@ -661,10 +887,20 @@ struct GuiSetupState {
     HWND hwndStatus = nullptr;
     HWND hwndBtnInstall = nullptr;
     HWND hwndBtnCancel = nullptr;
+    HWND hwndChkPreserve = nullptr;
+    HWND hwndProgress = nullptr;
+    std::thread worker;
+    InstallProgress progress;
+    bool working = false;
+    bool succeeded = false;
+    std::wstring error;
     HFONT hFontTitle = nullptr;
     HFONT hFontBody = nullptr;
     int exitCode = 0;
 };
+
+constexpr UINT kProgressMessage = WM_APP + 1;
+constexpr UINT kFinishedMessage = WM_APP + 2;
 
 LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<GuiSetupState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -721,21 +957,30 @@ LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SendMessageW(st->hwndChkLaunch, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFontBody), TRUE);
         SendMessageW(st->hwndChkLaunch, BM_SETCHECK, BST_CHECKED, 0);
 
+        st->hwndChkPreserve = CreateWindowExW(0, L"BUTTON", L"Keep existing config overrides when upgrading",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            24, 230, 490, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkPreserve)), cs->hInstance, nullptr);
+        SendMessageW(st->hwndChkPreserve, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFontBody), TRUE);
+        SendMessageW(st->hwndChkPreserve, BM_SETCHECK, st->opts.preserveConfig ? BST_CHECKED : BST_UNCHECKED, 0);
+        st->hwndProgress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            24, 265, 496, 18, hwnd, nullptr, cs->hInstance, nullptr);
+        SendMessageW(st->hwndProgress, PBM_SETRANGE32, 0, 100);
+
         st->hwndStatus = CreateWindowExW(
             0, L"STATIC", L"Ready to install.", WS_CHILD | WS_VISIBLE,
-            24, 240, 290, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLblStatus)), cs->hInstance, nullptr);
+            24, 294, 496, 40, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLblStatus)), cs->hInstance, nullptr);
         SendMessageW(st->hwndStatus, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFontBody), TRUE);
 
         st->hwndBtnInstall = CreateWindowExW(
             0, L"BUTTON", L"Install",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            326, 234, 92, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnInstall)), cs->hInstance, nullptr);
+            326, 340, 92, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnInstall)), cs->hInstance, nullptr);
         SendMessageW(st->hwndBtnInstall, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFontBody), TRUE);
 
         st->hwndBtnCancel = CreateWindowExW(
             0, L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            428, 234, 92, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnCancel)), cs->hInstance, nullptr);
+            428, 340, 92, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnCancel)), cs->hInstance, nullptr);
         SendMessageW(st->hwndBtnCancel, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFontBody), TRUE);
         return 0;
     }
@@ -744,11 +989,11 @@ LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (!st) break;
         const int id = LOWORD(wParam);
         if (id == kIdBtnCancel) {
-            st->exitCode = 0;
-            DestroyWindow(hwnd);
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
         }
         if (id == kIdBtnInstall) {
+            if (st->working) return 0;
             wchar_t dirBuf[2048]{};
             GetWindowTextW(st->hwndEditDir, dirBuf, 2048);
             st->opts.installDir = fs::path(dirBuf);
@@ -760,30 +1005,65 @@ LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             st->opts.createDesktopShortcut   = (SendMessageW(st->hwndChkDesktop, BM_GETCHECK, 0, 0) == BST_CHECKED);
             st->opts.launchAfterInstall      = (SendMessageW(st->hwndChkLaunch, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-            EnableWindow(st->hwndBtnInstall, FALSE);
-            EnableWindow(st->hwndBtnCancel, FALSE);
-            SetWindowTextW(st->hwndStatus, L"Installing BOO SAH SAH...");
-            UpdateWindow(hwnd);
-
-            std::wstring err;
-            if (performInstall(st->opts, err)) {
-                SetWindowTextW(st->hwndStatus, L"Installation complete.");
-                if (!st->opts.launchAfterInstall) {
-                    MessageBoxW(hwnd, L"BOO SAH SAH was installed successfully.", kSetupWindowTitle, MB_ICONINFORMATION | MB_OK);
-                }
-                st->exitCode = 0;
-                DestroyWindow(hwnd);
-            } else {
-                SetWindowTextW(st->hwndStatus, L"Installation failed.");
-                MessageBoxW(hwnd, err.c_str(), kSetupWindowTitle, MB_ICONERROR | MB_OK);
-                EnableWindow(st->hwndBtnInstall, TRUE);
-                EnableWindow(st->hwndBtnCancel, TRUE);
-                st->exitCode = 1;
+            st->opts.preserveConfig = SendMessageW(st->hwndChkPreserve, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            st->working = true;
+            st->progress.cancel.store(false);
+            st->error.clear();
+            for (HWND control : {st->hwndBtnInstall, st->hwndEditDir, st->hwndChkStartMenu,
+                    st->hwndChkDesktop, st->hwndChkLaunch, st->hwndChkPreserve}) EnableWindow(control, FALSE);
+            SetWindowTextW(st->hwndStatus, L"Decompressing and checking payload...");
+            st->progress.report = [hwnd](int percent) { PostMessageW(hwnd, kProgressMessage, static_cast<WPARAM>(percent), 0); };
+            try {
+                st->worker = std::thread([st, hwnd] {
+                    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                    try { st->succeeded = performInstall(st->opts, st->error, &st->progress); }
+                    catch (...) { st->succeeded = false; if (st->error.empty()) st->error = L"Setup could not complete. Previous files were restored where possible."; }
+                    if (SUCCEEDED(hr)) CoUninitialize();
+                    PostMessageW(hwnd, kFinishedMessage, 0, 0);
+                });
+            } catch (...) {
+                st->succeeded = false;
+                st->error = L"Unable to start setup worker.";
+                PostMessageW(hwnd, kFinishedMessage, 0, 0);
             }
             return 0;
         }
         break;
     }
+
+    case kProgressMessage:
+        if (st) {
+            const int percent = static_cast<int>(wParam);
+            LONG_PTR style = GetWindowLongPtrW(st->hwndProgress, GWL_STYLE);
+            SetWindowLongPtrW(st->hwndProgress, GWL_STYLE, percent < 0 ? style | PBS_MARQUEE : style & ~PBS_MARQUEE);
+            SendMessageW(st->hwndProgress, PBM_SETMARQUEE, percent < 0, 30);
+            if (percent >= 0) SendMessageW(st->hwndProgress, PBM_SETPOS, percent, 0);
+            if (!st->progress.cancel.load() && percent >= 0) SetWindowTextW(st->hwndStatus,
+                percent < 95 ? L"Extracting files..." : L"Finishing installation...");
+        }
+        return 0;
+    case kFinishedMessage:
+        if (st) {
+            if (st->worker.joinable()) st->worker.join();
+            st->working = false;
+            if (st->succeeded) { st->exitCode = 0; DestroyWindow(hwnd); }
+            else if (st->progress.cancel.load() && st->error.rfind(L"Installation cancelled.", 0) == 0) { st->exitCode = ERROR_CANCELLED; DestroyWindow(hwnd); }
+            else {
+                st->exitCode = 1;
+                SetWindowTextW(st->hwndStatus, L"Installation failed. You can correct the problem and retry.");
+                MessageBoxW(hwnd, st->error.c_str(), kSetupWindowTitle, MB_ICONERROR | MB_OK);
+                for (HWND control : {st->hwndBtnInstall, st->hwndBtnCancel, st->hwndEditDir, st->hwndChkStartMenu,
+                        st->hwndChkDesktop, st->hwndChkLaunch, st->hwndChkPreserve}) EnableWindow(control, TRUE);
+            }
+        }
+        return 0;
+    case WM_CLOSE:
+        if (st && st->working) {
+            st->progress.cancel.store(true);
+            EnableWindow(st->hwndBtnCancel, FALSE);
+            SetWindowTextW(st->hwndStatus, L"Cancelling safely... waiting for the current operation, then restoring files.");
+        } else DestroyWindow(hwnd);
+        return 0;
 
     case WM_DESTROY:
         if (st) {
@@ -798,6 +1078,8 @@ LRESULT CALLBACK setupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 int runInteractiveSetup(HINSTANCE hInstance, const InstallOptions& initialOpts) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS};
+    InitCommonControlsEx(&controls);
 
     GuiSetupState st{};
     st.opts = initialOpts;
@@ -807,12 +1089,13 @@ int runInteractiveSetup(HINSTANCE hInstance, const InstallOptions& initialOpts) 
     wc.lpfnWndProc   = setupWndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
+    wc.hIconSm       = wc.hIcon;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"BooSahSahSetupWnd";
     RegisterClassExW(&wc);
 
-    RECT rc{0, 0, 548, 286};
+    RECT rc{0, 0, 548, 392};
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&rc, style, FALSE);
     const int winW = rc.right - rc.left;
@@ -866,6 +1149,39 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         return runPackMode(fs::path(args[1]), fs::path(args[2]), fs::path(args[3]));
     }
 
+    if (args.size() == 3 && args[0] == L"--cleanup-self") {
+        HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(wcstoul(args[1].c_str(), nullptr, 10)));
+        int result = 0;
+        if (parent) {
+            const DWORD wait = WaitForSingleObject(parent, INFINITE);
+            CloseHandle(parent);
+            if (wait != WAIT_OBJECT_0) result = 7;
+        } else if (GetLastError() != ERROR_INVALID_PARAMETER) result = 7;
+        if (result == 0) {
+            SetupLock lock;
+            const fs::path target(args[2]);
+            std::error_code ec;
+            if (!lock.acquired) result = 8;
+            else if (!target.is_absolute() || target == target.root_path() || !safeDestination(target / kUninstallExe)) result = 3;
+            // A remaining/new manifest means failure or a reinstall: keep its retry route.
+            else if (!fs::exists(target / kManifestFile, ec) && !ec) {
+                fs::remove(target / kUninstallExe, ec);
+                if (ec) result = 6;
+                else if (fs::is_empty(target, ec) && !ec) fs::remove(target, ec);
+            }
+        }
+        // Windows 11 POSIX disposition can unlink this temporary executable while mapped.
+        HANDLE self = CreateFileW(currentExecutablePath().c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, 0, nullptr);
+        if (self != INVALID_HANDLE_VALUE) {
+            FILE_DISPOSITION_INFO_EX disposition{};
+            disposition.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+            SetFileInformationByHandle(self, FileDispositionInfoEx, &disposition, sizeof(disposition));
+            CloseHandle(self);
+        }
+        return result;
+    }
+
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     InstallOptions opts{};
@@ -886,6 +1202,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
             uninstallMode = true;
         } else if (a == L"--install-dir" && i + 1u < args.size()) {
             opts.installDir = fs::path(args[++i]);
+        } else if (a == L"--preserve-config") {
+            opts.preserveConfig = true;
+        } else if (a == L"--replace-config") {
+            opts.preserveConfig = false;
         } else if (a == L"--no-shortcuts") {
             opts.createStartMenuShortcut = false;
             opts.createDesktopShortcut = false;
@@ -907,9 +1227,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                                        ? currentExecutablePath().parent_path()
                                        : opts.installDir;
         rc = runUninstallMode(targetDir, opts.silent, forceSkipRegistry);
+        if (!opts.silent && rc != 0 && rc != 2 && rc != 4) {
+            MessageBoxW(nullptr, L"Uninstall could not finish. Close other applications using the installed files, then try again.",
+                kSetupWindowTitle, MB_OK | MB_ICONERROR);
+        }
     } else if (opts.silent) {
         std::wstring err;
-        rc = performInstall(opts, err) ? 0 : 1;
+        try { rc = performInstall(opts, err) ? 0 : 1; }
+        catch (...) { rc = 1; }
     } else {
         rc = runInteractiveSetup(hInstance, opts);
     }

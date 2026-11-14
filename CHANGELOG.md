@@ -2,20 +2,35 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
-## [1.1.0 — RTX Showcase Pass] — Ray-Traced Lighting & Cinematic Lens
+## [Unreleased] — RTX Showcase Additions (merged onto Film Quality & Robustness)
+
 ### Added
-- **Ray-traced lighting in `m2_mesh.hlsl` (DXR 1.1 inline `RayQuery`)**: stochastic soft key-light shadows (sun/moon disk cone sampling, 90-unit reach, replacing the old 3-unit binary contact test), ray-traced ambient occlusion (cosine-weighted, distance-adaptive radius), roughness-driven glossy reflections with grazing-angle anisotropic stretch (rain-street light streaks on wet asphalt, water and curtain walls), and reflection hits shaded with interpolated vertex normals, key light and (Showcase) a hit-point shadow ray.
-- **Ray-marched volumetric light shafts**: each march step fires a BVH visibility ray toward the key light through a height-falling medium with Henyey-Greenstein phase; a new `m2_sky_rt_ps.cso` sky pipeline continues the shafts across silhouettes into open sky.
-- **Spectral glass**: separate R/G/B refraction rays (IOR 1.455 / 1.49 / 1.535) for chromatic dispersion through the Glass Orchid, plus thin-film interference iridescence on petal rims.
-- **Physically based shading**: GGX / Smith height-correlated specular with per-material metal/dielectric F0 (24k gold, structural steel, obsidian stela, titanium, water), specular occlusion, wrapped-diffuse subsurface on the ruby labellum, back-lit enamel, and a velvet sheen lobe on the Neural Velvet ribbon.
-- **Sky and weather**: Rayleigh + Mie aureole, a textured moon disk with Mie halo aligned to the act-2 key light, an anti-aliased procedural star field (kept out of aerial-perspective fog), and procedural rain-impact ripples on puddles and open water.
-- **Depth pre-pass** in `TrilogyMeshRenderer` (VS-only PSO, `precise` clip-space math) so the ray-query shading pass runs exactly once per visible pixel; the sky now draws last at the far plane.
-- **Cinematic lens composite (`PSCompositeCanvas`)**: autofocus thin-lens bokeh depth of field (24-tap golden-angle gather, foreground-aware, driven by the M2 linear distance target), lateral chromatic aberration, wide four-octave anamorphic streaks, pseudo lens ghosts + chromatic halo (suppressed under reduced-flash), film halation, and luminance-weighted film grain.
-- **Ray budget tiers** via 4 new scene root constants (`quality`, `frameSeed`, `sunCone`, `fxStrength`; 24 -> 28 DWORDs): Balanced 1 shadow / 1 AO / 3 shaft steps, Showcase 2 / 1 / 4 plus hit shadows and 3-ray dispersion, 4K Experimental 1 / 1 / 2. Issued-ray telemetry now counts every query per lane.
+- **Ray-marched volumetric light shafts** in `m2_mesh.hlsl`: three march steps per pixel, each firing a sun/moon visibility ray (`traceShadow`, alpha-cutout aware) through a height-falling exterior haze with Henyey-Greenstein phase. They are added to both the composited and NRD-split (`nonIndirectColor`) outputs, use the existing temporal IGN scheme (stable under REBLUR / progressive accumulation), and are counted in the issued-ray telemetry. Indoor rooms stay clear, matching the aerial-fog rule.
+- `PSSky` (RT) carries the shafts into open sky. The sky now draws **after** the Z-prepass and opaque passes at the far plane (`z = 1.0`, `LESS_EQUAL`), so it shades only uncovered pixels and its rays never trace under geometry.
+- **Rain-impact ripples** (two decorrelated ring grids) on exterior puddles and open water, with distance fade before they can alias.
+- **Thin-film iridescence** on exterior Glass Orchid petals and sepals (single-layer interference sampled at R/G/B wavelengths).
+- **Cinematic lens composite** (`PSCompositeCanvas`, film mode only; AOV modes unchanged): autofocus thin-lens bokeh depth of field (24-tap golden-angle, foreground-aware gather from the M2 linear distance target), lateral chromatic aberration, four-octave anamorphic streaks, pseudo lens ghosts + chromatic halo (off under reduced flash), film halation and luminance-weighted grain. The shared graphics root signature's SRV table grows from 2 to 3 descriptors; the composite binds `[2]=sceneDistance, [3]=sceneHdr, [4]=bloomMip0`, and lens flags ride in bits 8–9 of the existing mode word.
 
 ### Notes
-- All stochastic terms hash `(pixel, samplePosition / 800)`; there is no temporal history, so direct seeks still reproduce identical `CanvasClean` frames.
-- Every touched shader entry point (`m2_mesh` VS/PS/RT-PS/sky/RT-sky, M1 composite, bloom, raster and DXR scene) compiles cleanly with DXC 1.8 (`-Ges -WX -O3`, DXIL-validated). The C++ changes were not compiled (no MSVC / Windows SDK in the authoring environment). Run `scripts/run_smoke.ps1` and the timing captures before release; the existing `QualityLadder` downgrade path remains the safety net if Showcase exceeds its frame budget.
+- All 34 shader rules in `CMakeLists.txt` compile cleanly with DXC 1.8 (`-Ges -WX -O3`, DXIL-validated). The C++ changes were not compiled (no MSVC / Windows SDK in the authoring environment); run `scripts/run_smoke.ps1` and re-measure frame times before release.
+
+## [Unreleased] — Film Quality & Robustness
+
+### Added
+- Seven-mesh scene pipeline, with new original `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove` geometry alongside the four city/orchid assets.
+- First-party capsule-SDF presentation lettering: 60 vector glyphs including Latin text, 台北, and Chinese numerals 一–七 paired with Roman act numbers. No external font binary is required.
+- Title and act motifs relocate below the right benchmark card in full telemetry mode, keeping the statistics panels clear; two extra layout captures cover this placement.
+- Opt-in `boo_integration_tests --film-captures --no-activate --capture-dir <directory>` gate producing 68 native 2560×1440 captures, four montages, and a manifest across both editions, solos, and narrative cards. Checks include seek repeatability, finite HDR output, RT attribution, and clean-feed isolation.
+- Opt-in `--film-stress --no-activate --capture-dir <directory>` gate with 224 default iterations, audio/memory/lifecycle measurements, and a synthetic graphics recovery receipt. `--require-debug-layer` fails when the D3D12 debug layer is unavailable; ordinary receipts explicitly distinguish unavailable warning validation from a clean debug run.
+- Release and Debug Windows CI for native builds, CPU tests, cue/manifest validation, import audits, and installer lifecycle checks.
+
+### Changed
+- Glass shading uses single-ray geometry refraction with environment dispersion approximated separately. Raster presentation remains cohesive but does not reproduce full DXR geometry reflection or multi-bounce spectral transport.
+- Score modulation uses integrated oscillator phase, with edition voice crossfades for smoother transitions and late seeks.
+- Graphics recovery is limited to one teardown/recreation attempt. `--inject-device-lost` introduces a synthetic fault only after GPU work drains; it is not a physical TDR test.
+- Native Win32/LZMS installation runs on a worker thread with cooperative Cancel and rollback. Existing configuration is preserved by default (`--replace-config` opts into packaged defaults), running apps and locked destinations are rejected, and native uninstallation remains available. App and installer use the static MSVC runtime.
+
+Measured verification and hardware-specific limitations are recorded in the [Film Quality & Robustness Report](docs/quality_upgrade_report.md). Feature entries above describe implementation, not a claim that every hardware or debug-layer gate has passed.
 
 ## [1.0.0 — Milestone M10] — Portable Release & Complete Hardware Orchestra
 ### Added

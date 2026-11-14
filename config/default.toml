@@ -24,8 +24,9 @@ reduced_motion = false
 [audio]
 sample_rate = 48000
 mute = false
-master_volume = 0.25
+master_volume = 0.75
 force_silent_clock = false
+audio_file = ""
 
 [hardware]
 enable_signal_hijack = false

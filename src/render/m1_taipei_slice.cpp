@@ -119,8 +119,11 @@ struct alignas(16) GpuM1PresentConstants {
 
     uint32_t captionPacked[16]{};
     float captionStyle[4]{};
+
+    float interactiveState[4]{0.5f, 0.52f, 0.42f, 1.0f}; // x=abSplitRatio, y=sunElev01, z=sunAzim01, w=accumSpp
+    uint32_t interactiveMeta[4]{0, 0, 0, 0};             // x: bit0=explore, bit1=sunOvr, bit2=lampsOff, bit3=nrd, bits4..7=preset
 };
-static_assert(sizeof(GpuM1PresentConstants) == 368, "GpuM1PresentConstants must be 92 DWORDs (368 bytes)");
+static_assert(sizeof(GpuM1PresentConstants) == 400, "GpuM1PresentConstants must be 100 DWORDs (400 bytes)");
 
 struct Vec3 {
     float x = 0.0f;
@@ -2256,10 +2259,11 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     linClampPs.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // 1. Graphics root signature (Raster Scene, Bloom Down/Up, Composite): [0]=28 root constants (b0), [1]=3-SRV table (t0..t2)
-    //    Every table start used with this signature (2, 3..5, 4..6, 7) has three valid heap descriptors after it.
     {
         D3D12_DESCRIPTOR_RANGE srvRange{};
         srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        // 3-SRV table (t0..t2). Every table start used with this signature (2, 3..5, 4..6, 7) has three
+        // valid heap descriptors after it; the composite binds [2]=sceneDistance, [3]=sceneHdr, [4]=bloomMip0.
         srvRange.NumDescriptors = 3;
         srvRange.BaseShaderRegister = 0;
 
@@ -2588,7 +2592,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     if (impl_->trilogy && !impl_->trilogyMesh) {
         impl_->trilogyMesh=std::make_unique<TrilogyMeshRenderer>(d3d_);
         std::string error;
-        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode)) throw std::runtime_error(error);
+        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     if (impl_->trilogyMesh && !disableRT_ && activeSpec_.allowDxr && !d3d_.isWarp()) {
@@ -2607,6 +2611,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
                 impl_->sceneHdr.Get(), impl_->sceneDepth.Get(),
                 impl_->srvGpuAt(7u).ptr, impl_->canvasW, impl_->canvasH,
                 kHeadlessSlot, true, true);
+            cmd->SetDescriptorHeaps(1, heaps);
         });
         impl_->trilogyMesh->retire(kHeadlessSlot);
     }
@@ -2680,7 +2685,7 @@ bool M1TaipeiSliceEffect::syncPresetBeforeFrame(const QualityPresetSpec& spec, b
     if (impl_->trilogy && !impl_->trilogyMesh) {
         impl_->trilogyMesh=std::make_unique<TrilogyMeshRenderer>(d3d_);
         std::string error;
-        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode)) throw std::runtime_error(error);
+        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
@@ -2864,10 +2869,62 @@ uint32_t M1TaipeiSliceEffect::lastVerifiedRayHits() const noexcept {
     return impl_ ? impl_->lastVerifiedHits : 0u;
 }
 
+uint32_t M1TaipeiSliceEffect::activeDenoiseMode() const noexcept {
+    return (impl_ && impl_->trilogyMesh) ? impl_->trilogyMesh->activeDenoiseMode() : 0u;
+}
+
 GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     const FrameContext& ctx,
     M1CameraState& outCam) const noexcept {
     outCam = evaluateShowCamera(visualMode, ctx.samplePosition, ctx.sampleRate, ctx.moodIrisAngle, ctx.reducedFlash, ctx.motionScale);
+    const float wCam = std::clamp(ctx.interactive.blendWeight, 0.0f, 1.0f);
+    if (wCam > 1e-4f) {
+        if (wCam >= 0.9999f) {
+            std::memcpy(outCam.eye, ctx.interactive.eye, sizeof(outCam.eye));
+            std::memcpy(outCam.target, ctx.interactive.target, sizeof(outCam.target));
+            std::memcpy(outCam.up, ctx.interactive.up, sizeof(outCam.up));
+            normalize3(outCam.up);
+            outCam.fovYRadians = ctx.interactive.fovYRadians;
+        } else {
+            float filmFwd[3] = {
+                outCam.target[0] - outCam.eye[0],
+                outCam.target[1] - outCam.eye[1],
+                outCam.target[2] - outCam.eye[2]};
+            const float filmDist = std::max(0.25f, std::sqrt(
+                filmFwd[0] * filmFwd[0] + filmFwd[1] * filmFwd[1] + filmFwd[2] * filmFwd[2]));
+            normalize3(filmFwd);
+
+            float expFwd[3] = {
+                ctx.interactive.target[0] - ctx.interactive.eye[0],
+                ctx.interactive.target[1] - ctx.interactive.eye[1],
+                ctx.interactive.target[2] - ctx.interactive.eye[2]};
+            const float expDist = std::max(0.25f, std::sqrt(
+                expFwd[0] * expFwd[0] + expFwd[1] * expFwd[1] + expFwd[2] * expFwd[2]));
+            normalize3(expFwd);
+
+            float blendFwd[3] = {
+                filmFwd[0] + (expFwd[0] - filmFwd[0]) * wCam,
+                filmFwd[1] + (expFwd[1] - filmFwd[1]) * wCam,
+                filmFwd[2] + (expFwd[2] - filmFwd[2]) * wCam};
+            if (blendFwd[0] * blendFwd[0] + blendFwd[1] * blendFwd[1] + blendFwd[2] * blendFwd[2] < 1e-4f) {
+                float side[3]{};
+                cross3(outCam.up, filmFwd, side);
+                normalize3(side);
+                blendFwd[0] += side[0] * 0.25f;
+                blendFwd[1] += side[1] * 0.25f;
+                blendFwd[2] += side[2] * 0.25f;
+            }
+            normalize3(blendFwd);
+            const float blendDist = filmDist + (expDist - filmDist) * wCam;
+            for (int c = 0; c < 3; ++c) {
+                outCam.eye[c] = outCam.eye[c] + (ctx.interactive.eye[c] - outCam.eye[c]) * wCam;
+                outCam.target[c] = outCam.eye[c] + blendFwd[c] * blendDist;
+                outCam.up[c] = outCam.up[c] + (ctx.interactive.up[c] - outCam.up[c]) * wCam;
+            }
+            normalize3(outCam.up);
+            outCam.fovYRadians = outCam.fovYRadians + (ctx.interactive.fovYRadians - outCam.fovYRadians) * wCam;
+        }
+    }
     const float exactTimeSec = static_cast<float>(
         static_cast<double>(ctx.samplePosition) / static_cast<double>(std::max<int32_t>(1, ctx.sampleRate)));
 
@@ -2978,16 +3035,21 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         cmd->OMSetRenderTargets(1, &rtvDst, FALSE, nullptr);
 
         const uint64_t sampleBucket = static_cast<uint64_t>(std::max<int64_t>(0, ctx.samplePosition) / 800LL);
+        const uint32_t curAov = std::min<uint32_t>(ctx.interactive.aovMode, 7u);
         GpuM1PostConstants pc{};
         pc.invSize[0] = 1.0f / static_cast<float>(canvasW);
         pc.invSize[1] = 1.0f / static_cast<float>(canvasH);
-        pc.scaleOrVignette = 0.24f;
+        pc.scaleOrVignette = (curAov != 0u) ? 0.0f : 0.24f;
+        // Bits 0..7 = AOV mode; bit8 = autofocus bokeh DoF (M2 linear scene distance), bit9 = lens ghosts + halo.
+        pc.isFirstDownsample = curAov | ((trilogy && curAov == 0u) ? 0x100u : 0u) | ((ctx.reducedFlash || curAov != 0u) ? 0u : 0x200u);
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
-        pc.bloomIntensity = 0.18f + 0.06f * revealOpen01;
-        // Composite lens flags: bit0 = autofocus bokeh DoF (needs the M2 linear scene-distance target),
-        // bit1 = lens ghosts + halo (suppressed under --reduced-motion / reduced-flash presentation).
-        pc.isFirstDownsample = (trilogy ? 1u : 0u) | (ctx.reducedFlash ? 0u : 2u);
+        pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * revealOpen01);
+        if (curAov == 0u &&
+            (visualMode == ShowVisualMode::SoloNPU ||
+             (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0))) {
+            pc.bloomIntensity *= 0.85f + 0.30f * std::clamp(ctx.moodBloomStrength, 0.f, 1.f);
+        }
 
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
@@ -3027,6 +3089,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     ID3D12DescriptorHeap* heaps[] = {srvUavHeap.Get()};
     cmd->SetDescriptorHeaps(1, heaps);
+
+    // During stationary Explore NRD convergence (accumFrame > 0), samplePosition is paused:
+    // reuse frame 0's GPU-resident Tensor caustic texture & CUDA particle buffer without CPU/CUDA sync stalls.
+    if (isCanonicalPass && ctx.interactive.accumulate && ctx.interactive.accumFrame > 0u) {
+        skipSharedTensorUpdate = true;
+        skipSharedCudaUpdate = true;
+    }
 
     // 1. Update 320x180 RGBA16F Tensor Core neural caustic / spectral field (or scalar HLSL substitute)
     if (!skipSharedTensorUpdate) {
@@ -3103,6 +3172,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     if(trilogyMesh) {
         trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass);
+        ID3D12DescriptorHeap* m1Heaps[] = {srvUavHeap.Get()};
+        cmd->SetDescriptorHeaps(1, m1Heaps);
     } else {
     const bool canAttemptDxr = dxrPipelineReady && !dxrQuarantined && !d3d.isWarp() && useDxr;
     ComPtr<ID3D12GraphicsCommandList4> cmd4;
@@ -3281,7 +3352,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                                   : LiveAcceleratorOrchestra::kSubParticleCount;
     }
 
-    {
+    if (ctx.interactive.aovMode == 0u) {
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHdr = rtvAt(0u);
         D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(canvasW), static_cast<float>(canvasH), 0.0f, 1.0f};
@@ -3516,6 +3587,37 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
         pc.captionStyle[2] = cap.isEndCard ? 1.0f : 0.0f;
     }
     pc.captionStyle[3] = hud.liveCameraActive ? 1.0f : 0.0f;
+
+    pc.interactiveState[0] = std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
+    pc.interactiveState[1] = std::clamp(ctx.interactive.sunElevation01, 0.0f, 1.0f);
+    pc.interactiveState[2] = std::clamp(ctx.interactive.sunAzimuth01, 0.0f, 1.0f);
+    const uint32_t accumSpp = ctx.interactive.accumulate ? (ctx.interactive.accumFrame + 1u) : 1u;
+    pc.interactiveState[3] = static_cast<float>(std::min<uint32_t>(accumSpp, 9999u));
+
+    const uint32_t curAov = std::min<uint32_t>(ctx.interactive.aovMode, 7u);
+    const uint32_t denMode = trilogyMesh ? (trilogyMesh->activeDenoiseMode() & 0x3u) : 0u;
+    const uint32_t mrblCnt = std::min<uint32_t>(ctx.interactive.marbleCount, InteractiveView::kMaxMarbles);
+
+    uint32_t interFlags = 0u;
+    if (ctx.interactive.exploreActive)           interFlags |= (1u << 0u);
+    if (ctx.interactive.sunOverride)             interFlags |= (1u << 1u);
+    if (ctx.interactive.lampsOff)                interFlags |= (1u << 2u);
+    if (trilogyMesh && trilogyMesh->nrdActive()) interFlags |= (1u << 3u);
+    interFlags |= ((ctx.interactive.activePreset & 0xFu) << 4u);
+    if (ctx.interactive.accumulate)              interFlags |= (1u << 8u);
+    interFlags |= (curAov << 9u);
+    interFlags |= (denMode << 12u);
+    interFlags |= ((mrblCnt & 0xFFu) << 16u);
+    interFlags |= ((ctx.interactive.soloEngine & 0x7u) << 24u);
+    if (ctx.interactive.studioDrawerOpen)        interFlags |= (1u << 27u);
+    if (ctx.interactive.customAudioActive)       interFlags |= (1u << 28u);
+    if (ctx.interactive.audioMuted)              interFlags |= (1u << 29u);
+    pc.interactiveMeta[0] = interFlags;
+    pc.interactiveMeta[1] = static_cast<uint32_t>(hud.npuCompletedInferences & 0xFFFFu) |
+                            (static_cast<uint32_t>(std::clamp(hud.npuInferMs * 10.0f, 0.0f, 9999.0f) + 0.5f) << 16u);
+    const uint32_t trkSlot = std::min<uint32_t>(ctx.interactive.audioTrackSlot, 5u);
+    const uint32_t toastA8 = static_cast<uint32_t>(std::clamp(ctx.interactive.audioToastAlpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+    pc.interactiveMeta[2] = (trkSlot & 0xFFu) | ((toastA8 & 0xFFu) << 8u);
 
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;
     uint8_t* mappedCb = nullptr;
@@ -3812,6 +3914,64 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
     return true;
 }
 
+bool M1TaipeiSliceEffect::readSceneHdrFiniteForTest(uint64_t& nonFiniteComponents, std::string* error) {
+    nonFiniteComponents = 0;
+    if (!impl_ || !impl_->sceneHdr || !d3d_.deviceRaw()) {
+        if (error) *error = "SceneHDR is not initialized";
+        return false;
+    }
+    auto* dev = static_cast<ID3D12Device*>(d3d_.deviceRaw());
+    const auto desc = impl_->sceneHdr->GetDesc();
+    if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        if (error) *error = "SceneHDR finite gate requires FP16 RGBA";
+        return false;
+    }
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes = 0;
+    dev->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    const auto rd = makeBufferDesc(bytes);
+    ComPtr<ID3D12Resource> readback;
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)))) {
+        if (error) *error = "Unable to allocate FP16 readback";
+        return false;
+    }
+    if (!d3d_.executeSingleCommandListAndWait([&](void* raw) {
+        auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);
+        transitionResource(cmd, impl_->sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = impl_->sceneHdr.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = readback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = footprint;
+        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transitionResource(cmd, impl_->sceneHdr.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }, error)) return false;
+    void* mapped = nullptr;
+    D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+    if (FAILED(readback->Map(0, &range, &mapped)) || !mapped) {
+        if (error) *error = "Unable to map FP16 readback";
+        return false;
+    }
+    for (UINT y = 0; y < desc.Height; ++y) {
+        const auto* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(mapped)
+            + footprint.Offset + static_cast<size_t>(y) * footprint.Footprint.RowPitch);
+        for (UINT64 x = 0; x < desc.Width * 4; ++x) {
+            // IEEE binary16 exponent all-ones is Infinity or NaN, independent of sign/mantissa.
+            if ((row[x] & 0x7c00u) == 0x7c00u) ++nonFiniteComponents;
+        }
+    }
+    D3D12_RANGE written{0, 0};
+    readback->Unmap(0, &written);
+    return true;
+}
+
 bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
     std::vector<uint8_t>& outRgba,
     uint32_t& outWidth,
@@ -3823,7 +3983,10 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
         return false;
     }
 
-    d3d_.waitForGpu();
+    if (!d3d_.waitForGpu() || !d3d_.checkDeviceHealthy()) {
+        if (outError) *outError = "Canvas readback aborted: graphics device unavailable";
+        return false;
+    }
 
     auto* dev = static_cast<ID3D12Device*>(d3d_.deviceRaw());
     if (!dev) {

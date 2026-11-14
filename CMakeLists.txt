@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(BooSahSah
     VERSION 1.0.0
     DESCRIPTION "BOO SAH SAH — The Glass Orchid Protocol"
-    LANGUAGES CXX
+    LANGUAGES CXX RC
 )
 
 # Windows x64 enforcement for baseline build (SPEC_v4 Section 1.1 & 3.1)
@@ -14,6 +14,8 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Keep both Release and Debug install verification independent of a developer CRT.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Section 12.1: Build mode toggles (Baseline requires zero optional proprietary SDKs)
 option(BASE_ONLY       "Build baseline D3D12+DXR+raster+audio with all optional SDKs excluded" ON)
@@ -265,11 +267,20 @@ add_custom_command(
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSMain  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSDepthCutout -DBOO_DEPTH_CUTOUT_PS=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain -DBOO_ALPHA_CUTOUT=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSMain -DM2_RT -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSMain -DM2_RT -DBOO_ALPHA_CUTOUT=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
@@ -277,18 +288,45 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSSky  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
-
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_5 -E PSSky -DM2_RT -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSAccum -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSAccumBlend -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSAccumResolve -DBOO_ACCUM=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSDeterministicResolve -DBOO_DENOISE_RESOLVE=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSPackNrdReblur -DBOO_NRD_PACK_CS=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSUnpackNrdReblur -DBOO_NRD_UNPACK=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+
 add_custom_target(boo_shaders DEPENDS
-    "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_sky_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_sky_rt_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_vs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_blend_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_accum_resolve_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_denoise_resolve_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_nrd_pack_cs.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
 
     "${M0_VS_CSO}"
     "${M0_PS_CSO}"
@@ -345,6 +383,8 @@ add_library(boo_core STATIC
     src/render/m0_test_visual.cpp
     src/render/m1_scene.cpp
     src/render/bmesh.cpp
+    src/render/btex.cpp
+    src/render/nrd_bridge.cpp
     src/render/trilogy_renderer.cpp
     src/render/m1_taipei_slice.cpp
     src/media/media_foundation_input.cpp
@@ -384,16 +424,20 @@ target_link_libraries(boo_core PUBLIC
 # Stage runtime data directories into build folder for convenient direct launch
 add_custom_target(boo_stage_assets ALL
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/meshes" "${CMAKE_BINARY_DIR}/assets/meshes"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/textures" "${CMAKE_BINARY_DIR}/assets/textures"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/cues" "${CMAKE_BINARY_DIR}/assets/cues"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/manifest.json" "${CMAKE_BINARY_DIR}/assets/manifest.json"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${CMAKE_BINARY_DIR}/config"
     DEPENDS boo_shaders
-    COMMENT "Staging cue sheets, models, artifact manifest, and config presets"
+    COMMENT "Staging cue sheets, models, first-party OST audio, artifact manifest, and config presets"
 )
 
-# 1. Main Milestone M1 Demoscene Application
-add_executable(boo_sah_sah src/app/main.cpp)
+# 1. Main Milestone M1 Demoscene Application (Native WIN32 GUI subsystem — zero console window)
+add_executable(boo_sah_sah WIN32 src/app/main.cpp assets/icons/app_icon.rc)
+target_link_options(boo_sah_sah PRIVATE "/ENTRY:mainCRTStartup")
+target_include_directories(boo_sah_sah PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_sah_sah PRIVATE boo_core)
 add_dependencies(boo_sah_sah boo_stage_assets)
 boo_apply_compiler_flags(boo_sah_sah)
@@ -411,7 +455,8 @@ add_dependencies(boo_bench boo_stage_assets)
 boo_apply_compiler_flags(boo_bench)
 
 # 3b. Native Single-File Windows Installer / Uninstaller Stub (inbox cabinet.dll LZMS SFX)
-add_executable(boo_installer_stub WIN32 tools/installer/setup_main.cpp)
+add_executable(boo_installer_stub WIN32 tools/installer/setup_main.cpp assets/icons/app_icon.rc)
+target_include_directories(boo_installer_stub PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_installer_stub PRIVATE
     cabinet
     ole32
@@ -440,12 +485,28 @@ if(BOO_BUILD_TESTS)
     set_tests_properties(BooCueValidation PROPERTIES LABELS "unit;validation")
 
     add_executable(boo_integration_tests tests/integration/integration_main.cpp)
-    target_link_libraries(boo_integration_tests PRIVATE boo_core)
+    target_link_libraries(boo_integration_tests PRIVATE boo_core windowscodecs gdi32)
     add_dependencies(boo_integration_tests boo_stage_assets)
     boo_apply_compiler_flags(boo_integration_tests)
 
     add_test(NAME BooHardwareIntegrationTests COMMAND boo_integration_tests --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    add_test(NAME BooTrilogyCaptures COMMAND boo_integration_tests --trilogy-captures WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooTrilogyCaptures COMMAND boo_integration_tests --trilogy-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooFilmCaptures COMMAND boo_integration_tests --film-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooInteractiveCaptures COMMAND boo_integration_tests --interactive-captures --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME BooFilmStress COMMAND boo_integration_tests --film-stress --no-activate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(BooFilmCaptures PROPERTIES LABELS "hardware;integration" TIMEOUT 600)
+    set_tests_properties(BooInteractiveCaptures PROPERTIES LABELS "hardware;integration" TIMEOUT 600)
+    set_tests_properties(BooFilmStress PROPERTIES LABELS "hardware;integration" TIMEOUT 900)
     set_tests_properties(BooTrilogyCaptures PROPERTIES LABELS "hardware;integration")
     set_tests_properties(BooHardwareIntegrationTests PROPERTIES LABELS "hardware;integration")
+endif()
+
+# Stage optional NVIDIA NRD dynamic sidecar (nrd/NRD.dll) next to executables if present (zero static PE import!)
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/nvidia_nrd/bin/NRD.dll")
+    add_custom_command(TARGET boo_sah_sah POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:boo_sah_sah>/nrd"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/nvidia_nrd/bin/NRD.dll"
+            "$<TARGET_FILE_DIR:boo_sah_sah>/nrd/NRD.dll"
+        VERBATIM)
 endif()

@@ -24,8 +24,8 @@ New-Item -ItemType Directory -Force -Path $DiagDir | Out-Null
 Write-Host "`n==> [1/8] Running CTest Unit, Cue Validation, and Hardware Integration Suites" -ForegroundColor Cyan
 Push-Location $BuildDir
 try {
-    # Run unit, cue validation, and main hardware integration suite (excluding heavy 1440p PNG export test, which has its own dedicated gate)
-    ctest -E "BooTrilogyCaptures" --output-on-failure
+    # Run unit, cue validation, and main hardware integration suite (excluding heavy 1440p PNG export tests, which have dedicated gates)
+    ctest -E "BooTrilogyCaptures|BooFilmCaptures|BooInteractiveCaptures|BooFilmStress" --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw "CTest suite reported failures." }
 } finally {
     Pop-Location
@@ -44,7 +44,7 @@ if (-not $DumpbinCmd) {
 $DepsOutput = (& $DumpbinCmd /dependents $ExePath) -join "`n"
 if ($LASTEXITCODE -ne 0) { throw "dumpbin dependency audit failed." }
 Write-Host $DepsOutput
-$ForbiddenImports = @("nvcuda", "cudart", "cublas", "openvino", "nvEncodeAPI", "Spout", "mfreadwrite", "assimp", "gltf", "fbx", "usd")
+$ForbiddenImports = @("nvcuda", "cudart", "cublas", "openvino", "nvEncodeAPI", "Spout", "mfreadwrite", "assimp", "gltf", "fbx", "usd", "NRD", "xinput")
 foreach ($forbidden in $ForbiddenImports) {
     if ($DepsOutput -match $forbidden) {
         throw "Forbidden hard DLL dependency '$forbidden' found in boo_sah_sah.exe import table!"
@@ -54,7 +54,7 @@ Write-Host "[PASS] Verified zero hard link dependencies on CUDA, cuBLASLt, OpenV
 
 Write-Host "`n==> [3/8] Live M10 Default Full-Film (360s) + Spout2 Clean-Feed Smoke Run ($SmokeDurationSeconds s, 1920x1080)" -ForegroundColor Cyan
 $DiagNormal = Join-Path $DiagDir "smoke_m10_fullfilm.json"
-& $ExePath --no-activate --width 1920 --height 1080 --mute --enable-spout --spout-name BooSmoke_Clean --duration-seconds $SmokeDurationSeconds --export-diagnostics $DiagNormal
+& $ExePath --no-activate --width 1920 --height 1080 --mute --enable-spout --spout-name BooSmoke_Clean --duration-seconds $SmokeDurationSeconds --export-diagnostics $DiagNormal | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Default M10 full-film smoke run exited with code $LASTEXITCODE" }
 $NormalJson = Get-Content $DiagNormal -Raw | ConvertFrom-Json
 if ($NormalJson.milestone -ne "M10") {
@@ -73,7 +73,7 @@ Write-Host "[PASS] M10 full-film + Spout2 smoke run presented $($NormalJson.runt
 
 Write-Host "`n==> [4/8] 16:10 Letterbox + D3D12 Debug Layer + Reduced-Flash & Reduced-Motion Smoke Run (1280x800)" -ForegroundColor Cyan
 $DiagLetterbox = Join-Path $DiagDir "smoke_16x10_letterbox.json"
-& $ExePath --no-activate --width 1280 --height 800 --mute --d3d-debug --reduced-flash --reduced-motion --duration-seconds 2.5 --export-diagnostics $DiagLetterbox
+& $ExePath --no-activate --width 1280 --height 800 --mute --d3d-debug --reduced-flash --reduced-motion --duration-seconds 2.5 --export-diagnostics $DiagLetterbox | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "16:10 letterbox + D3D12 debug smoke run exited with code $LASTEXITCODE" }
 $LbJson = Get-Content $DiagLetterbox -Raw | ConvertFrom-Json
 if ($LbJson.runtime.rendered_frames -lt 10 -or $LbJson.runtime.effect_fault_count -ne 0) {
@@ -85,7 +85,7 @@ Write-Host "`n==> [5/8] All-Fallbacks Fault-Injection Smoke Run (No RT/CUDA/Tens
 $DiagFallback = Join-Path $DiagDir "smoke_all_fallbacks.json"
 & $ExePath --no-activate --width 1280 --height 720 --force-silent-clock --inject-shader-fail --inject-media-fail `
     --disable-rt --disable-cuda --disable-tensor --disable-npu --disable-nvenc `
-    --duration-seconds 2.5 --export-diagnostics $DiagFallback
+    --duration-seconds 2.5 --export-diagnostics $DiagFallback | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Fault-injection smoke run exited with code $LASTEXITCODE" }
 $FbJson = Get-Content $DiagFallback -Raw | ConvertFrom-Json
 if (-not $FbJson.runtime.used_embedded_fallback_shader) {
@@ -93,9 +93,22 @@ if (-not $FbJson.runtime.used_embedded_fallback_shader) {
 }
 Write-Host "[PASS] Fault-injection run presented $($FbJson.runtime.rendered_frames) frames using embedded safe shader + silent monotonic clock." -ForegroundColor Green
 
+Write-Host "`n==> Testing the application's single-attempt device recovery with Spout active" -ForegroundColor Cyan
+$DiagRecovery = Join-Path $DiagDir "smoke_device_recovery.json"
+& $ExePath --no-activate --mute --width 1280 --height 720 --start-seconds 275 --duration-seconds 4.5 `
+    --enable-spout --spout-name BooRecovery_Clean --inject-device-lost --export-diagnostics $DiagRecovery | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Injected device recovery exited with code $LASTEXITCODE" }
+$RecoveryJson = Get-Content $DiagRecovery -Raw | ConvertFrom-Json
+if (-not $RecoveryJson.runtime.device_lost_injected -or $RecoveryJson.runtime.device_recovery_attempts -ne 1 -or
+    $RecoveryJson.runtime.device_recovery_successes -ne 1 -or $RecoveryJson.runtime.graphics_unavailable -or
+    $RecoveryJson.runtime.rendered_frames -lt 3 -or $RecoveryJson.runtime.final_sample_48k -lt (275 * 48000)) {
+    throw "Device recovery or timeline preservation failed; inspect $DiagRecovery"
+}
+Write-Host "[PASS] One device recovery completed with timeline preserved and Spout enabled." -ForegroundColor Green
+
 Write-Host "`n==> [6/8] Milestone M2 (180s Trilogy) & M1 (60s Taipei) Backward-Compatibility Smoke Runs" -ForegroundColor Cyan
 $DiagM2Compat = Join-Path $DiagDir "smoke_m2_compat.json"
-& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/m2_trilogy_180s.json --duration-seconds 2.0 --export-diagnostics $DiagM2Compat
+& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/m2_trilogy_180s.json --duration-seconds 2.0 --export-diagnostics $DiagM2Compat | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "M2 trilogy compatibility smoke run exited with code $LASTEXITCODE" }
 $M2Json = Get-Content $DiagM2Compat -Raw | ConvertFrom-Json
 if ($M2Json.milestone -ne "M2" -or $M2Json.runtime.rendered_frames -lt 10) {
@@ -103,13 +116,13 @@ if ($M2Json.milestone -ne "M2" -or $M2Json.runtime.rendered_frames -lt 10) {
 }
 
 $DiagM1Compat = Join-Path $DiagDir "smoke_m1_compat.json"
-& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/m1_taipei_60s.json --duration-seconds 2.0 --export-diagnostics $DiagM1Compat
+& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/m1_taipei_60s.json --duration-seconds 2.0 --export-diagnostics $DiagM1Compat | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "M1 compatibility smoke failed" }
 Write-Host "[PASS] M2 (180s) and M1 (60s) cue backward-compatibility runs passed." -ForegroundColor Green
 
 Write-Host "`n==> [7/8] Hardware Solo Cues Smoke Run (Madame N NPU Solo)" -ForegroundColor Cyan
 $DiagNpuSolo = Join-Path $DiagDir "smoke_solo_npu.json"
-& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/solo_npu.json --duration-seconds 2.0 --export-diagnostics $DiagNpuSolo
+& $ExePath --no-activate --width 1280 --height 720 --mute --cue assets/cues/solo_npu.json --duration-seconds 2.0 --export-diagnostics $DiagNpuSolo | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "NPU Solo smoke run exited with code $LASTEXITCODE" }
 Write-Host "[PASS] Standalone NPU Solo cue run completed cleanly." -ForegroundColor Green
 
