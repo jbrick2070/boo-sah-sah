@@ -3358,11 +3358,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             // owns the upper-right. Place the complete title below that card,
             // and localize its scrim so neither panel's text gets dimmed.
             float uiScale=clamp(floor(res.y/540.0),1.0,3.0);
-            titleScale=min(titleScale*.78,lbSize.x*.40/55.0);
+            titleScale=min(titleScale*.70,lbSize.x*.36/55.0);
             float motifTop=max(lbMin.y+lbSize.y*.35,148.0*uiScale);
-            titleOrigin=float2(lbMin.x+lbSize.x*.94-55.0*titleScale,motifTop+22.0*titleScale);
-            float2 plateMin=titleOrigin-float2(2,24)*titleScale;
-            float2 plateMax=titleOrigin+float2(57,19)*titleScale;
+            titleOrigin=float2(lbMin.x+lbSize.x*.94-58.5*titleScale,motifTop+24.0*titleScale);
+            float2 plateMin=titleOrigin-float2(5.5,26.5)*titleScale;
+            float2 plateMax=titleOrigin+float2(59.5,19.0)*titleScale;
             float feather=max(titleScale*2.0,1.0);
             float2 fadeIn=smoothstep(plateMin,plateMin+feather,px);
             float2 fadeOut=1.0-smoothstep(plateMax-feather,plateMax,px);
