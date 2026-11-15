@@ -38,8 +38,9 @@ std::string wideToUtf8(const wchar_t* w) {
     if (!w || !*w) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return {};
-    std::string out(static_cast<size_t>(n - 1), '\0');
+    std::string out(static_cast<size_t>(n), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
+    out.pop_back();
     return out;
 }
 
@@ -133,6 +134,7 @@ struct DynamicCudaDriver {
     int (*cuEventElapsedTime)(float*, void*, void*) = nullptr;
 
     bool load() noexcept {
+        if (lib) return true;
         lib = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!lib) return false;
         auto sym = [&](auto& fnPtr, const char* name, const char* alt = nullptr) noexcept -> bool {
@@ -173,6 +175,7 @@ struct DynamicCudaDriver {
         sym(cuMemAllocHost, "cuMemAllocHost_v2", "cuMemAllocHost");
         sym(cuMemFreeHost, "cuMemFreeHost");
         sym(cuMemcpyDtoHAsync, "cuMemcpyDtoHAsync_v2", "cuMemcpyDtoHAsync");
+        if (!ok) unload();
         return ok;
     }
 
@@ -804,6 +807,24 @@ std::vector<uint32_t> buildDeterministicTensorWeights() {
 // ============================================================================
 // Live Hardware H.264 Encoder -> Decoder Round-Trip Pipeline (Media Foundation)
 // ============================================================================
+// ProcessOutput can return events and allocated samples even when reporting a
+// stream change/failure. Release them on every exit, without releasing the caller's sample.
+struct ScopedMftOutput {
+    MFT_OUTPUT_DATA_BUFFER& output;
+    IMFSample* callerSample;
+    ~ScopedMftOutput() {
+        if (output.pSample && output.pSample != callerSample) output.pSample->Release();
+        if (output.pEvents) output.pEvents->Release();
+    }
+};
+
+bool allocateMftOutputSample(DWORD byteCount, ComPtr<IMFSample>& sample) {
+    ComPtr<IMFMediaBuffer> buffer;
+    return SUCCEEDED(MFCreateSample(&sample)) && sample &&
+           SUCCEEDED(MFCreateMemoryBuffer(byteCount, &buffer)) && buffer &&
+           SUCCEEDED(sample->AddBuffer(buffer.Get()));
+}
+
 class LiveCodecSession {
 public:
     LiveCodecSession() = default;
@@ -1039,14 +1060,6 @@ public:
             return false;
         }
 
-        const DWORD nv12Bytes = (kW * kH * 3u) / 2u;
-        for (auto& buf : encInputRing_) {
-            if (FAILED(MFCreateMemoryBuffer(nv12Bytes, &buf)) || !buf) {
-                shutdown();
-                return false;
-            }
-        }
-
         encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
         decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
@@ -1058,20 +1071,22 @@ public:
 
     void shutdown() noexcept {
         ready_ = false;
-        for (auto& b : encInputRing_) {
-            b.Reset();
-        }
         decReusableSample_.Reset();
         decReusableBuffer_.Reset();
         encEvGen_.Reset();
         if (decoder_) {
             decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             ComPtr<IMFShutdown> sh;
             if (SUCCEEDED(decoder_.As(&sh)) && sh) sh->Shutdown();
             sh.Reset();
             decoder_.Reset();
         }
         if (encoder_) {
+            encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             ComPtr<IMFShutdown> sh;
             if (SUCCEEDED(encoder_.As(&sh)) && sh) sh->Shutdown();
             sh.Reset();
@@ -1094,6 +1109,7 @@ public:
         size_t nv12Len,
         std::vector<uint8_t>& outRgba8,
         LivePillarTelemetry& outTel) {
+        outRgba8.clear();
         constexpr uint32_t kW = LiveAcceleratorOrchestra::kCodecWidth;
         constexpr uint32_t kH = LiveAcceleratorOrchestra::kCodecHeight;
         constexpr size_t kExpectedNv12 = (static_cast<size_t>(kW) * kH * 3u) / 2u;
@@ -1102,7 +1118,11 @@ public:
         const auto t0 = std::chrono::steady_clock::now();
 
         auto feedOneEncoderInput = [&]() -> bool {
-            IMFMediaBuffer* ringBuf = encInputRing_[frameIndex_ % encInputRing_.size()].Get();
+            // The asynchronous MFT may retain an input sample beyond four feeds.
+            // Give each accepted sample its own buffer, released by COM when consumed.
+            ComPtr<IMFMediaBuffer> inputBuffer;
+            if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(kExpectedNv12), &inputBuffer))) return false;
+            IMFMediaBuffer* ringBuf = inputBuffer.Get();
             BYTE* dst = nullptr;
             if (FAILED(ringBuf->Lock(&dst, nullptr, nullptr)) || !dst) return false;
             std::memcpy(dst, nv12In, kExpectedNv12);
@@ -1128,7 +1148,8 @@ public:
             if (FAILED(outSamp->ConvertToContiguousBuffer(&buf)) || !buf) return false;
             BYTE* p = nullptr;
             DWORD len = 0;
-            if (FAILED(buf->Lock(&p, nullptr, &len)) || !p || len <= 4u) return false;
+            if (FAILED(buf->Lock(&p, nullptr, &len))) return false;
+            if (!p || len <= 4u) { buf->Unlock(); return false; }
 
             const bool hasStartCode =
                 (p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) ||
@@ -1180,12 +1201,10 @@ public:
                     MFT_OUTPUT_DATA_BUFFER odb{};
                     ComPtr<IMFSample> callerSamp;
                     if (!encAllocatesOut_) {
-                        MFCreateSample(&callerSamp);
-                        ComPtr<IMFMediaBuffer> ob;
-                        MFCreateMemoryBuffer(encOutCbSize_, &ob);
-                        callerSamp->AddBuffer(ob.Get());
+                        if (!allocateMftOutputSample(encOutCbSize_, callerSamp)) return false;
                         odb.pSample = callerSamp.Get();
                     }
+                    const ScopedMftOutput releaseOutput{odb, odb.pSample};
                     DWORD status = 0;
                     const HRESULT hrOut = encoder_->ProcessOutput(0, 1, &odb, &status);
                     if (hrOut == MF_E_TRANSFORM_STREAM_CHANGE) {
@@ -1202,8 +1221,6 @@ public:
                         if (harvestEncoderSample(odb.pSample)) {
                             annexBVerified = true;
                         }
-                        if (encAllocatesOut_ && odb.pSample) odb.pSample->Release();
-                        if (odb.pEvents) odb.pEvents->Release();
                         if (fedCurrent && !bitstream.empty()) {
                             break;
                         }
@@ -1216,12 +1233,10 @@ public:
                 MFT_OUTPUT_DATA_BUFFER odb{};
                 ComPtr<IMFSample> callerSamp;
                 if (!encAllocatesOut_) {
-                    MFCreateSample(&callerSamp);
-                    ComPtr<IMFMediaBuffer> ob;
-                    MFCreateMemoryBuffer(encOutCbSize_, &ob);
-                    callerSamp->AddBuffer(ob.Get());
+                    if (!allocateMftOutputSample(encOutCbSize_, callerSamp)) return false;
                     odb.pSample = callerSamp.Get();
                 }
+                const ScopedMftOutput releaseOutput{odb, odb.pSample};
                 DWORD status = 0;
                 const HRESULT hrOut = encoder_->ProcessOutput(0, 1, &odb, &status);
                 if (hrOut == MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -1229,8 +1244,6 @@ public:
                     else break;
                 } else if (SUCCEEDED(hrOut)) {
                     if (harvestEncoderSample(odb.pSample)) annexBVerified = true;
-                    if (encAllocatesOut_ && odb.pSample) odb.pSample->Release();
-                    if (odb.pEvents) odb.pEvents->Release();
                 } else {
                     break;
                 }
@@ -1271,9 +1284,10 @@ public:
             for (int iter = 0; iter < 6; ++iter) {
                 MFT_OUTPUT_DATA_BUFFER odb{};
                 if (!decAllocatesOut_) {
-                    ensureDecoderSampleAllocated();
+                    if (!ensureDecoderSampleAllocated()) return false;
                     odb.pSample = decReusableSample_.Get();
                 }
+                const ScopedMftOutput releaseOutput{odb, odb.pSample};
                 DWORD status = 0;
                 const HRESULT hrDec = decoder_->ProcessOutput(0, 1, &odb, &status);
                 if (hrDec == MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -1284,16 +1298,13 @@ public:
                     continue;
                 }
                 if (FAILED(hrDec)) {
-                    if (odb.pEvents) odb.pEvents->Release();
                     return decodedFrameReady;
                 }
 
                 if (odb.pSample) {
                     psnrDb = convertDecodedNv12SampleToRgbaAndPsnr(odb.pSample, nv12In, outRgba8);
                     decodedFrameReady = !outRgba8.empty();
-                    if (decAllocatesOut_) odb.pSample->Release();
                 }
-                if (odb.pEvents) odb.pEvents->Release();
             }
             return decodedFrameReady;
         };
@@ -1322,17 +1333,13 @@ public:
                             MFT_OUTPUT_DATA_BUFFER odb{};
                             ComPtr<IMFSample> callerSamp;
                             if (!encAllocatesOut_) {
-                                MFCreateSample(&callerSamp);
-                                ComPtr<IMFMediaBuffer> ob;
-                                MFCreateMemoryBuffer(encOutCbSize_, &ob);
-                                callerSamp->AddBuffer(ob.Get());
+                                if (!allocateMftOutputSample(encOutCbSize_, callerSamp)) return false;
                                 odb.pSample = callerSamp.Get();
                             }
+                            const ScopedMftOutput releaseOutput{odb, odb.pSample};
                             DWORD st = 0;
                             if (SUCCEEDED(encoder_->ProcessOutput(0, 1, &odb, &st))) {
                                 harvestEncoderSample(odb.pSample);
-                                if (encAllocatesOut_ && odb.pSample) odb.pSample->Release();
-                                if (odb.pEvents) odb.pEvents->Release();
                             }
                         }
                     }
@@ -1341,17 +1348,13 @@ public:
                     MFT_OUTPUT_DATA_BUFFER odb{};
                     ComPtr<IMFSample> callerSamp;
                     if (!encAllocatesOut_) {
-                        MFCreateSample(&callerSamp);
-                        ComPtr<IMFMediaBuffer> ob;
-                        MFCreateMemoryBuffer(encOutCbSize_, &ob);
-                        callerSamp->AddBuffer(ob.Get());
+                        if (!allocateMftOutputSample(encOutCbSize_, callerSamp)) return false;
                         odb.pSample = callerSamp.Get();
                     }
+                    const ScopedMftOutput releaseOutput{odb, odb.pSample};
                     DWORD st = 0;
                     if (SUCCEEDED(encoder_->ProcessOutput(0, 1, &odb, &st))) {
                         harvestEncoderSample(odb.pSample);
-                        if (encAllocatesOut_ && odb.pSample) odb.pSample->Release();
-                        if (odb.pEvents) odb.pEvents->Release();
                     }
                 }
                 if (!bitstream.empty() && feedDecoderPacket(bitstream)) {
@@ -1394,6 +1397,7 @@ private:
                     UINT32 aw = LiveAcceleratorOrchestra::kCodecWidth;
                     UINT32 ah = LiveAcceleratorOrchestra::kCodecHeight;
                     MFGetAttributeSize(cand.Get(), MF_MT_FRAME_SIZE, &aw, &ah);
+                    if (aw > 4096u || ah > 4096u) return false;
                     decAlignedWidth_  = std::max<uint32_t>(LiveAcceleratorOrchestra::kCodecWidth, aw);
                     decAlignedHeight_ = std::max<uint32_t>(LiveAcceleratorOrchestra::kCodecHeight, ah);
 
@@ -1403,6 +1407,7 @@ private:
                         strideSigned = static_cast<INT32>(strideRaw);
                     }
                     decDefaultStride_ = (strideSigned > 0) ? static_cast<uint32_t>(strideSigned) : decAlignedWidth_;
+                    if (decDefaultStride_ < LiveAcceleratorOrchestra::kCodecWidth || decDefaultStride_ > 16384u) return false;
 
                     MFT_OUTPUT_STREAM_INFO osi{};
                     decoder_->GetOutputStreamInfo(0, &osi);
@@ -1420,16 +1425,17 @@ private:
         return false;
     }
 
-    void ensureDecoderSampleAllocated() {
+    bool ensureDecoderSampleAllocated() {
         if (decReusableSample_ && decReusableBuffer_) {
             decReusableBuffer_->SetCurrentLength(0);
-            return;
+            return true;
         }
-        MFCreateMemoryBuffer(decOutCbSize_, &decReusableBuffer_);
-        MFCreateSample(&decReusableSample_);
+        if (FAILED(MFCreateMemoryBuffer(decOutCbSize_, &decReusableBuffer_)) ||
+            FAILED(MFCreateSample(&decReusableSample_))) return false;
         if (decReusableSample_ && decReusableBuffer_) {
-            decReusableSample_->AddBuffer(decReusableBuffer_.Get());
+            return SUCCEEDED(decReusableSample_->AddBuffer(decReusableBuffer_.Get()));
         }
+        return false;
     }
 
     double convertDecodedNv12SampleToRgbaAndPsnr(
@@ -1440,18 +1446,28 @@ private:
         constexpr uint32_t kH = LiveAcceleratorOrchestra::kCodecHeight;
 
         ComPtr<IMFMediaBuffer> buf;
+        outRgba8.clear();
         if (FAILED(decSample->ConvertToContiguousBuffer(&buf)) || !buf) return 0.0;
 
         BYTE* scan0 = nullptr;
         LONG pitch = static_cast<LONG>(decDefaultStride_);
         ComPtr<IMF2DBuffer> buf2d;
         bool locked2d = false;
-        if (SUCCEEDED(buf.As(&buf2d)) && buf2d && SUCCEEDED(buf2d->Lock2D(&scan0, &pitch)) && scan0 && pitch > 0) {
+        if (SUCCEEDED(buf.As(&buf2d)) && buf2d && SUCCEEDED(buf2d->Lock2D(&scan0, &pitch))) {
             locked2d = true;
+            if (!scan0 || pitch < static_cast<LONG>(kW) || pitch > 16384) {
+                buf2d->Unlock2D();
+                return 0.0;
+            }
         } else {
             DWORD curLen = 0;
-            if (FAILED(buf->Lock(&scan0, nullptr, &curLen)) || !scan0) return 0.0;
+            if (FAILED(buf->Lock(&scan0, nullptr, &curLen))) return 0.0;
             pitch = static_cast<LONG>(decDefaultStride_);
+            const size_t required = static_cast<size_t>(pitch) * (decAlignedHeight_ + kH / 2u);
+            if (!scan0 || curLen < required) {
+                buf->Unlock();
+                return 0.0;
+            }
         }
 
         outRgba8.resize(static_cast<size_t>(kW) * kH * 4u);
@@ -1524,7 +1540,6 @@ private:
     ComPtr<IMFTransform> encoder_;
     ComPtr<IMFMediaEventGenerator> encEvGen_;
     ComPtr<IMFTransform> decoder_;
-    std::array<ComPtr<IMFMediaBuffer>, 4> encInputRing_{};
     ComPtr<IMFSample> decReusableSample_;
     ComPtr<IMFMediaBuffer> decReusableBuffer_;
 };
@@ -1589,6 +1604,7 @@ struct LiveAcceleratorOrchestra::Impl {
     std::vector<uint8_t> pendingNv12;
     uint64_t pendingNv12Seq = 0;
     uint64_t processedNv12Seq = 0;
+    uint64_t decodedNv12Seq = 0;
     std::vector<uint8_t> latestDecodedRgba;
     LivePillarTelemetry latestCodecTelemetry{};
     std::unique_ptr<LiveCodecSession> syncOrWorkerCodec;
@@ -1604,6 +1620,7 @@ struct LiveAcceleratorOrchestra::Impl {
         codecInitDoneFlag = false;
         codecWorkerRunning = true;
         codecWorker = std::thread([this]() {
+          try {
             LiveCodecSession session;
             std::string bname;
             const bool ok = session.initialize(luidLow, luidHigh, bname);
@@ -1639,12 +1656,29 @@ struct LiveAcceleratorOrchestra::Impl {
                     if (decOk) {
                         latestDecodedRgba = localRgba;
                         latestCodecTelemetry = tel;
+                        decodedNv12Seq = targetSeq;
                     }
                     processedNv12Seq = targetSeq;
                 }
                 codecCv.notify_all();
             }
             session.shutdown();
+          } catch (const std::exception& e) {
+            BOO_LOG_WARN("Codec", std::string("Codec worker failed; selecting shader substitute: ") + e.what());
+            std::lock_guard<std::mutex> lk(codecMutex);
+            codecReady.store(false, std::memory_order_release);
+            codecInitDoneFlag = true;
+            codecStop = true;
+            latestDecodedRgba.clear();
+          } catch (...) {
+            BOO_LOG_WARN("Codec", "Codec worker failed; selecting shader substitute.");
+            std::lock_guard<std::mutex> lk(codecMutex);
+            codecReady.store(false, std::memory_order_release);
+            codecInitDoneFlag = true;
+            codecStop = true;
+            latestDecodedRgba.clear();
+          }
+          codecCv.notify_all();
         });
     }
 };
@@ -1697,16 +1731,23 @@ void LiveAcceleratorOrchestra::initialize(
         int ccMaj = 0, ccMin = 0, smCount = 0;
         const int dev = impl_->cuda.findExactAdapterDevice(
             adapterLuidLow, adapterLuidHigh, gpuName, ccMaj, ccMin, smCount);
-        if (dev >= 0 &&
-            impl_->cuda.cuDevicePrimaryCtxRetain(&impl_->cudaCtx, dev) == 0 &&
-            impl_->cuda.cuCtxSetCurrent(impl_->cudaCtx) == 0) {
+        if (dev >= 0 && impl_->cuda.cuDevicePrimaryCtxRetain(&impl_->cudaCtx, dev) == 0) {
             impl_->cudaDev = dev;
+            if (impl_->cuda.cuCtxSetCurrent(impl_->cudaCtx) != 0) {
+                shutdown();
+                impl_->codecAllowed = allowCodec;
+                return;
+            }
             // CU_STREAM_NON_BLOCKING = 0x1
-            impl_->cuda.cuStreamCreate(&impl_->cudaStream, 1u);
-            impl_->cuda.cuEventCreate(&impl_->evParticleStart, 0u);
-            impl_->cuda.cuEventCreate(&impl_->evParticleEnd, 0u);
-            impl_->cuda.cuEventCreate(&impl_->evTensorStart, 0u);
-            impl_->cuda.cuEventCreate(&impl_->evTensorEnd, 0u);
+            if (impl_->cuda.cuStreamCreate(&impl_->cudaStream, 1u) != 0 ||
+                impl_->cuda.cuEventCreate(&impl_->evParticleStart, 0u) != 0 ||
+                impl_->cuda.cuEventCreate(&impl_->evParticleEnd, 0u) != 0 ||
+                impl_->cuda.cuEventCreate(&impl_->evTensorStart, 0u) != 0 ||
+                impl_->cuda.cuEventCreate(&impl_->evTensorEnd, 0u) != 0) {
+                shutdown();
+                impl_->codecAllowed = allowCodec;
+                return;
+            }
 
             // 1. Live CUDA 65,536..262,144-Particle PTX Kernel
             if (allowCuda && ccMaj >= 7 &&
@@ -1818,6 +1859,9 @@ void LiveAcceleratorOrchestra::shutdown() noexcept {
     impl_->latestDecodedRgba.clear();
     impl_->pendingNv12Seq = 0;
     impl_->processedNv12Seq = 0;
+    impl_->decodedNv12Seq = 0;
+    impl_->codecAllowed = false;
+    impl_->latestCodecTelemetry = {};
 
     // 2. Shut down CUDA & Tensor resources cleanly
     if (impl_->cudaCtx && impl_->cuda.lib) {
@@ -1863,6 +1907,11 @@ void LiveAcceleratorOrchestra::shutdown() noexcept {
     impl_->tensorReady = false;
     impl_->hasCudaSample = false;
     impl_->hasTensorSample = false;
+    impl_->particleFn = nullptr;
+    impl_->tensorFn = nullptr;
+    impl_->cudaName = "HLSL Compute Substitute (8,192 Linear)";
+    impl_->tensorName = "HLSL Scalar Field Substitute (320x180)";
+    impl_->codecName = "HLSL Block Quantization Substitute (8x8)";
 }
 
 bool LiveAcceleratorOrchestra::cudaHardwareAvailable() const noexcept {
@@ -2104,6 +2153,7 @@ bool LiveAcceleratorOrchestra::processCodecRoundTrip(
     std::vector<uint8_t>& outRgba8,
     LivePillarTelemetry& outTelemetry) {
     outTelemetry = {};
+    outRgba8.clear();
     constexpr size_t kExpectedNv12 = (static_cast<size_t>(kCodecWidth) * kCodecHeight * 3u) / 2u;
     if (!impl_ || !impl_->codecAllowed || !nv12FrameBytes || nv12ByteCount < kExpectedNv12) {
         outTelemetry.status = BackendStatus::Substituted;
@@ -2114,7 +2164,9 @@ bool LiveAcceleratorOrchestra::processCodecRoundTrip(
     {
         std::unique_lock<std::mutex> lk(impl_->codecMutex);
         impl_->ensureCodecStartedLocked();
-        impl_->codecCv.wait_for(lk, std::chrono::milliseconds(1500), [&]() { return impl_->codecInitDoneFlag; });
+        if (waitForExactFrame) {
+            impl_->codecCv.wait_for(lk, std::chrono::milliseconds(1500), [&]() { return impl_->codecInitDoneFlag; });
+        }
         if (!impl_->codecReady.load(std::memory_order_acquire)) {
             outTelemetry.status = BackendStatus::Substituted;
             return false;
@@ -2129,13 +2181,13 @@ bool LiveAcceleratorOrchestra::processCodecRoundTrip(
             submittedSeq = impl_->pendingNv12Seq;
         }
 
-        if (waitForExactFrame || impl_->latestDecodedRgba.empty()) {
+        if (waitForExactFrame) {
             impl_->codecCv.wait_for(lk, std::chrono::milliseconds(400), [&]() {
                 return impl_->processedNv12Seq >= submittedSeq || impl_->codecStop;
             });
         }
 
-        if (impl_->latestDecodedRgba.empty()) {
+        if (impl_->latestDecodedRgba.empty() || (waitForExactFrame && impl_->decodedNv12Seq != submittedSeq)) {
             outTelemetry.status = BackendStatus::Faulted;
             return false;
         }

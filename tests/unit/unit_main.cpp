@@ -1,5 +1,6 @@
 #include "boo/api.hpp"
 #include "boo/audio.hpp"
+#include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
 #include <fstream>
 #include "boo/clock.hpp"
@@ -13,6 +14,7 @@
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -757,6 +759,31 @@ bool testMadameNModelManifestAndAsyncFallback() {
     return true;
 }
 
+bool testLateFilmEditionSeekAudioContinuity() {
+    // Regression for absolute-time frequency interpolation: the prior score
+    // chirped at late seeks while the Family/Midnight blend changed every sample.
+    boo::AudioSynthesizer48k synth;
+    synth.setDurationSamples(17280000);
+    synth.reset(0, 0);
+    std::array<float, 2048> pcm{};
+    float previous[2]{}, maxStep=0;
+    constexpr int seconds[]={18,95,145,175,225,255,318};
+    for(uint32_t iteration=0;iteration<224;++iteration) {
+        synth.setEdition((iteration&1u)?boo::Edition::Midnight:boo::Edition::Family);
+        synth.seekTo(uint64_t(seconds[(iteration*3u)%7u])*48000+(iteration%11u)*800);
+        const auto count=96u+(iteration%8u)*128u;
+        synth.renderFrames(pcm.data(),count,iteration%19u==0u,iteration%23u==0u,1.f);
+        for(uint32_t f=0;f<count;++f)for(size_t c=0;c<2;++c) {
+            const float sample=pcm[f*2u+c];
+            BOO_CHECK(std::isfinite(sample));
+            maxStep=std::max(maxStep,std::abs(sample-previous[c]));previous[c]=sample;
+        }
+    }
+    std::cout << "Late-film seek/edition maximum audio step: " << maxStep << '\n';
+    BOO_CHECK(maxStep<.010f);
+    return true;
+}
+
 bool testFullFilm360sScoreCaptionsAndEditions() {
     using namespace boo;
 
@@ -935,6 +962,229 @@ bool testMediaPrivacyRedactionAndFaultFallback() {
     return true;
 }
 
+bool testCustomAudioTrackDecoderAndCrossfade() {
+    using namespace boo;
+
+    // 1. CLI --audio-file parsing
+    AppSettings cfg{};
+    BOO_CHECK(parseCommandLineArgs({"--audio-file", "suno_orchid_demo.mp3"}, cfg));
+    BOO_CHECK(cfg.audioInputPath == "suno_orchid_demo.mp3");
+
+    // 2. Missing file & fault-injection privacy redaction
+    CustomAudioTrack48k badTrack{};
+    std::string errMsg;
+    BOO_CHECK(!loadCustomAudioFile48k("C:\\Users\\secret_composer\\Music\\missing_suno.mp3", badTrack, &errMsg, false));
+    BOO_CHECK(errMsg.find("secret_composer") == std::string::npos);
+    BOO_CHECK(errMsg.find("<USER_HOME>") != std::string::npos);
+
+    errMsg.clear();
+    BOO_CHECK(!loadCustomAudioFile48k(resolveResourcePath("assets/manifest.json"), badTrack, &errMsg, true));
+    BOO_CHECK(!errMsg.empty());
+
+    // 3. Generate a temporary 44,100 Hz stereo 16-bit PCM WAV file (0.50s warm chord) and decode to 48,000 Hz stereo float
+    const std::filesystem::path tmpWav = std::filesystem::temp_directory_path() / "boo_test_suno_44k1.wav";
+    {
+        constexpr uint32_t kSr = 44100u;
+        constexpr uint32_t kFrames = 22050u; // 0.50s
+        constexpr uint16_t kCh = 2u;
+        constexpr uint32_t kDataBytes = kFrames * kCh * sizeof(int16_t);
+        std::vector<int16_t> samples(kFrames * kCh);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            const double t = static_cast<double>(i) / static_cast<double>(kSr);
+            const double sL = 0.45 * std::sin(2.0 * 3.14159265358979323846 * 220.0 * t);
+            const double sR = 0.45 * std::sin(2.0 * 3.14159265358979323846 * 329.628 * t);
+            samples[i * 2u + 0u] = static_cast<int16_t>(sL * 32767.0);
+            samples[i * 2u + 1u] = static_cast<int16_t>(sR * 32767.0);
+        }
+        std::ofstream out(tmpWav, std::ios::binary);
+        const uint32_t riffSize = 36u + kDataBytes;
+        const uint32_t fmtSize = 16u;
+        const uint16_t audioFmt = 1u;
+        const uint32_t byteRate = kSr * kCh * 2u;
+        const uint16_t blockAlign = kCh * 2u;
+        const uint16_t bitsPerSample = 16u;
+        out.write("RIFF", 4);
+        out.write(reinterpret_cast<const char*>(&riffSize), 4);
+        out.write("WAVEfmt ", 8);
+        out.write(reinterpret_cast<const char*>(&fmtSize), 4);
+        out.write(reinterpret_cast<const char*>(&audioFmt), 2);
+        out.write(reinterpret_cast<const char*>(&kCh), 2);
+        out.write(reinterpret_cast<const char*>(&kSr), 4);
+        out.write(reinterpret_cast<const char*>(&byteRate), 4);
+        out.write(reinterpret_cast<const char*>(&blockAlign), 2);
+        out.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+        out.write("data", 4);
+        out.write(reinterpret_cast<const char*>(&kDataBytes), 4);
+        out.write(reinterpret_cast<const char*>(samples.data()), kDataBytes);
+    }
+
+    CustomAudioTrack48k custom{};
+    errMsg.clear();
+    const bool decodedOk = loadCustomAudioFile48k(tmpWav, custom, &errMsg, false);
+    std::error_code rmEc;
+    std::filesystem::remove(tmpWav, rmEc);
+
+    if (decodedOk) {
+        // 0.50s @ 48 kHz ~= 24,000 frames
+        BOO_CHECK(custom.frameCount >= 23500u && custom.frameCount <= 24500u);
+        BOO_CHECK(custom.interleavedStereo.size() == custom.frameCount * 2u);
+        BOO_CHECK(custom.label == "boo_test_suno_44k1.wav");
+    } else {
+        // Fallback synthetic custom buffer if running in a headless server container without Media Foundation codecs
+        custom.frameCount = 24000u;
+        custom.label = "synthetic_fallback.wav";
+        custom.interleavedStereo.resize(custom.frameCount * 2u);
+        for (uint64_t i = 0; i < custom.frameCount; ++i) {
+            const double t = static_cast<double>(i) / 48000.0;
+            custom.interleavedStereo[static_cast<size_t>(i) * 2u + 0u] = static_cast<float>(0.6 * std::sin(6.2831853 * 220.0 * t));
+            custom.interleavedStereo[static_cast<size_t>(i) * 2u + 1u] = static_cast<float>(0.6 * std::sin(6.2831853 * 329.628 * t));
+        }
+    }
+
+    // 4. Verify live clickless crossfade: Built-in RTX Score -> Custom Track -> Built-in RTX Score
+    AudioSynthesizer48k synth;
+    synth.setDurationSamples(17280000);
+    synth.reset(480000, 0.0f);
+
+    std::vector<float> pcm(1024u * 2u, 0.0f);
+    float prevL = 0.0f, prevR = 0.0f, maxStep = 0.0f;
+    auto measure = [&](uint32_t frames, AudioBandSnapshot* outB = nullptr) -> bool {
+        pcm.assign(static_cast<size_t>(frames) * 2u, 0.0f);
+        synth.renderFrames(pcm.data(), frames, false, false, 0.85f, outB);
+        for (uint32_t i = 0; i < frames; ++i) {
+            const float l = pcm[i * 2u + 0u];
+            const float r = pcm[i * 2u + 1u];
+            BOO_CHECK(std::isfinite(l) && std::isfinite(r));
+            maxStep = std::max(maxStep, std::max(std::abs(l - prevL), std::abs(r - prevR)));
+            prevL = l;
+            prevR = r;
+        }
+        return true;
+    };
+
+    BOO_CHECK(measure(1024u));
+    synth.setCustomTrack(&custom);
+    synth.seekTo(6000u);
+    AudioBandSnapshot customBands{};
+    BOO_CHECK(measure(1024u, &customBands));
+    BOO_CHECK(customBands.rms > 0.02f);
+
+    synth.setCustomTrack(nullptr);
+    synth.seekTo(960000u);
+    BOO_CHECK(measure(1024u));
+    BOO_CHECK(maxStep < 0.020f);
+
+    // 5. Verify bundled 4-track first-party OST assets, cooperative cancellation, compact PCM16, and playlist cycling
+    const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
+        resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
+        resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
+        resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
+        resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+    };
+    for (const auto& p : ostPaths) {
+        BOO_CHECK(std::filesystem::exists(p));
+        BOO_CHECK(std::filesystem::file_size(p) > (3ULL * 1024ULL * 1024ULL));
+    }
+
+    std::atomic<bool> preCancelled{true};
+    CustomAudioTrack48k cancelledTrack{};
+    BOO_CHECK(!loadCustomAudioFile48k(ostPaths[0], cancelledTrack, &errMsg, false, &preCancelled, true));
+    BOO_CHECK(cancelledTrack.frameCount == 0u);
+
+    CustomAudioTrack48k ost01{};
+    if (loadCustomAudioFile48k(ostPaths[0], ost01, &errMsg, false, nullptr, true)) {
+        BOO_CHECK(ost01.frameCount > (180ULL * 48000ULL)); // > 3 minutes @ 48 kHz
+        BOO_CHECK(ost01.interleavedStereo.empty());
+        BOO_CHECK(ost01.interleavedPcm16.size() == ost01.frameCount * 2u);
+        synth.setCustomTrack(&ost01);
+        synth.seekTo(48000ULL * 30ULL); // 0:30 into Neon Orchid
+        AudioBandSnapshot ostBands{};
+        BOO_CHECK(measure(1024u, &ostBands));
+        BOO_CHECK(ostBands.rms > 0.01f);
+        synth.setCustomTrack(nullptr);
+    }
+
+    AudioEngine ostEngine;
+    ostEngine.startBundledSoundtrack(ostPaths, 1u);
+    BOO_CHECK(ostEngine.hasBundledSoundtrack());
+    BOO_CHECK(ostEngine.activeSoundtrackSlot() == 1u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 2u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 3u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 4u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 0u);
+    BOO_CHECK(ostEngine.cycleSoundtrackForward() == 1u);
+    BOO_CHECK(ostEngine.cycleSoundtrackBackward() == 0u);
+    BOO_CHECK(ostEngine.cycleSoundtrackBackward() == 4u);
+    ostEngine.shutdown();
+
+    return true;
+}
+
+bool testAudioReactiveFollowerBeatAndFlashSafety() {
+    using boo::AudioReactiveFollower;
+    using boo::AudioReactiveState;
+    const double dt = 1.0 / 60.0;
+
+    // 1. A quiet 2 Hz kick is auto-levelled and yields roughly one beat per kick.
+    AudioReactiveFollower f;
+    int beats = 0;
+    float prevBeat = 0.0f, maxLow = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.5);
+        const AudioReactiveState s = f.update(0.02f + 0.10f * static_cast<float>(std::exp(-ph / 0.08)), 0.2f, 0.05f, 0.3f, dt, false);
+        BOO_CHECK(s.low >= 0.0f && s.low <= 1.0f && s.beat >= 0.0f && s.beat <= 1.0f);
+        if (i > 120) {
+            if (s.beat > prevBeat + 0.2f) ++beats;
+            maxLow = std::max(maxLow, s.low);
+        }
+        prevBeat = s.beat;
+    }
+    BOO_CHECK(beats >= 13 && beats <= 17); // 8 s of 2 Hz kicks
+    BOO_CHECK(maxLow > 0.5f);              // 0.12 raw peak normalised by automatic gain
+
+    // 2. Flash safety: an 8 Hz kick can never retrigger the beat 3 or more times per second.
+    f.reset();
+    beats = 0;
+    prevBeat = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.125);
+        const AudioReactiveState s = f.update(0.05f + 0.5f * static_cast<float>(std::exp(-ph / 0.02)), 0.2f, 0.1f, 0.3f, dt, false);
+        if (s.beat > prevBeat + 0.05f) ++beats;
+        prevBeat = s.beat;
+    }
+    BOO_CHECK(beats < 30);
+
+    // 3. Reduced flash: no beat envelope, band signals halved.
+    f.reset();
+    float maxBeat = 0.0f;
+    maxLow = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        const double ph = std::fmod(i * dt, 0.5);
+        const AudioReactiveState s = f.update(0.02f + 0.5f * static_cast<float>(std::exp(-ph / 0.08)), 0.2f, 0.1f, 0.3f, dt, true);
+        maxBeat = std::max(maxBeat, s.beat);
+        maxLow = std::max(maxLow, s.low);
+    }
+    BOO_CHECK(maxBeat == 0.0f);
+    BOO_CHECK(maxLow <= 0.5f);
+
+    // 4. Silence stays silent, hold glides to rest, non-finite input is ignored, packing is RGBA8.
+    f.reset();
+    AudioReactiveState s{};
+    for (int i = 0; i < 300; ++i) s = f.update(0.0f, 0.0f, 0.0f, 0.0f, dt, false);
+    BOO_CHECK(s.low == 0.0f && s.mid == 0.0f && s.high == 0.0f && s.beat == 0.0f);
+    for (int i = 0; i < 60; ++i) s = f.update(0.9f, 0.9f, 0.9f, 0.9f, dt, false);
+    BOO_CHECK(s.low > 0.5f);
+    for (int i = 0; i < 180; ++i) s = f.update(0.9f, 0.9f, 0.9f, 0.9f, dt, false, true);
+    BOO_CHECK(s.low < 0.01f && s.beat < 0.01f);
+    s = f.update(std::nanf(""), std::nanf(""), std::nanf(""), std::nanf(""), dt, false);
+    BOO_CHECK(std::isfinite(s.low) && std::isfinite(s.mid) && std::isfinite(s.high) && std::isfinite(s.beat));
+    AudioReactiveState full{};
+    full.low = 1.0f; full.mid = 0.5f; full.high = 0.0f; full.beat = 1.0f;
+    BOO_CHECK(AudioReactiveFollower::pack(full) == 0xFF0080FFu);
+    BOO_CHECK(AudioReactiveFollower::pack(AudioReactiveState{}) == 0u);
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -944,7 +1194,9 @@ int main() {
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);
     runTest("FullFilm360sScoreCaptionsAndEditions", testFullFilm360sScoreCaptionsAndEditions);
+    runTest("LateFilmEditionSeekAudioContinuity", testLateFilmEditionSeekAudioContinuity);
     runTest("MediaPrivacyRedactionAndFaultFallback", testMediaPrivacyRedactionAndFaultFallback);
+    runTest("CustomAudioTrackDecoderAndCrossfade", testCustomAudioTrackDecoderAndCrossfade);
     runTest("JsonParserAndSerializer", testJsonParserAndSerializer);
     runTest("ProductionCueSheetsAndManifest", testProductionCueSheetsAndManifest);
     runTest("InvalidCueFixturesRejected", testInvalidCueFixturesRejected);
@@ -956,6 +1208,7 @@ int main() {
     runTest("SettingsAndPathRedaction", testSettingsAndPathRedaction);
     runTest("M1CameraLetterboxAndFlashSafety", testM1CameraLetterboxAndFlashSafety);
     runTest("AudioClicklessCrossfadeAndGainRamps", testAudioClicklessCrossfadeAndGainRamps);
+    runTest("AudioReactiveFollowerBeatAndFlashSafety", testAudioReactiveFollowerBeatAndFlashSafety);
     runTest("TimelineClockSwitchAndTaipei101FinaleFraming", testTimelineClockSwitchAndTaipei101FinaleFraming);
 
     std::cout << "\nUnit Test Summary: " << (gTestsRun - gTestsFailed) << "/" << gTestsRun << " passed.\n";

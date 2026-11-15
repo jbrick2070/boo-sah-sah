@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <limits>
 
 namespace boo {
 
@@ -24,13 +25,15 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 constexpr uint32_t kTimestampsPerFrame = 5;
+constexpr ULONGLONG kGpuWaitTimeoutMs = 5000;
 
 std::string w2u8(const wchar_t* w) {
     if (!w || !*w) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return {};
-    std::string s(static_cast<size_t>(n - 1), '\0');
+    std::string s(static_cast<size_t>(n), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    s.pop_back();
     return s;
 }
 
@@ -45,6 +48,7 @@ struct D3D12Context::Impl {
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter3> adapter3;
     ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12Device5> removalDevice;
     ComPtr<ID3D12CommandQueue> commandQueue;
     ComPtr<IDXGISwapChain4> swapChain;
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -75,6 +79,10 @@ struct D3D12Context::Impl {
     bool frameOpen = false;
     bool occluded = false;
     bool synchronizationFailed = false;
+    bool teardownRetired = false;
+    bool teardownDrained = false;
+    bool injectedDeviceLost = false;
+    bool debugLayerEnabled = false;
 };
 
 D3D12Context::D3D12Context() : impl_(std::make_unique<Impl>()) {}
@@ -106,6 +114,7 @@ bool D3D12Context::initialize(
         ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
+            impl_->debugLayerEnabled = true;
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             BOO_LOG_INFO("D3D12", "D3D12 debug layer enabled.");
         } else {
@@ -163,6 +172,12 @@ bool D3D12Context::initialize(
 
     if (!impl_->device || !chosenAdapter) {
         if (outError) *outError = "No compatible Direct3D 12 device found on this system.";
+        return false;
+    }
+    // Windows 11 supplies Device5. Require its removal path before creating any
+    // queue so a failed bounded drain can never leave live work using freed data.
+    if (FAILED(impl_->device.As(&impl_->removalDevice))) {
+        if (outError) *outError = "Direct3D 12 runtime lacks the safe device-removal interface required by Windows 11.";
         return false;
     }
 
@@ -361,7 +376,7 @@ bool D3D12Context::initialize(
 
 void D3D12Context::shutdown() noexcept {
     if (!impl_) return;
-    waitForGpu();
+    retireGpuForShutdown();
     if (impl_->waitableHandle) {
         CloseHandle(impl_->waitableHandle);
         impl_->waitableHandle = nullptr;
@@ -375,27 +390,85 @@ void D3D12Context::shutdown() noexcept {
     presentStallCount_ = 0;
 }
 
-void D3D12Context::waitForGpu() noexcept {
-    if (!impl_ || !impl_->commandQueue || !impl_->fence || !impl_->fenceEvent) return;
+bool D3D12Context::waitForGpu() noexcept {
+    if (!impl_ || !impl_->commandQueue || !impl_->fence || !impl_->fenceEvent) return false;
+    if (impl_->synchronizationFailed || impl_->injectedDeviceLost ||
+        FAILED(impl_->device->GetDeviceRemovedReason())) return false;
     const uint64_t value = impl_->nextFenceValue++;
     if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), value))) {
         impl_->synchronizationFailed = true;
-        return;
+        return false;
+    }
+    // UINT64_MAX is the documented removed-device sentinel, not fence completion.
+    if (impl_->fence->GetCompletedValue() == std::numeric_limits<uint64_t>::max()) {
+        impl_->synchronizationFailed = true;
+        return false;
     }
     if (impl_->fence->GetCompletedValue() < value) {
         if (FAILED(impl_->fence->SetEventOnCompletion(value, impl_->fenceEvent))) {
             impl_->synchronizationFailed = true;
-            return;
+            return false;
         }
+        const ULONGLONG deadline = GetTickCount64() + kGpuWaitTimeoutMs;
         for (;;) {
             const DWORD result = WaitForSingleObjectEx(impl_->fenceEvent, 100, FALSE);
             if (result == WAIT_OBJECT_0) break;
-            if (result != WAIT_TIMEOUT || FAILED(impl_->device->GetDeviceRemovedReason())) {
+            if (result != WAIT_TIMEOUT || FAILED(impl_->device->GetDeviceRemovedReason()) ||
+                GetTickCount64() >= deadline) {
                 impl_->synchronizationFailed = true;
-                return;
+                return false;
             }
         }
     }
+    return checkDeviceHealthy();
+}
+
+bool D3D12Context::retireGpuForShutdown() noexcept {
+    if (!impl_ || !impl_->device || !impl_->commandQueue) return true;
+    if (impl_->teardownRetired) return impl_->teardownDrained;
+    impl_->synchronizationFailed = true; // Never make allocators reusable again.
+    const auto finish = [&](bool drained) {
+        impl_->teardownRetired = true;
+        impl_->teardownDrained = drained;
+        return drained;
+    };
+    if (FAILED(impl_->device->GetDeviceRemovedReason())) return finish(false);
+    // The synthetic removal hook already drained the queue before setting its flag.
+    if (impl_->injectedDeviceLost) return finish(true);
+
+    // A previous timed-out SetEventOnCompletion can still signal its event later.
+    // Poll this fresh fence target instead of trusting an old event notification.
+    const uint64_t value = impl_->nextFenceValue++;
+    if (impl_->fence && SUCCEEDED(impl_->commandQueue->Signal(impl_->fence.Get(), value))) {
+        const ULONGLONG deadline = GetTickCount64() + kGpuWaitTimeoutMs;
+        for (;;) {
+            const uint64_t completed = impl_->fence->GetCompletedValue();
+            if (completed == std::numeric_limits<uint64_t>::max() ||
+                FAILED(impl_->device->GetDeviceRemovedReason())) return finish(false);
+            if (completed >= value) return finish(true);
+            if (GetTickCount64() >= deadline) break;
+            Sleep(1);
+        }
+    }
+    // RemoveDevice cancels use of this device and signals its fences to UINT64_MAX;
+    // that is removal, not successful GPU completion. Device5 was required before
+    // queue creation, so all paths with submitted work have this interface.
+    BOO_LOG_ERROR("D3D12", "GPU teardown drain failed; removing D3D12 device before releasing resources.");
+    impl_->removalDevice->RemoveDevice();
+    return finish(false);
+}
+
+bool D3D12Context::injectDeviceLostForTest() noexcept {
+    if (!impl_ || impl_->frameOpen || !waitForGpu()) return false;
+    impl_->injectedDeviceLost = true;
+    BOO_LOG_WARN("D3D12", "Injected device loss after retiring GPU work (physical device remains intact).");
+    return true;
+}
+
+bool D3D12Context::injectSynchronizationFailureForTest() noexcept {
+    if (!impl_ || impl_->frameOpen || !checkDeviceHealthy()) return false;
+    impl_->synchronizationFailed = true;
+    return true;
 }
 
 bool D3D12Context::executeSingleCommandListAndWait(
@@ -439,6 +512,7 @@ bool D3D12Context::executeSingleCommandListAndWait(
 
 bool D3D12Context::resize(uint32_t width, uint32_t height) {
     if (!impl_ || impl_->headless || !impl_->swapChain) return false;
+    if (impl_->frameOpen || !checkDeviceHealthy()) return false;
     if (width == 0 || height == 0) return true;
     if (width == width_ && height == height_) return true;
 
@@ -476,7 +550,7 @@ bool D3D12Context::resize(uint32_t width, uint32_t height) {
 }
 
 bool D3D12Context::beginFrame() {
-    if (!impl_ || impl_->headless || !impl_->swapChain) return false;
+    if (!impl_ || impl_->headless || !impl_->swapChain || impl_->frameOpen) return false;
 
     std::string healthReason;
     if (!checkDeviceHealthy(&healthReason)) {
@@ -484,7 +558,12 @@ bool D3D12Context::beginFrame() {
         return false;
     }
     if (impl_->occluded) {
-        if (impl_->swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
+        const HRESULT testHr = impl_->swapChain->Present(0, DXGI_PRESENT_TEST);
+        if (FAILED(testHr)) {
+            impl_->synchronizationFailed = true;
+            return false;
+        }
+        if (testHr == DXGI_STATUS_OCCLUDED) {
             // Display is powered off / locked during non-minimized (--no-activate) execution.
             // Pace gently at ~60 Hz while still executing and verifying real GPU frames via fence sync.
             Sleep(16);
@@ -510,12 +589,15 @@ bool D3D12Context::beginFrame() {
     if (requiredFence > 0 && impl_->fence->GetCompletedValue() < requiredFence) {
         if (SUCCEEDED(impl_->fence->SetEventOnCompletion(requiredFence, impl_->fenceEvent))) {
             if (WaitForSingleObjectEx(impl_->fenceEvent, 2000, FALSE) != WAIT_OBJECT_0) {
+                impl_->synchronizationFailed = true;
                 return false;
             }
         } else {
+            impl_->synchronizationFailed = true;
             return false;
         }
     }
+    if (!checkDeviceHealthy()) return false;
 
     // Read resolved 5-point GPU timestamps from this retired frame slot (zero GPU stall)
     if (requiredFence > 0 && impl_->timestampReadback && impl_->gpuTimestampFreq > 0) {
@@ -559,8 +641,10 @@ bool D3D12Context::beginFrame() {
     }
 
     auto& alloc = impl_->commandAllocators[impl_->frameIndex];
-    if (FAILED(alloc->Reset())) return false;
-    if (FAILED(impl_->commandList->Reset(alloc.Get(), nullptr))) return false;
+    if (FAILED(alloc->Reset()) || FAILED(impl_->commandList->Reset(alloc.Get(), nullptr))) {
+        impl_->synchronizationFailed = true;
+        return false;
+    }
 
     impl_->currentRecordedMask = 0;
     if (impl_->timestampHeap) {
@@ -642,6 +726,7 @@ bool D3D12Context::endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs)
     }
 
     if (FAILED(impl_->commandList->Close())) {
+        impl_->synchronizationFailed = true;
         return false;
     }
 
@@ -686,7 +771,10 @@ bool D3D12Context::endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs)
     }
 
     const uint64_t fenceVal = impl_->nextFenceValue++;
-    if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), fenceVal))) return false;
+    if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), fenceVal))) {
+        impl_->synchronizationFailed = true;
+        return false;
+    }
     impl_->frameFenceValues[impl_->frameIndex] = fenceVal;
     impl_->occluded = (hr == DXGI_STATUS_OCCLUDED);
     ++presentCount_;
@@ -702,6 +790,10 @@ bool D3D12Context::checkDeviceHealthy(std::string* outReason) const {
     }
     if (impl_->synchronizationFailed) {
         if (outReason) *outReason = "GPU synchronization failed";
+        return false;
+    }
+    if (impl_->injectedDeviceLost) {
+        if (outReason) *outReason = "Injected DXGI_ERROR_DEVICE_REMOVED lifecycle fault";
         return false;
     }
     const HRESULT reason = impl_->device->GetDeviceRemovedReason();
@@ -764,6 +856,28 @@ uint32_t D3D12Context::debugErrorCount() const {
         }
     }
     return count;
+}
+
+uint32_t D3D12Context::debugWarningCount() const {
+    if (!impl_ || !impl_->device) return 0;
+    ComPtr<ID3D12InfoQueue> queue;
+    if (FAILED(impl_->device.As(&queue))) return 0;
+    uint32_t count = 0;
+    for (UINT64 i = 0; i < queue->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
+        SIZE_T size = 0;
+        if (FAILED(queue->GetMessage(i, nullptr, &size)) || size < sizeof(D3D12_MESSAGE)) continue;
+        std::vector<uint8_t> bytes(size);
+        auto* msg = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+        if (SUCCEEDED(queue->GetMessage(i, msg, &size)) && msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING) {
+            ++count;
+            BOO_LOG_WARN("D3D12Validation", msg->pDescription);
+        }
+    }
+    return count;
+}
+
+bool D3D12Context::debugLayerActive() const noexcept {
+    return impl_ && impl_->debugLayerEnabled;
 }
 
 GpuPassTimingsMs D3D12Context::lastPassTimings() const noexcept {

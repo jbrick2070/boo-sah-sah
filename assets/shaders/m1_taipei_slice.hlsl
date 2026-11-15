@@ -1581,13 +1581,19 @@ float4 PSBloomUpsample(VSOut pin) : SV_Target
 #endif
 
 // =============================================================================
-// PASS 3: Clean 16:9 Canvas Composite (Chroma-Preserving Filmic + IEC sRGB + IGN)
+// PASS 3: Clean 16:9 Canvas Composite — Cinematic Lens Model
+//   gIsFirstDownsample bits 0..7 = AOV / debug mode (0 = film), bits 8..9 = lens flags:
+//   bit8 = autofocus bokeh DoF (scene distance valid), bit9 = lens ghosts + halo (off under reduced flash).
+//   Film mode adds: 24-tap golden-angle foreground-aware bokeh DoF, lateral chromatic aberration,
+//   four-octave anamorphic streaks, pseudo lens ghosts + chromatic halo, halation and film grain.
+//   The live beat envelope (gAudioKick) gently pumps bloom, streaks and chromatic fringing.
+//   Every stochastic term is keyed on (pixel, gDitherSeed) so seeks reproduce identical frames.
 // =============================================================================
 #if defined(BOO_M1_COMPOSITE_PS)
 cbuffer M1PostCB : register(b0)
 {
     float2 gCanvasInvSize;
-    float  gBloomThreshold;
+    float  gAudioKick;      // live beat envelope [0,1] (0 in AOV, reduced-flash and deterministic contexts)
     float  gVignetteStrength;
     uint   gIsFirstDownsample;
     uint   gDitherSeed;
@@ -1595,28 +1601,198 @@ cbuffer M1PostCB : register(b0)
     float  gBloomIntensity;
 };
 
-Texture2D<float4> gSceneHdrTex : register(t0);
-Texture2D<float4> gBloomMip0   : register(t1);
-SamplerState      gLinearClamp : register(s0);
+Texture2D<float>  gSceneDistTex : register(t0);
+Texture2D<float4> gSceneHdrTex  : register(t1);
+Texture2D<float4> gBloomMip0    : register(t2);
+SamplerState      gLinearClamp  : register(s0);
+
+int2 canvasSizePx()
+{
+    return int2(round(1.0 / gCanvasInvSize));
+}
+
+float loadDistance(int2 p, int2 size)
+{
+    return gSceneDistTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0));
+}
+
+float3 loadHdr(int2 p, int2 size)
+{
+    return min(gSceneHdrTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0)).rgb, 64.0.xxx);
+}
+
+float sampleInvDistanceBilinear(float2 uv, int2 size)
+{
+    float2 fp = uv * (float2)size - 0.5;
+    int2 ip = int2(floor(fp));
+    float2 f = fp - (float2)ip;
+    float i00 = 1.0 / max(loadDistance(ip, size), 0.05);
+    float i10 = 1.0 / max(loadDistance(ip + int2(1, 0), size), 0.05);
+    float i01 = 1.0 / max(loadDistance(ip + int2(0, 1), size), 0.05);
+    float i11 = 1.0 / max(loadDistance(ip + int2(1, 1), size), 0.05);
+    return lerp(lerp(i00, i10, f.x), lerp(i01, i11, f.x), f.y);
+}
+
+// Weighted harmonic mean of thirteen sub-pixel bilinear probes: biases focus smoothly toward the nearest
+// central subject without single-pixel silhouette step jumps as stems or petal edges cross a probe.
+float autofocusDistance(int2 size)
+{
+    static const float2 kOffsets[13] = {
+        float2( 0.000,  0.000),
+        float2( 0.038,  0.000), float2(-0.038,  0.000), float2( 0.000,  0.038), float2( 0.000, -0.038),
+        float2( 0.042,  0.042), float2(-0.042,  0.042), float2( 0.042, -0.042), float2(-0.042, -0.042),
+        float2( 0.085,  0.000), float2(-0.085,  0.000), float2( 0.000,  0.085), float2( 0.000, -0.085)
+    };
+    static const float kWeights[13] = {
+        1.50,
+        1.10, 1.10, 1.10, 1.10,
+        0.85, 0.85, 0.85, 0.85,
+        0.65, 0.65, 0.65, 0.65
+    };
+    float invSum = 0.0;
+    float wSum = 0.0;
+    [unroll] for (int k = 0; k < 13; ++k)
+    {
+        float2 uv = float2(0.5, 0.53) + kOffsets[k] * float2(0.5625, 1.0);
+        invSum += sampleInvDistanceBilinear(uv, size) * kWeights[k];
+        wSum += kWeights[k];
+    }
+    return wSum / invSum;
+}
+
+// Thin-lens circle of confusion in canvas pixels: |1 - f/d| / f, scaled to a 1440p reference frame.
+float circleOfConfusionPx(float d, float focus, float scale)
+{
+    return min(abs(1.0 - focus / max(d, 0.05)) * 34.0 / max(focus, 0.6), 14.0) * scale;
+}
+
+float3 bokehDepthOfField(float2 pxPos, int2 size, float3 centerColor, float centerD, float focus, float scale)
+{
+    float centerCoc = circleOfConfusionPx(centerD, focus, scale);
+    float radius = 14.0 * scale;
+    float rot = interleavedGradientNoise(pxPos, 0x5BD1E995u) * kTwoPi;
+    float3 acc = centerColor;
+    float wsum = 1.0;
+    [unroll] for (int k = 0; k < 24; ++k)
+    {
+        float r = sqrt(((float)k + 0.5) / 24.0) * radius;
+        float th = (float)k * 2.39996323 + rot;
+        int2 tp = int2(pxPos + float2(cos(th), sin(th)) * r);
+        float td = loadDistance(tp, size);
+        float3 tc = loadHdr(tp, size);
+        float tcoc = circleOfConfusionPx(td, focus, scale);
+        // Background taps may not smear across a sharper foreground (no halo of the backdrop over the subject).
+        float effCoc = (td > centerD) ? min(tcoc, centerCoc) : tcoc;
+        float w = saturate(effCoc - r + 1.0);
+        float lum = dot(tc, float3(0.2126, 0.7152, 0.0722));
+        w *= 1.0 + saturate((lum - 1.0) * 0.6); // bright points bloom into crisp bokeh discs
+        acc += tc * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
 
 float4 PSCompositeCanvas(VSOut pin) : SV_Target
 {
-    float3 hdr = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
-    float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+    uint aovMode = gIsFirstDownsample & 0xFFu;
+    uint lensFlags = (gIsFirstDownsample >> 8u) & 3u;
+    float2 pxPos = floor(pin.position.xy);
+    float3 hdrCenter = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+    float3 sdr;
+    if (aovMode != 0u)
+    {
+        if (aovMode == 1u)
+        {
+            sdr = linearToSrgbExact(saturate(hdrCenter));
+        }
+        else if (aovMode == 2u || aovMode == 3u || aovMode >= 7u)
+        {
+            sdr = saturate(hdrCenter);
+        }
+        else
+        {
+            sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(max(hdrCenter, 0.0.xxx) * gPreExposure));
+        }
+    }
+    else
+    {
+        int2 size = canvasSizePx();
+        float scale = (float)size.y / 1440.0;
+        float3 hdr = hdrCenter;
+        if ((lensFlags & 1u) != 0u)
+        {
+            float focus = autofocusDistance(size);
+            float centerD = loadDistance(int2(pxPos), size);
+            hdr = bokehDepthOfField(pxPos, size, min(hdrCenter, 64.0.xxx), centerD, focus, scale);
+        }
 
-    float2 centered = (pin.uv - 0.5) * float2(1.7777778, 1.0);
-    float vignette = saturate(1.14 - gVignetteStrength * dot(centered, centered));
+        float2 centered = (pin.uv - 0.5) * float2(1.7777778, 1.0);
+        float r2 = dot(centered, centered);
 
-    // Restrained tinted anamorphic bloom streaks, purely spatial & sample-deterministic
-    float2 flareOffset = float2(gCanvasInvSize.x * 16.0, 0.0);
-    float3 flare = gBloomMip0.SampleLevel(gLinearClamp, pin.uv + flareOffset, 0.0).rgb * float3(0.55, 0.88, 1.0)
-                 + gBloomMip0.SampleLevel(gLinearClamp, pin.uv - flareOffset, 0.0).rgb * float3(1.0, 0.58, 0.86);
-    float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.018) * gPreExposure * vignette;
-    float3 sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
+        // Lateral chromatic aberration: red and blue image planes magnify slightly differently toward the corners.
+        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 0.45 * gAudioKick));
+        float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
+        float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
+        hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
+
+        float vignette = saturate(1.14 - gVignetteStrength * r2);
+        float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+
+        // Wide anamorphic streak: four symmetric horizontal tap pairs with falling weights and a cool cast.
+        float3 streak = 0.0.xxx;
+        [unroll] for (int s = 0; s < 4; ++s)
+        {
+            float offPx = 12.0 * pow(2.2, (float)s) * scale;
+            float wS = 1.0 / (1.0 + (float)s * 1.6);
+            float2 o = float2(gCanvasInvSize.x * offPx, 0.0);
+            streak += (gBloomMip0.SampleLevel(gLinearClamp, pin.uv + o, 0.0).rgb +
+                       gBloomMip0.SampleLevel(gLinearClamp, pin.uv - o, 0.0).rgb) * wS;
+        }
+        float3 flare = streak * float3(0.42, 0.70, 1.0) * (1.0 + 0.40 * gAudioKick);
+
+        // Pseudo lens ghosts mirrored through the optical centre, plus a thin chromatic halo ring.
+        // Gated on compact high-intensity highlights so broad daylight skies do not print bands onto water or shadows.
+        if ((lensFlags & 2u) != 0u)
+        {
+            float2 ghostVec = (0.5 - pin.uv) * 0.46;
+            static const float3 kGhostTint[4] = {
+                float3(0.90, 0.55, 1.00), float3(0.45, 0.95, 0.85), float3(1.00, 0.80, 0.45), float3(0.55, 0.70, 1.00)
+            };
+            [unroll] for (int g = 1; g <= 4; ++g)
+            {
+                float2 guv = pin.uv + ghostVec * (float)g;
+                float2 edge = smoothstep(0.0, 0.08, guv) * smoothstep(0.0, 0.08, 1.0 - guv);
+                float inBounds = edge.x * edge.y;
+                float wG = pow(1.0 - saturate(length(0.5 - guv) / 0.70710678), 8.0) * inBounds;
+                float3 gCol = gBloomMip0.SampleLevel(gLinearClamp, saturate(guv), 0.0).rgb;
+                float gKnee = saturate((dot(gCol, float3(0.2126, 0.7152, 0.0722)) - 1.15) * 0.65);
+                flare += gCol * kGhostTint[g - 1] * (wG * gKnee * 0.24);
+            }
+            float r = sqrt(r2);
+            float wH = pow(1.0 - saturate(abs(r - 0.36) * 9.0), 3.0);
+            float2 huv = 1.0 - pin.uv;
+            float2 hDisp = (0.5 - huv) * 0.035;
+            float3 hCenter = gBloomMip0.SampleLevel(gLinearClamp, huv, 0.0).rgb;
+            float hKnee = saturate((dot(hCenter, float3(0.2126, 0.7152, 0.0722)) - 1.15) * 0.65);
+            flare += float3(gBloomMip0.SampleLevel(gLinearClamp, saturate(huv + hDisp), 0.0).r,
+                            hCenter.g,
+                            gBloomMip0.SampleLevel(gLinearClamp, saturate(huv - hDisp), 0.0).b) * (wH * hKnee * 0.16);
+        }
+
+        // Film halation: highlights scatter a warm red fringe back through the emulsion base.
+        float3 halation = bloom * float3(0.050, 0.012, 0.002);
+
+        float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.012 + halation) * gPreExposure * vignette;
+        sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
+
+        // Luminance-weighted film grain (strongest in the mid-tones, absent in pure black and white).
+        float lumS = dot(sdr, float3(0.2126, 0.7152, 0.0722));
+        float grain = triangularDither(pxPos * 0.5 + 7.0, gDitherSeed ^ 0x2545F491u);
+        sdr += grain * 0.014 * lumS * (1.0 - lumS) * 4.0;
+    }
 
     // Sample-deterministic 10-bit Triangular-PDF IGN dither (zero dependency on presentationFrame!)
-    float2 pixelXY = floor(pin.position.xy);
-    float dither = triangularDither(pixelXY, gDitherSeed) / 1023.0;
+    float dither = triangularDither(pxPos, gDitherSeed) / 1023.0;
     sdr = saturate(sdr + dither.xxx);
 
     return float4(sdr, 1.0);
@@ -1664,6 +1840,9 @@ cbuffer M1PresentCB : register(b0)
     // Pass-4 HUD-only lower-third captions, end card & LIVE CAMERA indicator (never in CanvasClean!)
     uint4  gCaptionPacked[4];   // Up to 64 ASCII characters (4 bytes per uint)
     float4 gCaptionStyle;       // .x = alpha, .y = charCount, .z = isEndCard, .w = liveCameraActive
+
+    float4 gInteractiveState;   // .x = abSplitRatio, .y = sunElev01, .z = sunAzim01, .w = accumSpp
+    uint4  gInteractiveMeta;    // .x: bit0=explore, bit1=sunOvr, bit2=lampsOff, bit3=nrd, bits4..7=preset, bit8=accum
 };
 
 Texture2D<float4> gCanvasCleanTex     : register(t0);
@@ -1735,76 +1914,379 @@ float3 sampleShaderCodecSubstitute(float2 uv, bool useExternalTex)
     return quantRgb;
 }
 
-uint glyphBits(uint ch)
-{
-    switch (ch)
-    {
-        case 33: return 0x444404u; // !
-        case 37: return 0x912489u; // %
-        case 39: return 0x440000u; // '
-        case 40: return 0x244442u; // (
-        case 41: return 0x422224u; // )
-        case 43: return 0x044E40u; // +
-        case 44: return 0x000048u; // ,
-        case 45: return 0x00F000u; // -
-        case 46: return 0x000004u; // .
-        case 47: return 0x112248u; // /
-        case 48: return 0x699996u; // 0
-        case 49: return 0x262227u; // 1
-        case 50: return 0x69124Fu; // 2
-        case 51: return 0xE1611Eu; // 3
-        case 52: return 0x99F111u; // 4
-        case 53: return 0xF8E11Eu; // 5
-        case 54: return 0x68E996u; // 6
-        case 55: return 0xF12444u; // 7
-        case 56: return 0x696996u; // 8
-        case 57: return 0x699716u; // 9
-        case 58: return 0x040040u; // :
-        case 63: return 0x692404u; // ?
-        case 65: return 0x699F99u; // A
-        case 66: return 0xE9E99Eu; // B
-        case 67: return 0x698896u; // C
-        case 68: return 0xE9999Eu; // D
-        case 69: return 0xF8E88Fu; // E
-        case 70: return 0xF8E888u; // F
-        case 71: return 0x698B96u; // G
-        case 72: return 0x99F999u; // H
-        case 73: return 0x722227u; // I
-        case 74: return 0x311196u; // J
-        case 75: return 0x9ACCA9u; // K
-        case 76: return 0x88888Fu; // L
-        case 77: return 0x9F9999u; // M
-        case 78: return 0x9DB999u; // N
-        case 79: return 0x699996u; // O
-        case 80: return 0xE99E88u; // P
-        case 81: return 0x6999A5u; // Q
-        case 82: return 0xE99EA9u; // R
-        case 83: return 0x78611Eu; // S
-        case 84: return 0xF44444u; // T
-        case 85: return 0x999996u; // U
-        case 86: return 0x999962u; // V
-        case 87: return 0x9999F9u; // W
-        case 88: return 0x996699u; // X
-        case 89: return 0x996222u; // Y
-        case 90: return 0xF1248Fu; // Z
-        case 91: return 0x744447u; // [
-        case 93: return 0xE2222Eu; // ]
-        case 95: return 0x00000Fu; // _
-        default: return 0u;
+// BEGIN FIRST-PARTY VECTOR TYPE (generated by tools/gen_title_glyphs.py)
+static const float4 kTypeStrokes[283] = {
+    float4(0.500,5.500,0.500,2.000),
+    float4(0.500,2.000,2.000,0.500),
+    float4(2.000,0.500,3.500,2.000),
+    float4(3.500,2.000,3.500,5.500),
+    float4(0.500,3.200,3.500,3.200),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,2.700,0.500),
+    float4(2.700,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.200),
+    float4(3.500,2.200,2.700,3.000),
+    float4(2.700,3.000,0.500,3.000),
+    float4(2.700,3.000,3.500,3.700),
+    float4(3.500,3.700,3.500,4.800),
+    float4(3.500,4.800,2.700,5.500),
+    float4(2.700,5.500,0.500,5.500),
+    float4(3.500,1.000,2.800,0.500),
+    float4(2.800,0.500,1.200,0.500),
+    float4(1.200,0.500,0.500,1.200),
+    float4(0.500,1.200,0.500,4.800),
+    float4(0.500,4.800,1.200,5.500),
+    float4(1.200,5.500,2.800,5.500),
+    float4(2.800,5.500,3.500,5.000),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,2.600,0.500),
+    float4(2.600,0.500,3.500,1.500),
+    float4(3.500,1.500,3.500,4.500),
+    float4(3.500,4.500,2.600,5.500),
+    float4(2.600,5.500,0.500,5.500),
+    float4(3.500,0.500,0.500,0.500),
+    float4(0.500,0.500,0.500,5.500),
+    float4(0.500,5.500,3.500,5.500),
+    float4(0.500,3.000,2.900,3.000),
+    float4(3.500,0.500,0.500,0.500),
+    float4(0.500,0.500,0.500,5.500),
+    float4(0.500,3.000,2.900,3.000),
+    float4(3.500,1.000,2.800,0.500),
+    float4(2.800,0.500,1.200,0.500),
+    float4(1.200,0.500,0.500,1.200),
+    float4(0.500,1.200,0.500,4.800),
+    float4(0.500,4.800,1.200,5.500),
+    float4(1.200,5.500,3.500,5.500),
+    float4(3.500,5.500,3.500,3.000),
+    float4(3.500,3.000,2.300,3.000),
+    float4(0.500,0.500,0.500,5.500),
+    float4(3.500,0.500,3.500,5.500),
+    float4(0.500,3.000,3.500,3.000),
+    float4(0.800,0.500,3.200,0.500),
+    float4(2.000,0.500,2.000,5.500),
+    float4(0.800,5.500,3.200,5.500),
+    float4(1.600,0.500,3.500,0.500),
+    float4(3.500,0.500,3.500,4.600),
+    float4(3.500,4.600,2.600,5.500),
+    float4(2.600,5.500,1.300,5.500),
+    float4(1.300,5.500,0.500,4.600),
+    float4(0.500,0.500,0.500,5.500),
+    float4(3.500,0.500,0.500,3.000),
+    float4(0.500,3.000,3.500,5.500),
+    float4(0.500,0.500,0.500,5.500),
+    float4(0.500,5.500,3.500,5.500),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,2.000,2.800),
+    float4(2.000,2.800,3.500,0.500),
+    float4(3.500,0.500,3.500,5.500),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,3.500,5.500),
+    float4(3.500,5.500,3.500,0.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.200,5.500,0.500,4.800),
+    float4(0.500,4.800,0.500,1.200),
+    float4(0.500,1.200,1.200,0.500),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.300),
+    float4(3.500,2.300,2.800,3.000),
+    float4(2.800,3.000,0.500,3.000),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.200,5.500,0.500,4.800),
+    float4(0.500,4.800,0.500,1.200),
+    float4(0.500,1.200,1.200,0.500),
+    float4(2.400,4.100,3.700,5.600),
+    float4(0.500,5.500,0.500,0.500),
+    float4(0.500,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.300),
+    float4(3.500,2.300,2.800,3.000),
+    float4(2.800,3.000,0.500,3.000),
+    float4(2.200,3.000,3.500,5.500),
+    float4(3.500,1.000,2.800,0.500),
+    float4(2.800,0.500,1.200,0.500),
+    float4(1.200,0.500,0.500,1.200),
+    float4(0.500,1.200,0.500,2.200),
+    float4(0.500,2.200,1.200,3.000),
+    float4(1.200,3.000,2.800,3.000),
+    float4(2.800,3.000,3.500,3.800),
+    float4(3.500,3.800,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.200,5.500,0.500,5.000),
+    float4(0.500,0.500,3.500,0.500),
+    float4(2.000,0.500,2.000,5.500),
+    float4(0.500,0.500,0.500,4.800),
+    float4(0.500,4.800,1.200,5.500),
+    float4(1.200,5.500,2.800,5.500),
+    float4(2.800,5.500,3.500,4.800),
+    float4(3.500,4.800,3.500,0.500),
+    float4(0.500,0.500,1.100,3.600),
+    float4(1.100,3.600,2.000,5.500),
+    float4(2.000,5.500,2.900,3.600),
+    float4(2.900,3.600,3.500,0.500),
+    float4(0.500,0.500,0.800,5.500),
+    float4(0.800,5.500,2.000,3.000),
+    float4(2.000,3.000,3.200,5.500),
+    float4(3.200,5.500,3.500,0.500),
+    float4(0.500,0.500,3.500,5.500),
+    float4(3.500,0.500,0.500,5.500),
+    float4(0.500,0.500,2.000,3.000),
+    float4(2.000,3.000,3.500,0.500),
+    float4(2.000,3.000,2.000,5.500),
+    float4(0.500,0.500,3.500,0.500),
+    float4(3.500,0.500,0.500,5.500),
+    float4(0.500,5.500,3.500,5.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.200,5.500,0.500,4.800),
+    float4(0.500,4.800,0.500,1.200),
+    float4(0.500,1.200,1.200,0.500),
+    float4(1.000,1.400,2.000,0.500),
+    float4(2.000,0.500,2.000,5.500),
+    float4(0.800,5.500,3.200,5.500),
+    float4(0.500,1.200,1.200,0.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.200),
+    float4(3.500,2.200,0.500,5.500),
+    float4(0.500,5.500,3.500,5.500),
+    float4(0.500,0.500,3.500,0.500),
+    float4(3.500,0.500,2.000,2.800),
+    float4(2.000,2.800,3.500,3.500),
+    float4(3.500,3.500,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.200,5.500,0.500,5.000),
+    float4(2.900,5.500,2.900,0.500),
+    float4(2.900,0.500,0.500,3.800),
+    float4(0.500,3.800,3.700,3.800),
+    float4(3.500,0.500,0.500,0.500),
+    float4(0.500,0.500,0.500,2.800),
+    float4(0.500,2.800,2.800,2.800),
+    float4(2.800,2.800,3.500,3.500),
+    float4(3.500,3.500,3.500,4.800),
+    float4(3.500,4.800,2.800,5.500),
+    float4(2.800,5.500,1.000,5.500),
+    float4(1.000,5.500,0.500,5.000),
+    float4(3.200,0.500,1.400,0.500),
+    float4(1.400,0.500,0.500,1.500),
+    float4(0.500,1.500,0.500,4.800),
+    float4(0.500,4.800,1.200,5.500),
+    float4(1.200,5.500,2.800,5.500),
+    float4(2.800,5.500,3.500,4.800),
+    float4(3.500,4.800,3.500,3.500),
+    float4(3.500,3.500,2.800,2.800),
+    float4(2.800,2.800,0.500,2.800),
+    float4(0.500,0.500,3.500,0.500),
+    float4(3.500,0.500,1.300,5.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.200),
+    float4(3.500,2.200,2.800,3.000),
+    float4(2.800,3.000,1.200,3.000),
+    float4(1.200,3.000,0.500,2.200),
+    float4(0.500,2.200,0.500,1.200),
+    float4(0.500,1.200,1.200,0.500),
+    float4(1.200,3.000,0.500,3.700),
+    float4(0.500,3.700,0.500,4.800),
+    float4(0.500,4.800,1.200,5.500),
+    float4(1.200,5.500,2.800,5.500),
+    float4(2.800,5.500,3.500,4.800),
+    float4(3.500,4.800,3.500,3.700),
+    float4(3.500,3.700,2.800,3.000),
+    float4(3.500,3.000,1.200,3.000),
+    float4(1.200,3.000,0.500,2.300),
+    float4(0.500,2.300,0.500,1.200),
+    float4(0.500,1.200,1.200,0.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,4.500),
+    float4(3.500,4.500,2.600,5.500),
+    float4(2.600,5.500,0.800,5.500),
+    float4(1.900,5.300,2.100,5.300),
+    float4(1.900,1.700,2.100,1.700),
+    float4(1.900,4.800,2.100,4.800),
+    float4(2.200,4.900,1.600,5.700),
+    float4(2.000,0.400,1.700,1.400),
+    float4(2.000,0.500,2.000,3.800),
+    float4(1.900,5.300,2.100,5.300),
+    float4(0.500,1.200,1.200,0.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,3.500,1.200),
+    float4(3.500,1.200,3.500,2.200),
+    float4(3.500,2.200,2.000,3.300),
+    float4(2.000,3.300,2.000,3.800),
+    float4(1.900,5.300,2.100,5.300),
+    float4(0.700,3.000,3.300,3.000),
+    float4(0.500,5.500,3.500,5.500),
+    float4(0.600,3.000,3.400,3.000),
+    float4(2.000,1.200,2.000,4.800),
+    float4(0.500,5.500,3.500,0.500),
+    float4(0.500,5.500,3.500,0.500),
+    float4(0.800,0.800,1.200,1.400),
+    float4(2.800,4.600,3.200,5.200),
+    float4(2.800,0.500,1.500,1.500),
+    float4(1.500,1.500,1.200,3.000),
+    float4(1.200,3.000,1.500,4.500),
+    float4(1.500,4.500,2.800,5.500),
+    float4(1.200,0.500,2.500,1.500),
+    float4(2.500,1.500,2.800,3.000),
+    float4(2.800,3.000,2.500,4.500),
+    float4(2.500,4.500,1.200,5.500),
+    float4(2.800,0.500,1.200,0.500),
+    float4(1.200,0.500,1.200,5.500),
+    float4(1.200,5.500,2.800,5.500),
+    float4(1.200,0.500,2.800,0.500),
+    float4(2.800,0.500,2.800,5.500),
+    float4(2.800,5.500,1.200,5.500),
+    float4(1.000,5.000,9.000,5.000),
+    float4(2.000,2.500,8.000,2.500),
+    float4(1.000,7.500,9.000,7.500),
+    float4(1.500,2.000,8.500,2.000),
+    float4(2.300,5.000,7.700,5.000),
+    float4(1.000,8.000,9.000,8.000),
+    float4(1.000,1.500,9.000,1.500),
+    float4(9.000,1.500,9.000,8.500),
+    float4(9.000,8.500,1.000,8.500),
+    float4(1.000,8.500,1.000,1.500),
+    float4(4.000,1.500,4.000,4.500),
+    float4(4.000,4.500,2.500,6.000),
+    float4(6.000,1.500,6.000,6.000),
+    float4(6.000,6.000,8.000,6.000),
+    float4(1.500,1.500,8.500,1.500),
+    float4(4.400,1.500,3.200,8.500),
+    float4(2.000,4.500,7.300,4.500),
+    float4(7.300,4.500,7.300,8.500),
+    float4(1.000,8.500,9.000,8.500),
+    float4(4.300,1.000,5.300,2.500),
+    float4(1.000,3.500,9.000,3.500),
+    float4(3.500,5.200,1.700,8.800),
+    float4(6.500,5.200,8.300,8.800),
+    float4(1.000,4.200,9.000,3.000),
+    float4(5.000,0.800,5.000,7.500),
+    float4(5.000,7.500,6.000,8.700),
+    float4(6.000,8.700,8.500,8.700),
+    float4(8.500,8.700,9.000,7.400),
+    float4(5.000,1.000,2.000,4.000),
+    float4(2.000,4.000,8.000,4.000),
+    float4(6.500,2.400,8.500,4.600),
+    float4(2.400,6.000,7.700,6.000),
+    float4(7.700,6.000,7.700,9.000),
+    float4(7.700,9.000,2.400,9.000),
+    float4(2.400,9.000,2.400,6.000),
+    float4(4.000,1.000,4.000,8.800),
+    float4(1.000,3.600,4.000,3.600),
+    float4(1.000,8.000,4.000,6.800),
+    float4(6.400,1.000,6.400,8.100),
+    float4(6.400,8.100,7.000,9.000),
+    float4(7.000,9.000,9.000,9.000),
+    float4(9.000,9.000,9.300,7.400),
+    float4(6.400,4.800,9.000,2.800),
+    float4(3.300,0.700,0.700,3.000),
+    float4(0.700,3.000,3.300,5.300),
+    float4(0.700,0.700,3.300,3.000),
+    float4(3.300,3.000,0.700,5.300)
+};
+uint2 glyphStrokes(uint ch) {
+    if(ch>=97u && ch<=122u) ch-=32u;
+    switch(ch) {
+        case 65u: return uint2(0u,5u); // A
+        case 66u: return uint2(5u,10u); // B
+        case 67u: return uint2(15u,7u); // C
+        case 68u: return uint2(22u,6u); // D
+        case 69u: return uint2(28u,4u); // E
+        case 70u: return uint2(32u,3u); // F
+        case 71u: return uint2(35u,8u); // G
+        case 72u: return uint2(43u,3u); // H
+        case 73u: return uint2(46u,3u); // I
+        case 74u: return uint2(49u,5u); // J
+        case 75u: return uint2(54u,3u); // K
+        case 76u: return uint2(57u,2u); // L
+        case 77u: return uint2(59u,4u); // M
+        case 78u: return uint2(63u,3u); // N
+        case 79u: return uint2(66u,8u); // O
+        case 80u: return uint2(74u,6u); // P
+        case 81u: return uint2(80u,9u); // Q
+        case 82u: return uint2(89u,7u); // R
+        case 83u: return uint2(96u,11u); // S
+        case 84u: return uint2(107u,2u); // T
+        case 85u: return uint2(109u,5u); // U
+        case 86u: return uint2(114u,4u); // V
+        case 87u: return uint2(118u,4u); // W
+        case 88u: return uint2(122u,2u); // X
+        case 89u: return uint2(124u,3u); // Y
+        case 90u: return uint2(127u,3u); // Z
+        case 48u: return uint2(130u,8u); // 0
+        case 49u: return uint2(138u,3u); // 1
+        case 50u: return uint2(141u,6u); // 2
+        case 51u: return uint2(147u,7u); // 3
+        case 52u: return uint2(154u,3u); // 4
+        case 53u: return uint2(157u,8u); // 5
+        case 54u: return uint2(165u,9u); // 6
+        case 55u: return uint2(174u,2u); // 7
+        case 56u: return uint2(176u,15u); // 8
+        case 57u: return uint2(191u,9u); // 9
+        case 46u: return uint2(200u,1u); // .
+        case 58u: return uint2(201u,2u); // :
+        case 44u: return uint2(203u,1u); // ,
+        case 39u: return uint2(204u,1u); // '
+        case 33u: return uint2(205u,2u); // !
+        case 63u: return uint2(207u,7u); // ?
+        case 45u: return uint2(214u,1u); // -
+        case 95u: return uint2(215u,1u); // _
+        case 43u: return uint2(216u,2u); // +
+        case 47u: return uint2(218u,1u); // /
+        case 37u: return uint2(219u,3u); // %
+        case 40u: return uint2(222u,4u); // (
+        case 41u: return uint2(226u,4u); // )
+        case 91u: return uint2(230u,3u); // [
+        case 93u: return uint2(233u,3u); // ]
+        case 60u: return uint2(279u,2u); // <
+        case 62u: return uint2(281u,2u); // >
+        case 19968u: return uint2(236u,1u); // 一
+        case 20108u: return uint2(237u,2u); // 二
+        case 19977u: return uint2(239u,3u); // 三
+        case 22235u: return uint2(242u,8u); // 四
+        case 20116u: return uint2(250u,5u); // 五
+        case 20845u: return uint2(255u,4u); // 六
+        case 19971u: return uint2(259u,5u); // 七
+        case 21488u: return uint2(264u,7u); // 台
+        case 21271u: return uint2(271u,8u); // 北
+        default: return uint2(0u,0u);
     }
 }
-
-float sampleGlyph(float2 px, float2 origin, float scale, uint ch)
-{
-    float2 rel = (px - origin) / scale;
-    if (rel.x < 0.0 || rel.x >= 4.0 || rel.y < 0.0 || rel.y >= 6.0)
-        return 0.0;
-    uint col = (uint)rel.x;
-    uint row = 5u - (uint)rel.y;
-    uint bits = glyphBits(ch);
-    uint rowNib = (bits >> (row * 4u)) & 0xFu;
-    return ((rowNib >> (3u - col)) & 1u) ? 1.0 : 0.0;
+float typeLineDistance(float2 p,float2 a,float2 b) {
+    float2 ab=b-a;
+    return length(p-a-ab*saturate(dot(p-a,ab)/max(dot(ab,ab),1e-5)));
 }
+float sampleGlyph(float2 px,float2 origin,float scale,uint ch) {
+    float2 p=(px-origin)/max(scale,.01);
+    float2 extent=(ch>255u)?float2(10,10):float2(4,6);
+    if(any(p<-.6)||any(p>extent+.6)) return 0;
+    uint2 span=glyphStrokes(ch);
+    float d=100.0;
+    [loop] for(uint i=0u;i<span.y;++i) {
+        float4 stroke=kTypeStrokes[span.x+i];
+        d=min(d,typeLineDistance(p,stroke.xy,stroke.zw));
+    }
+    float radius=(ch>255u)?.25:.22;
+    float aa=.65/max(scale,.01);
+    return 1.0-smoothstep(radius-aa,radius+aa,d);
+}
+// END FIRST-PARTY VECTOR TYPE
 
 float sampleFixedNumber6(float2 px, float2 origin, float scale, float val)
 {
@@ -1868,6 +2350,22 @@ float sampleFixedMs6(float2 px, float2 origin, float scale, float val)
     a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 46u));
     a = max(a, sampleGlyph(px, origin + float2(4.0 * stepX, 0.0), scale, 48u + f1));
     a = max(a, sampleGlyph(px, origin + float2(5.0 * stepX, 0.0), scale, 48u + f0));
+    return a;
+}
+
+float sampleUint4(float2 px, float2 origin, float scale, uint val)
+{
+    val = min(val, 9999u);
+    float stepX = 5.0 * scale;
+    float a = 0.0;
+    uint d3 = (val / 1000u) % 10u;
+    uint d2 = (val / 100u)  % 10u;
+    uint d1 = (val / 10u)   % 10u;
+    uint d0 = val % 10u;
+    if (val >= 1000u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + d3));
+    if (val >= 100u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + d2));
+    if (val >= 10u)   a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + d1));
+    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 48u + d0));
     return a;
 }
 
@@ -1995,12 +2493,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         px.y >= lbMin.y && px.y < (lbMin.y + lbSize.y))
     {
         float2 canvasUv = saturate((px - lbMin) / lbSize);
+        const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
         if (showOverlay && hudMode == 2u)
         {
             if (abEngine == 3u)
             {
                 // Codec A/B: Left = Live Hardware H.264 Encoded+Decoded (or Shader Quant Sub), Right = Pristine 10-bit CanvasClean
-                if (canvasUv.x < 0.5)
+                if (canvasUv.x < splitRatio)
                 {
                     if (codecHwTexValid)
                     {
@@ -2022,7 +2521,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
                 }
             }
-            else if (abLeftHwVerified && canvasUv.x >= 0.5)
+            else if (abLeftHwVerified && canvasUv.x >= splitRatio)
             {
                 // RT / CUDA / Tensor A/B: Left = Canonical Live HW CanvasClean, Right = Isolated Substitute CanvasAbCompare
                 sdr = sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
@@ -2061,13 +2560,20 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     const float3 colCyan   = float3(0.14, 0.74, 0.96);
     const float3 colEnamel = float3(0.96, 0.95, 0.91);
 
-    if (showOverlay && hudMode == 0u && res.x >= 480.0 && res.y >= 300.0)
+    const uint curAovMode   = (gInteractiveMeta.x >> 9u) & 7u;
+    const uint curDenMode   = (gInteractiveMeta.x >> 12u) & 3u;
+    const uint curMarbleCnt = (gInteractiveMeta.x >> 16u) & 0xFFu;
+    const uint curSolo      = (gInteractiveMeta.x >> 24u) & 7u;
+    const bool studioPinned = (gInteractiveMeta.x & (1u << 27u)) != 0u;
+    const bool studioActive = studioPinned || ((gInteractiveMeta.x & 7u) != 0u) || (curAovMode != 0u) || (curMarbleCnt != 0u) || (curSolo != 0u);
+
+    if (showOverlay && (hudMode == 0u || hudMode == 2u) && res.x >= 480.0 && res.y >= 300.0)
     {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
         const float barH = 44.0 * uiScale;
         if (px.y >= res.y - barH)
         {
-            sdr = lerp(sdr, float3(0.020, 0.032, 0.058), 0.88);
+            sdr = lerp(sdr, float3(0.020, 0.032, 0.058), 0.90);
             if (abs(px.y - (res.y - barH)) < 1.5)
                 sdr = lerp(sdr, colJade, 0.65);
 
@@ -2090,20 +2596,23 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 aclk ? 65u : 81u, aclk ? 67u : 80u, aclk ? 76u : 67u, aclk ? 75u : 32u);
             sdr = lerp(sdr, aclk ? colJade : colCyan, clkTxt);
 
-            // 60s M1 Timeline Scrub Bar + Act Sub-Bar
+            // Clickable / Draggable Timeline Scrub Bar + Act Sub-Bar
             float2 tlMin  = float2(82.0 * uiScale, res.y - 31.0 * uiScale);
-            float2 tlSize = float2(max(100.0, res.x * 0.28), 10.0 * uiScale);
+            float2 tlSize = float2(max(90.0, res.x * 0.20), 10.0 * uiScale);
             float filmFill = saturate(gFilmTime / max(gDuration, 1.0));
             float tlMask = segmentedBar(px, tlMin, tlSize, filmFill, 24u);
             sdr = lerp(sdr, lerp(colJade, colOrchid, filmFill), tlMask * 0.92);
+            float tlThumbX = tlMin.x + filmFill * tlSize.x;
+            if (abs(px.x - tlThumbX) <= 2.2 * uiScale && px.y >= tlMin.y - 2.5 * uiScale && px.y <= tlMin.y + tlSize.y + 2.5 * uiScale)
+                sdr = colEnamel;
 
             float2 actMin  = float2(82.0 * uiScale, res.y - 16.0 * uiScale);
-            float2 actSize = float2(max(100.0, res.x * 0.28), 5.0 * uiScale);
+            float2 actSize = float2(max(90.0, res.x * 0.20), 5.0 * uiScale);
             float actMask = segmentedBar(px, actMin, actSize, gActProgress, 12u);
             sdr = lerp(sdr, colAmber, actMask * 0.88);
 
             // 3-Band Live Audio Crossover Meters (LOW / MID / HIGH)
-            float eqBaseX = tlMin.x + tlSize.x + 14.0 * uiScale;
+            float eqBaseX = tlMin.x + tlSize.x + 12.0 * uiScale;
             float bands[3] = { gAudioBands.y, gAudioBands.z, gAudioBands.w };
             float3 eqCols[3] = { colAmber, colJade, colOrchid };
             [unroll]
@@ -2116,7 +2625,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             }
 
             // FPS & Total Frame GPU ms readouts
-            float statX = eqBaseX + 34.0 * uiScale;
+            float statX = eqBaseX + 32.0 * uiScale;
             float fpsLbl = sampleWord4(px, float2(statX, res.y - 34.0 * uiScale), 1.8 * uiScale, 70u, 80u, 83u, 58u);
             float fpsVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 34.0 * uiScale), 1.8 * uiScale, gFps);
             sdr = lerp(sdr, colJade, fpsLbl);
@@ -2127,23 +2636,26 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             sdr = lerp(sdr, colAmber, msLbl);
             sdr = lerp(sdr, colEnamel, msVal);
 
-            // 5 Hardware Orchestra Engine Status Pills on bottom-right
+            // 5 Clickable Hardware Engine SOLO / ISOLATE Pills on bottom-right ([RT] [TNSR] [NPU] [CUDA] [CODC])
             float rightBase = res.x - 245.0 * uiScale;
-            if (rightBase > statX + 100.0 * uiScale)
+            if (rightBase > statX + 90.0 * uiScale)
             {
                 [unroll]
                 for (uint e = 0u; e < 5u; ++e)
                 {
                     uint stCode = (gEnginePacked >> (e * 4u)) & 0xFu;
-                    float3 pillCol = badgeStatusColor(stCode);
+                    bool isSolo = (curSolo == (e + 1u));
+                    bool mutedByOtherSolo = (curSolo != 0u) && !isSolo;
+                    float3 pillCol = isSolo ? colJade : (mutedByOtherSolo ? float3(0.32, 0.36, 0.44) : badgeStatusColor(stCode));
                     float2 pMin = float2(rightBase + (float)e * 47.0 * uiScale, res.y - 34.0 * uiScale);
                     float2 pMax = pMin + float2(42.0 * uiScale, 22.0 * uiScale);
                     if (px.x >= pMin.x && px.x <= pMax.x && px.y >= pMin.y && px.y <= pMax.y)
                     {
-                        sdr = lerp(sdr, pillCol * 0.25, 0.85);
-                        bool border = (px.x - pMin.x < 1.5) || (pMax.x - px.x < 1.5) ||
-                                      (px.y - pMin.y < 1.5) || (pMax.y - px.y < 1.5);
-                        if (border) sdr = pillCol;
+                        sdr = lerp(sdr, pillCol * (isSolo ? 0.42 : 0.22), 0.88);
+                        float bThick = isSolo ? (2.2 * uiScale) : 1.5;
+                        bool border = (px.x - pMin.x < bThick) || (pMax.x - px.x < bThick) ||
+                                      (px.y - pMin.y < bThick) || (pMax.y - px.y < bThick);
+                        if (border) sdr = isSolo ? colEnamel : pillCol;
                     }
                     uint c0 = 82u, c1 = 84u, c2 = 32u, c3 = 32u;
                     if (e == 1u) { c0 = 84u; c1 = 78u; c2 = 83u; c3 = 82u; } // TNSR
@@ -2151,10 +2663,88 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if (e == 3u) { c0 = 67u; c1 = 85u; c2 = 68u; c3 = 65u; } // CUDA
                     if (e == 4u) { c0 = 67u; c1 = 79u; c2 = 68u; c3 = 67u; } // CODC
                     float txt = sampleWord4(px, pMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.6 * uiScale, c0, c1, c2, c3);
-                    sdr = lerp(sdr, pillCol, txt);
+                    sdr = lerp(sdr, isSolo ? colEnamel : pillCol, txt);
+                }
+
+                // Persistent Bottom Scene & Playback Buttons: [< PRV] [PLAY/PAUS] [NXT >] [F:FILM/STUDIO]
+                if (rightBase - 272.0 * uiScale > statX + 82.0 * uiScale)
+                {
+                    float pTop = res.y - 34.0 * uiScale;
+                    float pBot = res.y - 12.0 * uiScale;
+
+                    // [< PRV]
+                    float2 prvMin = float2(rightBase - 272.0 * uiScale, pTop);
+                    float2 prvMax = float2(rightBase - 220.0 * uiScale, pBot);
+                    if (px.x >= prvMin.x && px.x <= prvMax.x && px.y >= pTop && px.y <= pBot)
+                    {
+                        sdr = lerp(sdr, colCyan * 0.20, 0.86);
+                        if ((px.x - prvMin.x < 1.4) || (prvMax.x - px.x < 1.4) || (px.y - pTop < 1.4) || (pBot - px.y < 1.4))
+                            sdr = colCyan;
+                    }
+                    float tPrv = max(
+                        sampleGlyph(px, prvMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 60u),
+                        sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u));
+                    sdr = lerp(sdr, colEnamel, tPrv);
+
+                    // [PLAY] / [PAUS]
+                    bool isPaused = (gHudFlags & 8u) != 0u;
+                    float3 plyCol = isPaused ? colJade : colAmber;
+                    float2 plyMin = float2(rightBase - 214.0 * uiScale, pTop);
+                    float2 plyMax = float2(rightBase - 162.0 * uiScale, pBot);
+                    if (px.x >= plyMin.x && px.x <= plyMax.x && px.y >= pTop && px.y <= pBot)
+                    {
+                        sdr = lerp(sdr, plyCol * 0.24, 0.86);
+                        if ((px.x - plyMin.x < 1.4) || (plyMax.x - px.x < 1.4) || (px.y - pTop < 1.4) || (pBot - px.y < 1.4))
+                            sdr = plyCol;
+                    }
+                    float tPly = isPaused
+                        ? sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 76u, 65u, 89u)
+                        : sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 65u, 85u, 83u);
+                    sdr = lerp(sdr, colEnamel, tPly);
+
+                    // [NXT >] (prominent Next Scene button!)
+                    float2 nxtMin = float2(rightBase - 156.0 * uiScale, pTop);
+                    float2 nxtMax = float2(rightBase - 92.0 * uiScale, pBot);
+                    if (px.x >= nxtMin.x && px.x <= nxtMax.x && px.y >= pTop && px.y <= pBot)
+                    {
+                        sdr = lerp(sdr, colJade * 0.28, 0.88);
+                        if ((px.x - nxtMin.x < 1.5) || (nxtMax.x - px.x < 1.5) || (px.y - pTop < 1.5) || (pBot - px.y < 1.5))
+                            sdr = colJade;
+                    }
+                    float tNxt = max(
+                        sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u),
+                        sampleGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
+                    sdr = lerp(sdr, colEnamel, tNxt);
+                }
+
+                // Clickable Interactive Explore Mode Pill ("F:FILM" / "F:FREE")
+                float2 expMin = float2(rightBase - 86.0 * uiScale, res.y - 34.0 * uiScale);
+                float2 expMax = expMin + float2(78.0 * uiScale, 22.0 * uiScale);
+                if (expMin.x > statX + 90.0 * uiScale)
+                {
+                    bool expActive = (gInteractiveMeta.x & 1u) != 0u;
+                    float3 expCol = expActive ? colOrchid : colJade;
+                    if (px.x >= expMin.x && px.x <= expMax.x && px.y >= expMin.y && px.y <= expMax.y)
+                    {
+                        sdr = lerp(sdr, expCol * (expActive ? 0.34 : 0.20), 0.88);
+                        if ((px.x - expMin.x < 1.5) || (expMax.x - px.x < 1.5) ||
+                            (px.y - expMin.y < 1.5) || (expMax.y - px.y < 1.5))
+                        {
+                            sdr = expCol;
+                        }
+                    }
+                    float expTxt = expActive
+                        ? sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 73u, 76u, 77u, 32u, 32u)
+                        : sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 82u, 69u, 69u, 32u, 32u);
+                    sdr = lerp(sdr, expActive ? colEnamel : expCol, expTxt);
                 }
             }
         }
+    }
+
+    if (showOverlay && hudMode == 0u && res.x >= 480.0 && res.y >= 300.0)
+    {
+        const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
 
         // Top-Left LIVE SCENE WORKLOADS Attribution Card (strictly live on-screen execution — NEVER standalone bench!)
         float liveTopY = (gVolumeAndPadding.x >= 0.0) ? (44.0 * uiScale) : (14.0 * uiScale);
@@ -2311,14 +2901,29 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     }
     if (showOverlay && hudMode == 2u) {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
-        float splitX = lbMin.x + lbSize.x * 0.5;
-        if (abs(px.x - splitX) < 1.2 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
+        const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
+        float splitX = lbMin.x + lbSize.x * splitRatio;
+        if (abs(px.x - splitX) < 1.35 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
             sdr = colEnamel;
 
+        // Draggable RTX Split Curtain Center Grab Handle
+        float2 handleCenter = float2(splitX, lbMin.y + lbSize.y * 0.5);
+        float2 handleHalf   = float2(6.5 * uiScale, 20.0 * uiScale);
+        if (abs(px.x - handleCenter.x) <= handleHalf.x && abs(px.y - handleCenter.y) <= handleHalf.y)
+        {
+            sdr = lerp(sdr, float3(0.018, 0.028, 0.052), 0.92);
+            bool hb = (handleHalf.x - abs(px.x - handleCenter.x) < 1.4) ||
+                      (handleHalf.y - abs(px.y - handleCenter.y) < 1.4);
+            if (hb) sdr = colJade;
+            else if (abs(abs(px.x - handleCenter.x) - 2.2 * uiScale) < 0.7 && abs(px.y - handleCenter.y) < 11.0 * uiScale)
+                sdr = colEnamel;
+        }
+
         float4 pm = gLivePillarMetrics[abEngine];
-        float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
-        float2 rightBoxMin = float2(splitX + 14.0 * uiScale,  lbMin.y + 14.0 * uiScale);
         float2 bannerSz    = float2(262.0 * uiScale, 28.0 * uiScale);
+        float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
+        float  rightMaxX   = max(lbMin.x + 14.0 * uiScale, lbMin.x + lbSize.x - bannerSz.x - 14.0 * uiScale);
+        float2 rightBoxMin = float2(clamp(max(splitX + 14.0 * uiScale, leftBoxMin.x + bannerSz.x + 12.0 * uiScale), lbMin.x + 14.0 * uiScale, rightMaxX), lbMin.y + 14.0 * uiScale);
 
         if (px.x >= leftBoxMin.x && px.x <= leftBoxMin.x + bannerSz.x &&
             px.y >= leftBoxMin.y && px.y <= leftBoxMin.y + bannerSz.y)
@@ -2366,6 +2971,445 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         sdr = lerp(sdr, colOrchid, rTxt);
     }
 
+    // Persistent Bottom Interactive NVIDIA RTX Studio Dock (Pass 4 only; anchored right above Bottom Bar even during WIPE!)
+    const bool studioDockShown = showOverlay && (hudMode != 3u) && studioActive && (res.x >= 640.0) && (res.y >= 300.0);
+    if (studioDockShown)
+    {
+        const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float2 barSize = float2(536.0 * u, 54.0 * u);
+        const float barMinX  = 0.5 * (res.x - barSize.x);
+        const float barMinY  = (hudMode == 1u) ? (res.y - 60.0 * u) : (res.y - 104.0 * u);
+        const float2 barMin  = float2(barMinX, barMinY);
+        const uint   trkSlot = gInteractiveMeta.z & 0xFFu;
+        const float  trkToastAlpha = saturate((float)((gInteractiveMeta.z >> 8u) & 0xFFu) / 255.0);
+
+        if (px.x >= barMin.x && px.x <= barMin.x + barSize.x &&
+            px.y >= barMin.y && px.y <= barMin.y + barSize.y)
+        {
+            const bool expOn    = (gInteractiveMeta.x & 1u) != 0u;
+            const bool sunOvr   = (gInteractiveMeta.x & 2u) != 0u;
+            const bool lampsOff = (gInteractiveMeta.x & 4u) != 0u;
+            const bool nrdOn    = (gInteractiveMeta.x & 8u) != 0u;
+            const uint presetId = (gInteractiveMeta.x >> 4u) & 0xFu;
+            const bool isAccum   = (gInteractiveMeta.x & 256u) != 0u;
+            const bool customMp3 = (gInteractiveMeta.x & (1u << 28u)) != 0u;
+            const bool audMuted  = (gInteractiveMeta.x & (1u << 29u)) != 0u;
+            const bool isReblur  = (curDenMode == 1u);
+            const uint sppCount = (uint)(clamp(gInteractiveState.w, 1.0, 9999.0) + 0.5);
+
+            sdr = lerp(sdr, float3(0.015, 0.024, 0.046), 0.91);
+            bool outerBdr = (px.x - barMin.x < 1.5) || (barMin.x + barSize.x - px.x < 1.5) ||
+                            (px.y - barMin.y < 1.5) || (barMin.y + barSize.y - px.y < 1.5);
+            if (outerBdr) sdr = lerp(colJade, colOrchid, 0.35);
+
+            // Row 1: [FREE/FILM] [RBLR/NRD + SPP] [LAMP] [WIPE] [AOV] [MRBL] [<] [1..6] [>] [SCENE NAME]
+            const float r1MinY = barMin.y + 5.0 * u;
+            const float r1MaxY = barMin.y + 23.0 * u;
+
+            // 1. FREE / FILM camera mode pill (rx = 6..56)
+            float2 bExpMin = float2(barMin.x + 6.0 * u, r1MinY);
+            float2 bExpMax = float2(barMin.x + 56.0 * u, r1MaxY);
+            float3 expC = expOn ? colJade : colAmber;
+            if (px.x >= bExpMin.x && px.x <= bExpMax.x && px.y >= bExpMin.y && px.y <= bExpMax.y)
+            {
+                sdr = lerp(sdr, expC * 0.24, 0.85);
+                if ((px.x - bExpMin.x < 1.2) || (bExpMax.x - px.x < 1.2) || (px.y - bExpMin.y < 1.2) || (bExpMax.y - px.y < 1.2))
+                    sdr = expC;
+            }
+            float tExp = expOn
+                ? sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 82u, 69u, 69u) // FREE
+                : sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 73u, 76u, 77u); // FILM
+            sdr = lerp(sdr, expC, tExp);
+
+            // 2. REBLUR / NRD / ACC denoiser + live SPP convergence readout (rx = 60..152)
+            float2 bSppMin = float2(barMin.x + 60.0 * u, r1MinY);
+            float2 bSppMax = float2(barMin.x + 152.0 * u, r1MaxY);
+            float3 nrdC = isReblur ? colCyan : (nrdOn ? colJade : colCyan);
+            bool denActive = isAccum || isReblur;
+            if (px.x >= bSppMin.x && px.x <= bSppMax.x && px.y >= bSppMin.y && px.y <= bSppMax.y)
+            {
+                sdr = lerp(sdr, nrdC * (denActive ? 0.24 : 0.10), 0.85);
+                if ((px.x - bSppMin.x < 1.2) || (bSppMax.x - px.x < 1.2) || (px.y - bSppMin.y < 1.2) || (bSppMax.y - px.y < 1.2))
+                    sdr = nrdC * (denActive ? 1.0 : 0.65);
+            }
+            float tNrd = isReblur
+                ? sampleWord4(px, barMin + float2(63.0 * u, 9.5 * u), 1.35 * u, 82u, 66u, 76u, 82u) // RBLR
+                : (nrdOn
+                    ? sampleWord4(px, barMin + float2(64.0 * u, 9.5 * u), 1.35 * u, 78u, 82u, 68u, 32u)  // NRD
+                    : sampleWord4(px, barMin + float2(64.0 * u, 9.5 * u), 1.35 * u, 65u, 67u, 67u, 32u)); // ACC
+            float tSppNum = sampleUint4(px, barMin + float2(91.0 * u, 9.5 * u), 1.35 * u, sppCount);
+            float tSppLbl = sampleWord4(px, barMin + float2(121.0 * u, 9.5 * u), 1.35 * u, 83u, 80u, 80u, 32u);
+            sdr = lerp(sdr, nrdC, tNrd);
+            sdr = lerp(sdr, colEnamel, tSppNum);
+            sdr = lerp(sdr, isAccum ? colAmber : (isReblur ? colJade : float3(0.58, 0.64, 0.72)), tSppLbl);
+
+            // 3. Practical LAMP [J] toggle pill (rx = 156..196)
+            float2 bLmpMin = float2(barMin.x + 156.0 * u, r1MinY);
+            float2 bLmpMax = float2(barMin.x + 196.0 * u, r1MaxY);
+            float3 lmpC = (!lampsOff) ? colAmber : float3(0.42, 0.46, 0.56);
+            if (px.x >= bLmpMin.x && px.x <= bLmpMax.x && px.y >= bLmpMin.y && px.y <= bLmpMax.y)
+            {
+                sdr = lerp(sdr, lmpC * ((!lampsOff) ? 0.24 : 0.12), 0.85);
+                if ((px.x - bLmpMin.x < 1.2) || (bLmpMax.x - px.x < 1.2) || (px.y - bLmpMin.y < 1.2) || (bLmpMax.y - px.y < 1.2))
+                    sdr = lmpC;
+            }
+            float tLmp = sampleWord4(px, barMin + float2(162.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
+            sdr = lerp(sdr, lmpC, tLmp);
+
+            // 4. RTX Split WIPE [H] toggle pill (rx = 200..240 — persistent in exact same spot!)
+            float2 bWipMin = float2(barMin.x + 200.0 * u, r1MinY);
+            float2 bWipMax = float2(barMin.x + 240.0 * u, r1MaxY);
+            bool wipeOn = (hudMode == 2u);
+            float3 wipC = wipeOn ? colOrchid : colCyan;
+            if (px.x >= bWipMin.x && px.x <= bWipMax.x && px.y >= bWipMin.y && px.y <= bWipMax.y)
+            {
+                sdr = lerp(sdr, wipC * (wipeOn ? 0.36 : 0.14), 0.85);
+                if ((px.x - bWipMin.x < 1.2) || (bWipMax.x - px.x < 1.2) || (px.y - bWipMin.y < 1.2) || (bWipMax.y - px.y < 1.2))
+                    sdr = wipC;
+            }
+            float tWip = sampleWord4(px, barMin + float2(206.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
+            sdr = lerp(sdr, wipeOn ? colEnamel : wipC, tWip);
+
+            // 5. Buffer / AOV Inspection [I / F9] pill (rx = 244..284)
+            float2 bAovMin = float2(barMin.x + 244.0 * u, r1MinY);
+            float2 bAovMax = float2(barMin.x + 284.0 * u, r1MaxY);
+            bool aovOn = (curAovMode != 0u);
+            float3 aovC = aovOn ? colAmber : float3(0.56, 0.66, 0.78);
+            if (px.x >= bAovMin.x && px.x <= bAovMax.x && px.y >= bAovMin.y && px.y <= bAovMax.y)
+            {
+                sdr = lerp(sdr, aovC * (aovOn ? 0.32 : 0.14), 0.85);
+                if ((px.x - bAovMin.x < 1.2) || (bAovMax.x - px.x < 1.2) || (px.y - bAovMin.y < 1.2) || (bAovMax.y - px.y < 1.2))
+                    sdr = aovC;
+            }
+            float tAov = sampleWord4(px, barMin + float2(250.0 * u, 9.5 * u), 1.35 * u, 65u, 79u, 86u, aovOn ? (48u + curAovMode) : 32u);
+            sdr = lerp(sdr, aovOn ? colEnamel : aovC, tAov);
+
+            // 6. Marbles RTX Physics Cascade [Y / F10 / M] pill (rx = 288..330)
+            float2 bMrbMin = float2(barMin.x + 288.0 * u, r1MinY);
+            float2 bMrbMax = float2(barMin.x + 330.0 * u, r1MaxY);
+            bool mrbOn = (curMarbleCnt != 0u);
+            float3 mrbC = mrbOn ? colOrchid : colJade;
+            if (px.x >= bMrbMin.x && px.x <= bMrbMax.x && px.y >= bMrbMin.y && px.y <= bMrbMax.y)
+            {
+                sdr = lerp(sdr, mrbC * (mrbOn ? 0.32 : 0.16), 0.85);
+                if ((px.x - bMrbMin.x < 1.2) || (bMrbMax.x - px.x < 1.2) || (px.y - bMrbMin.y < 1.2) || (bMrbMax.y - px.y < 1.2))
+                    sdr = mrbC;
+            }
+            float tMrb = sampleWord4(px, barMin + float2(295.0 * u, 9.5 * u), 1.35 * u, 77u, 82u, 66u, 76u);
+            sdr = lerp(sdr, mrbOn ? colEnamel : mrbC, tMrb);
+
+            // 7. Prominent Scene Switcher: [<] (336..354) + [1..6] (357..444) + [>] (447..465) + Scene Name (470..530)
+            float2 bScnPrvMin = float2(barMin.x + 336.0 * u, r1MinY);
+            float2 bScnPrvMax = float2(barMin.x + 354.0 * u, r1MaxY);
+            if (px.x >= bScnPrvMin.x && px.x <= bScnPrvMax.x && px.y >= r1MinY && px.y <= r1MaxY)
+            {
+                sdr = lerp(sdr, colCyan * 0.22, 0.85);
+                if ((px.x - bScnPrvMin.x < 1.1) || (bScnPrvMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
+                    sdr = colCyan;
+            }
+            sdr = lerp(sdr, colEnamel, sampleGlyph(px, bScnPrvMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 60u));
+
+            [unroll]
+            for (uint k = 0u; k < 6u; ++k)
+            {
+                float2 cMin = float2(barMin.x + (357.0 + (float)k * 14.5) * u, r1MinY);
+                float2 cMax = cMin + float2(12.5 * u, 18.0 * u);
+                bool sel = (presetId == (k + 1u));
+                float3 cCol = sel ? colJade : float3(0.50, 0.58, 0.68);
+                if (px.x >= cMin.x && px.x <= cMax.x && px.y >= cMin.y && px.y <= cMax.y)
+                {
+                    sdr = lerp(sdr, cCol * (sel ? 0.34 : 0.12), 0.85);
+                    if ((px.x - cMin.x < 1.1) || (cMax.x - px.x < 1.1) || (px.y - cMin.y < 1.1) || (cMax.y - px.y < 1.1))
+                        sdr = cCol;
+                }
+                float dMask = sampleGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
+                sdr = lerp(sdr, sel ? colEnamel : cCol, dMask);
+            }
+
+            float2 bScnNxtMin = float2(barMin.x + 447.0 * u, r1MinY);
+            float2 bScnNxtMax = float2(barMin.x + 465.0 * u, r1MaxY);
+            if (px.x >= bScnNxtMin.x && px.x <= bScnNxtMax.x && px.y >= r1MinY && px.y <= r1MaxY)
+            {
+                sdr = lerp(sdr, colJade * 0.26, 0.85);
+                if ((px.x - bScnNxtMin.x < 1.1) || (bScnNxtMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
+                    sdr = colJade;
+            }
+            sdr = lerp(sdr, colEnamel, sampleGlyph(px, bScnNxtMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 62u));
+
+            // Active Scene Name Readout ("BATHRM", "FAUCET", "LEAVES", "ORCHID", "ENAMEL", "SANCTU", or "ACT 1..7")
+            uint sn0=65u, sn1=67u, sn2=84u, sn3=32u, sn4=49u, sn5=32u;
+            if (!expOn) {
+                uint curActNum = (gFilmTime < 45.0) ? 1u : (gFilmTime < 100.0) ? 2u : (gFilmTime < 150.0) ? 3u :
+                                 (gFilmTime < 195.0) ? 4u : (gFilmTime < 245.0) ? 5u : (gFilmTime < 275.0) ? 6u : 7u;
+                sn4 = 48u + curActNum;
+            } else if (presetId == 1u) { sn0=66u; sn1=65u; sn2=84u; sn3=72u; sn4=82u; sn5=77u; } // BATHRM
+            else if (presetId == 2u)   { sn0=70u; sn1=65u; sn2=85u; sn3=67u; sn4=69u; sn5=84u; } // FAUCET
+            else if (presetId == 3u)   { sn0=76u; sn1=69u; sn2=65u; sn3=86u; sn4=69u; sn5=83u; } // LEAVES
+            else if (presetId == 4u)   { sn0=79u; sn1=82u; sn2=67u; sn3=72u; sn4=73u; sn5=68u; } // ORCHID
+            else if (presetId == 5u)   { sn0=69u; sn1=78u; sn2=65u; sn3=77u; sn4=69u; sn5=76u; } // ENAMEL
+            else if (presetId == 6u)   { sn0=83u; sn1=65u; sn2=78u; sn3=67u; sn4=84u; sn5=85u; } // SANCTU
+            else                       { sn0=67u; sn1=85u; sn2=83u; sn3=84u; sn4=79u; sn5=77u; } // CUSTOM
+            float tScnName = sampleWord8(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, sn0, sn1, sn2, sn3, sn4, sn5, 32u, 32u);
+            sdr = lerp(sdr, expOn ? colJade : colAmber, tScnName);
+
+            // Row 2: Draggable [SUN] (34..152) + [AZM] (186..304) + [MP3] (312..350) + [MUSC/MUTE] (354..396) + [RST] (400..438) + [NEXT SCN >] (442..530)
+            float tSunLbl = sampleWord4(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 83u, 85u, 78u, 32u);
+            sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
+
+            float2 sunMin  = barMin + float2(34.0 * u, 34.0 * u);
+            float2 sunSize = float2(118.0 * u, 8.0 * u);
+            float  sunVal  = saturate(gInteractiveState.y);
+            float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 16u);
+            float3 sunTint = lerp(float3(0.26, 0.42, 0.88), lerp(colAmber, colEnamel, smoothstep(0.45, 1.0, sunVal)), smoothstep(0.0, 0.55, sunVal));
+            sdr = lerp(sdr, sunTint, sunBar * 0.92);
+            float sunThumbX = sunMin.x + sunVal * sunSize.x;
+            if (abs(px.x - sunThumbX) <= 2.4 * u && px.y >= sunMin.y - 2.5 * u && px.y <= sunMin.y + sunSize.y + 2.5 * u)
+                sdr = colEnamel;
+
+            float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 65u, 90u, 77u, 32u);
+            sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
+
+            float2 azmMin  = barMin + float2(186.0 * u, 34.0 * u);
+            float2 azmSize = float2(118.0 * u, 8.0 * u);
+            float  azmVal  = saturate(gInteractiveState.z);
+            float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 16u);
+            float3 azmTint = colCyan;
+            sdr = lerp(sdr, azmTint, azmBar * 0.90);
+            float azmThumbX = azmMin.x + azmVal * azmSize.x;
+            if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
+                sdr = colEnamel;
+
+            // [TRK1..4 / SYNT / MP3+] Built-In Soundtrack Selector (rx = 310..350; LMB/Z cycles tracks, Shift+Click imports MP3)
+            float2 bMp3Min = barMin + float2(310.0 * u, 29.5 * u);
+            float2 bMp3Max = bMp3Min + float2(40.0 * u, 17.5 * u);
+            bool isSongTrack = (trkSlot >= 1u && trkSlot <= 5u) || customMp3;
+            float3 mp3C = (trkSlot == 5u || (customMp3 && trkSlot == 0u)) ? colOrchid : (isSongTrack ? colJade : colCyan);
+            if (px.x >= bMp3Min.x && px.x <= bMp3Max.x && px.y >= bMp3Min.y && px.y <= bMp3Max.y)
+            {
+                sdr = lerp(sdr, mp3C * (isSongTrack ? 0.30 : 0.16), 0.86);
+                if ((px.x - bMp3Min.x < 1.1) || (bMp3Max.x - px.x < 1.1) || (px.y - bMp3Min.y < 1.1) || (bMp3Max.y - px.y < 1.1))
+                    sdr = mp3C;
+            }
+            uint tc0 = 83u, tc1 = 89u, tc2 = 78u, tc3 = 84u; // SYNT
+            if (trkSlot >= 1u && trkSlot <= 4u) { tc0 = 84u; tc1 = 82u; tc2 = 75u; tc3 = 48u + trkSlot; } // TRK1..TRK4
+            else if (trkSlot == 5u || customMp3) { tc0 = 77u; tc1 = 80u; tc2 = 51u; tc3 = 43u; }          // MP3+
+            float tMp3 = sampleWord4(px, bMp3Min + float2(7.0 * u, 4.8 * u), 1.35 * u, tc0, tc1, tc2, tc3);
+            sdr = lerp(sdr, isSongTrack ? colEnamel : mp3C, tMp3);
+
+            // [MUSC] / [MUTE] Live Music Toggle Pill (rx = 354..396)
+            float2 bMusMin = barMin + float2(354.0 * u, 29.5 * u);
+            float2 bMusMax = bMusMin + float2(42.0 * u, 17.5 * u);
+            float3 musC = audMuted ? colAmber : colJade;
+            if (px.x >= bMusMin.x && px.x <= bMusMax.x && px.y >= bMusMin.y && px.y <= bMusMax.y)
+            {
+                sdr = lerp(sdr, musC * (audMuted ? 0.28 : 0.22), 0.86);
+                if ((px.x - bMusMin.x < 1.1) || (bMusMax.x - px.x < 1.1) || (px.y - bMusMin.y < 1.1) || (bMusMax.y - px.y < 1.1))
+                    sdr = musC;
+            }
+            float tMus = audMuted
+                ? sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 84u, 69u)  // MUTE
+                : sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 83u, 67u); // MUSC
+            sdr = lerp(sdr, audMuted ? colEnamel : musC, tMus);
+
+            // [RST] Lighting & Studio Reset Pill (rx = 400..438)
+            float2 bRstMin = barMin + float2(400.0 * u, 29.5 * u);
+            float2 bRstMax = bRstMin + float2(38.0 * u, 17.5 * u);
+            bool anyOvr = sunOvr || lampsOff || (curAovMode != 0u) || (curMarbleCnt != 0u) || (curSolo != 0u);
+            float3 rstC = anyOvr ? colAmber : float3(0.42, 0.46, 0.56);
+            if (px.x >= bRstMin.x && px.x <= bRstMax.x && px.y >= bRstMin.y && px.y <= bRstMax.y)
+            {
+                sdr = lerp(sdr, rstC * (anyOvr ? 0.24 : 0.10), 0.85);
+                if ((px.x - bRstMin.x < 1.1) || (bRstMax.x - px.x < 1.1) || (px.y - bRstMin.y < 1.1) || (bRstMax.y - px.y < 1.1))
+                    sdr = rstC;
+            }
+            float tRst = sampleWord4(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 82u, 83u, 84u, 32u);
+            sdr = lerp(sdr, rstC, tRst);
+
+            // Prominent Row-2 [NEXT SCN >] One-Click Scene Button (rx = 442..530)
+            float2 bNxtScnMin = barMin + float2(442.0 * u, 29.5 * u);
+            float2 bNxtScnMax = bNxtScnMin + float2(88.0 * u, 17.5 * u);
+            if (px.x >= bNxtScnMin.x && px.x <= bNxtScnMax.x && px.y >= bNxtScnMin.y && px.y <= bNxtScnMax.y)
+            {
+                sdr = lerp(sdr, colJade * 0.28, 0.88);
+                if ((px.x - bNxtScnMin.x < 1.2) || (bNxtScnMax.x - px.x < 1.2) || (px.y - bNxtScnMin.y < 1.2) || (bNxtScnMax.y - px.y < 1.2))
+                    sdr = colJade;
+            }
+            float tNxtScn = max(
+                sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u),
+                sampleGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
+            sdr = lerp(sdr, colEnamel, tNxtScn);
+        }
+
+        // Pass-4 AOV Buffer Inspection Pill Banner (placed cleanly right above the Bottom Studio Dock!)
+        if (curAovMode != 0u)
+        {
+            float2 aovBoxSz  = float2(174.0 * u, 20.0 * u);
+            float2 aovBoxMin = float2(barMin.x + 0.5 * (barSize.x - aovBoxSz.x), max(12.0 * u, barMin.y - 25.0 * u));
+            if (px.x >= aovBoxMin.x && px.x <= aovBoxMin.x + aovBoxSz.x &&
+                px.y >= aovBoxMin.y && px.y <= aovBoxMin.y + aovBoxSz.y)
+            {
+                sdr = lerp(sdr, float3(0.012, 0.020, 0.038), 0.90);
+                if ((px.x - aovBoxMin.x < 1.3) || (aovBoxMin.x + aovBoxSz.x - px.x < 1.3) ||
+                    (px.y - aovBoxMin.y < 1.3) || (aovBoxMin.y + aovBoxSz.y - px.y < 1.3))
+                    sdr = colAmber;
+                uint a0=65u, a1=79u, a2=86u, a3=58u;
+                uint b0=65u, b1=76u, b2=66u, b3=69u, b4=68u, b5=79u, b6=32u, b7=32u; // ALBEDO
+                if (curAovMode == 2u) { b0=78u; b1=79u; b2=82u; b3=77u; b4=65u; b5=76u; b6=32u; b7=32u; } // NORMAL
+                if (curAovMode == 3u) { b0=82u; b1=71u; b2=72u; b3=47u; b4=77u; b5=84u; b6=76u; b7=32u; } // RGH/MTL
+                if (curAovMode == 4u) { b0=68u; b1=73u; b2=82u; b3=69u; b4=67u; b5=84u; b6=32u; b7=32u; } // DIRECT
+                if (curAovMode == 5u) { b0=73u; b1=78u; b2=68u; b3=73u; b4=82u; b5=32u; b6=71u; b7=73u; } // INDIR GI
+                if (curAovMode == 6u) { b0=82u; b1=69u; b2=70u; b3=76u; b4=47u; b5=82u; b6=70u; b7=82u; } // REFL/RFR
+                if (curAovMode == 7u) { b0=82u; b1=65u; b2=89u; b3=32u; b4=72u; b5=69u; b6=65u; b7=84u; } // RAY HEAT
+                float tLbl = sampleWord4(px, aovBoxMin + float2(10.0 * u, 5.5 * u), 1.45 * u, a0, a1, a2, a3);
+                float tMod = sampleWord8(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, b0, b1, b2, b3, b4, b5, b6, b7);
+                sdr = lerp(sdr, colAmber, tLbl);
+                sdr = lerp(sdr, colEnamel, tMod);
+            }
+        }
+
+        // Pass-4 Now-Playing Soundtrack Toast Banner (left-aligned above Studio Dock; fades out smoothly)
+        if (trkToastAlpha > 0.01)
+        {
+            float2 ostBoxSz  = float2(176.0 * u, 20.0 * u);
+            float2 ostBoxMin = float2(barMin.x, max(12.0 * u, barMin.y - 25.0 * u));
+            if (px.x >= ostBoxMin.x && px.x <= ostBoxMin.x + ostBoxSz.x &&
+                px.y >= ostBoxMin.y && px.y <= ostBoxMin.y + ostBoxSz.y)
+            {
+                float3 bdrC = (trkSlot == 5u) ? colOrchid : ((trkSlot >= 1u && trkSlot <= 4u) ? colJade : colCyan);
+                sdr = lerp(sdr, float3(0.010, 0.022, 0.040), 0.90 * trkToastAlpha);
+                if ((px.x - ostBoxMin.x < 1.3) || (ostBoxMin.x + ostBoxSz.x - px.x < 1.3) ||
+                    (px.y - ostBoxMin.y < 1.3) || (ostBoxMin.y + ostBoxSz.y - px.y < 1.3))
+                    sdr = lerp(sdr, bdrC, trkToastAlpha);
+
+                uint w0a=80u, w0b=82u, w0c=79u, w0d=67u, w0e=69u, w0f=68u, w0g=85u, w0h=82u; // PROCEDUR
+                uint w1a=65u, w1b=76u, w1c=32u, w1d=82u, w1e=84u, w1f=88u, w1g=32u, w1h=83u; // AL RTX S
+                uint w2a=89u, w2b=78u, w2c=84u, w2d=72u, w2e=32u, w2f=32u, w2g=32u, w2h=32u; // YNTH
+                if (trkSlot == 1u) {
+                    w0a=49u; w0b=47u; w0c=52u; w0d=32u; w0e=78u; w0f=69u; w0g=79u; w0h=78u; // 1/4 NEON
+                    w1a=32u; w1b=79u; w1c=82u; w1d=67u; w1e=72u; w1f=73u; w1g=68u; w1h=32u; //  ORCHID
+                    w2a=83u; w2b=80u; w2c=89u; w2d=32u; w2e=74u; w2f=65u; w2g=90u; w2h=90u; // SPY JAZZ
+                } else if (trkSlot == 2u) {
+                    w0a=50u; w0b=47u; w0c=52u; w0d=32u; w0e=65u; w0f=67u; w0g=73u; w0h=68u; // 2/4 ACID
+                    w1a=32u; w1b=76u; w1c=79u; w1d=84u; w1e=85u; w1f=83u; w1g=32u; w1h=84u; //  LOTUS T
+                    w2a=69u; w2b=67u; w2c=72u; w2d=78u; w2e=79u; w2f=32u; w2g=32u; w2h=32u; // ECHNO
+                } else if (trkSlot == 3u) {
+                    w0a=51u; w0b=47u; w0c=52u; w0d=32u; w0e=86u; w0f=69u; w0g=76u; w0h=86u; // 3/4 VELV
+                    w1a=69u; w1b=84u; w1c=32u; w1d=67u; w1e=73u; w1f=80u; w1g=72u; w1h=69u; // ET CIPHE
+                    w2a=82u; w2b=32u; w2c=70u; w2d=85u; w2e=78u; w2f=75u; w2g=32u; w2h=32u; // R FUNK
+                } else if (trkSlot == 4u) {
+                    w0a=52u; w0b=47u; w0c=52u; w0d=32u; w0e=71u; w0f=76u; w0g=65u; w0h=83u; // 4/4 GLAS
+                    w1a=83u; w1b=32u; w1c=68u; w1d=82u; w1e=65u; w1f=71u; w1g=79u; w1h=78u; // S DRAGON
+                    w2a=32u; w2b=69u; w2c=76u; w2d=69u; w2e=67u; w2f=84u; w2g=82u; w2h=79u; //  ELECTRO
+                } else if (trkSlot == 5u) {
+                    w0a=67u; w0b=85u; w0c=83u; w0d=84u; w0e=79u; w0f=77u; w0g=32u; w0h=69u; // CUSTOM E
+                    w1a=88u; w1b=84u; w1c=69u; w1d=82u; w1e=78u; w1f=65u; w1g=76u; w1h=32u; // XTERNAL
+                    w2a=77u; w2b=80u; w2c=51u; w2d=43u; w2e=32u; w2f=32u; w2g=32u; w2h=32u; // MP3+
+                }
+
+                float ostSc = 1.32 * u;
+                float ostM0 = sampleWord8(px, ostBoxMin + float2(8.5 * u, 6.0 * u), ostSc, w0a, w0b, w0c, w0d, w0e, w0f, w0g, w0h);
+                float ostM1 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 40.0 * ostSc, 6.0 * u), ostSc, w1a, w1b, w1c, w1d, w1e, w1f, w1g, w1h);
+                float ostM2 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 80.0 * ostSc, 6.0 * u), ostSc, w2a, w2b, w2c, w2d, w2e, w2f, w2g, w2h);
+                sdr = lerp(sdr, colEnamel, max(ostM0, max(ostM1, ostM2)) * trkToastAlpha);
+            }
+        }
+    }
+
+    // Live Hardware Engine Isolation / SOLO Banner (clickable "[ALL]" return to Full Orchestra!)
+    if (showOverlay && (hudMode != 3u) && (curSolo != 0u) && res.x >= 480.0 && res.y >= 300.0)
+    {
+        const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        float2 soloSz  = float2(230.0 * u, 20.0 * u);
+        float  soloTop = studioDockShown ? ((hudMode == 1u ? (res.y - 60.0 * u) : (res.y - 104.0 * u)) - 25.0 * u) : (res.y - 70.0 * u);
+        float2 soloMin = float2(max(14.0 * u, res.x - 245.0 * u), max(12.0 * u, soloTop));
+        if (px.x >= soloMin.x && px.x <= soloMin.x + soloSz.x &&
+            px.y >= soloMin.y && px.y <= soloMin.y + soloSz.y)
+        {
+            sdr = lerp(sdr, float3(0.012, 0.028, 0.042), 0.92);
+            if ((px.x - soloMin.x < 1.5) || (soloMin.x + soloSz.x - px.x < 1.5) ||
+                (px.y - soloMin.y < 1.5) || (soloMin.y + soloSz.y - px.y < 1.5))
+                sdr = colJade;
+
+            uint s0=82u, s1=84u, s2=32u, s3=68u, s4=88u, s5=82u, s6=32u, s7=32u; // RT DXR
+            if (curSolo == 2u) { s0=84u; s1=78u; s2=83u; s3=82u; s4=32u; s5=77u; s6=77u; s7=65u; } // TNSR MMA
+            if (curSolo == 3u) { s0=78u; s1=80u; s2=85u; s3=32u; s4=53u; s5=72u; s6=90u; s7=32u; } // NPU 5HZ
+            if (curSolo == 4u) { s0=67u; s1=85u; s2=68u; s3=65u; s4=32u; s5=54u; s6=53u; s7=75u; } // CUDA 65K
+            if (curSolo == 5u) { s0=67u; s1=79u; s2=68u; s3=67u; s4=32u; s5=49u; s6=77u; s7=66u; } // CODC 1MB
+
+            float tSolo = sampleWord8(px, soloMin + float2(8.0 * u, 5.5 * u), 1.4 * u, 83u, 79u, 76u, 79u, 58u, 32u, 32u, 32u);
+            float tEng  = sampleWord8(px, soloMin + float2(52.0 * u, 5.5 * u), 1.4 * u, s0, s1, s2, s3, s4, s5, s6, s7);
+            float tAll  = sampleWord8(px, soloMin + float2(174.0 * u, 5.5 * u), 1.4 * u, 91u, 65u, 76u, 76u, 93u, 32u, 32u, 32u);
+            sdr = lerp(sdr, colAmber, tSolo);
+            sdr = lerp(sdr, colJade, tEng);
+            sdr = lerp(sdr, colEnamel, tAll);
+        }
+    }
+
+    // Authored vector title and Traditional Chinese place motif (台北, Taipei).
+    // Pass 4 only: neither title nor caption enters the canonical clean texture.
+    if(hudMode!=2u && gCaptionStyle.z>.5 && gCaptionStyle.x>.01 && lbSize.x>=400.0)
+    {
+        float titleAlpha=saturate(gCaptionStyle.x);
+        float2 titleOrigin=lbMin+lbSize*float2(.075,.30);
+        float titleScale=clamp(lbSize.y/115.0,2.0,18.0);
+        float leftScrim=1.0-smoothstep(.30,.62,(px.x-lbMin.x)/max(lbSize.x,1.0));
+        if (showOverlay && hudMode == 0u) {
+            // Full telemetry owns the upper-left; the optional benchmark card
+            // owns the upper-right. Place the complete title below that card,
+            // and localize its scrim so neither panel's text gets dimmed.
+            float uiScale=clamp(floor(res.y/540.0),1.0,3.0);
+            titleScale=min(titleScale*.78,lbSize.x*.40/55.0);
+            float motifTop=max(lbMin.y+lbSize.y*.35,148.0*uiScale);
+            titleOrigin=float2(lbMin.x+lbSize.x*.94-55.0*titleScale,motifTop+22.0*titleScale);
+            float2 plateMin=titleOrigin-float2(2,24)*titleScale;
+            float2 plateMax=titleOrigin+float2(57,19)*titleScale;
+            float feather=max(titleScale*2.0,1.0);
+            float2 fadeIn=smoothstep(plateMin,plateMin+feather,px);
+            float2 fadeOut=1.0-smoothstep(plateMax-feather,plateMax,px);
+            leftScrim=fadeIn.x*fadeIn.y*fadeOut.x*fadeOut.y;
+        }
+        sdr=lerp(sdr,float3(.012,.024,.026),leftScrim*.68*titleAlpha);
+        float title=sampleWord8(px,titleOrigin,titleScale,66,79,79,32,83,65,72,32);
+        title=max(title,sampleWord4(px,titleOrigin+float2(40*titleScale,0),titleScale,83,65,72,32));
+        float2 motifOrigin=titleOrigin-float2(0,22*titleScale);
+        float motifScale=titleScale*.52;
+        float motif=max(sampleGlyph(px,motifOrigin,motifScale,21488u),
+                        sampleGlyph(px,motifOrigin+float2(12*motifScale,0),motifScale,21271u));
+        float roman=sampleWord8(px,motifOrigin+float2(0,13*motifScale),titleScale*.28,84,65,73,80,69,73,32,32);
+        float subScale=titleScale*.32;
+        float2 subOrigin=titleOrigin+float2(0,10*titleScale);
+        float subtitle=sampleWord8(px,subOrigin,subScale,84,72,69,32,71,76,65,83);
+        subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(40*subScale,0),subScale,83,32,79,82,67,72,73,68));
+        subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(80*subScale,0),subScale,32,80,82,79,84,79,67,79));
+        subtitle=max(subtitle,sampleGlyph(px,subOrigin+float2(120*subScale,0),subScale,76));
+        sdr=lerp(sdr,float3(.93,.88,.75),title*titleAlpha);
+        sdr=lerp(sdr,float3(.72,.82,.74),max(subtitle,roman)*titleAlpha);
+        sdr=lerp(sdr,colAmber,motif*titleAlpha*.85);
+    }
+
+    // A limited first-party Traditional Chinese numeral set paired with Roman
+    // act numbering, shown with narrative captions only in the full film.
+    if (hudMode != 2u && gDuration > 359.0 && gFilmTime < 351.0 && gCaptionStyle.x > .01)
+    {
+        uint act = (gFilmTime < 45) ? 0u : (gFilmTime < 100) ? 1u : (gFilmTime < 150) ? 2u :
+                   (gFilmTime < 195) ? 3u : (gFilmTime < 245) ? 4u : (gFilmTime < 275) ? 5u : 6u;
+        static const uint numeral[7] = {19968u,20108u,19977u,22235u,20116u,20845u,19971u};
+        float sc = max(1.0,lbSize.y/500.0);
+        float2 at = lbMin + lbSize*float2(.075,.105);
+        if (showOverlay && hudMode == 0u) {
+            float uiScale=clamp(floor(res.y/540.0),1.0,3.0);
+            at=float2(lbMin.x+lbSize.x*.94-60.0*sc,max(lbMin.y+lbSize.y*.35,148.0*uiScale));
+        }
+        float glyph = sampleGlyph(px,at,sc*1.4,numeral[act]);
+        float2 romanAt = at + float2(21*sc,3*sc);
+        float roman = sampleWord4(px,romanAt,sc,65u,67u,84u,32u);
+        uint first = (act >= 4u) ? 86u : 73u;
+        uint second = (act == 1u || act == 2u || act == 5u || act == 6u) ? 73u : (act == 3u ? 86u : 32u);
+        uint third = (act == 2u || act == 6u) ? 73u : 32u;
+        roman = max(roman,sampleWord4(px,romanAt+float2(20*sc,0),sc,first,second,third,32u));
+        sdr = lerp(sdr,colAmber,max(glyph,roman)*saturate(gCaptionStyle.x)*.82);
+    }
+
     // Contrast-safe Pass-4 Subtitle / Non-Medical End-Card Plate (strictly excluded from CanvasClean & Spout2!)
     if (hudMode != 2u && gCaptionStyle.x > 0.01 && gCaptionStyle.y > 0.5 && res.x >= 400.0 && res.y >= 240.0)
     {
@@ -2374,7 +3418,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         bool  isEndCard = gCaptionStyle.z > 0.5;
         bool  isMidEd   = (gHudFlags & 32u) != 0u;
 
-        float baseScale = clamp(floor(lbSize.y / 420.0), 1.0, 3.0) * (isEndCard ? 1.12 : 1.0);
+        float baseScale = clamp(lbSize.y / 285.0, 1.0, 6.0) * (isEndCard ? .90 : 1.0);
         float fitScale  = (lbSize.x * 0.86) / max(1.0, (float)charCount * 5.0);
         float capScale  = max(1.0, min(baseScale, fitScale));
 
@@ -2385,7 +3429,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         float2 boxSz = float2(textW + 2.0 * padX, textH + 2.0 * padY);
 
         float hudUiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
-        float hudReserve = (showOverlay && hudMode == 0u) ? (52.0 * hudUiScale) : (16.0 * capScale);
+        float hudReserve = (showOverlay && (hudMode == 0u || hudMode == 2u))
+            ? (studioDockShown ? (112.0 * hudUiScale) : (52.0 * hudUiScale))
+            : (studioDockShown ? (68.0 * hudUiScale) : (16.0 * capScale));
         float targetY    = isEndCard
             ? (lbMin.y + lbSize.y * 0.78 - 0.5 * boxSz.y)
             : (lbMin.y + lbSize.y - boxSz.y - 18.0 * capScale);
@@ -2602,6 +3648,9 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     bool isM2 = (gSceneFlags & 2u) != 0u;
     bool isMutiny = (gSceneFlags & 16u) != 0u;
     bool isShow3D = (gSceneFlags & 32u) != 0u;
+    // Keep the full simulation workload, but draw a stable sparse subset so
+    // the velocity field frames the hero instead of veiling its silhouette.
+    if (isMutiny && (instId % 5u) != 0u) return vout;
     if(isM2) {
         uint act=(gSceneFlags>>2u)&3u;
         if(act==0u) {
@@ -2630,11 +3679,36 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     }
     else if (isShow3D)
     {
-        if (!isMote && (instId % 6u) != 0u) return vout;
-        if (isMote)
+        if (gFilmTime >= 338.0)
         {
-            if ((instId % 6u) != 0u) return vout;
-            center = float3(0.0, 3.45, 5.35) + (center - float3(0.0, 7.5, 5.5)) * float3(0.56, 0.14, 0.42);
+            // Enclosed Dawn Bathroom Finale: ZERO indoor rain; ultra-subtle warm dust motes in window sunbeams
+            if (!isMote || (instId % 20u) != 0u) return vout;
+            float h1 = frac((float)instId * 0.6180339);
+            float h2 = frac((float)instId * 0.3819660);
+            float h3 = frac((float)instId * 0.7548776);
+            float driftT = gFilmTime * 0.08 + h1 * 6.2831853;
+            center = float3(
+                lerp(-0.32, 1.42, h1) + 0.06 * sin(driftT),
+                lerp(3.62, 5.02, h2) + 0.05 * cos(driftT * 0.85 + h3 * 4.0),
+                lerp(4.55, 6.28, h3) + 0.05 * sin(driftT * 0.72));
+        }
+        else if (gFilmTime >= 245.0 && gFilmTime < 275.0)
+        {
+            // Codec Hijack eVTOL Hovering Downwash Spray
+            if ((instId % 5u) != 0u) return vout;
+            float a = gFilmTime * 3.4 + instId * 0.031;
+            float r = (1.4 + frac(instId * 0.618) * 3.6) * (0.55 + 0.45 * age01);
+            center = float3(sin(a) * r, 3.85 - age01 * 2.1, -2.0 + cos(a) * r) + center * 0.04;
+            vel = float3(cos(a) * 3.8, -1.6, -sin(a) * 3.8) + vel * 0.10;
+        }
+        else
+        {
+            if (!isMote && (instId % 6u) != 0u) return vout;
+            if (isMote)
+            {
+                if ((instId % 6u) != 0u) return vout;
+                center = float3(0.0, 3.45, 5.35) + (center - float3(0.0, 7.5, 5.5)) * float3(0.56, 0.14, 0.42);
+            }
         }
     }
     float3 relCenter = center - gCamEye;
@@ -2663,7 +3737,7 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     float halfWid;
     float energy = isM2
         ? (.32 * smoothstep(0, 2, min(abs(gFilmTime - 60), abs(gFilmTime - 120))))
-        : (isMutiny ? 0.58 : (isShow3D ? 0.34 : 1.0));
+        : (isMutiny ? 0.36 : (isShow3D ? 0.34 : 1.0));
 
     if (!isMote)
     {
@@ -2685,11 +3759,12 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         axisWide = gCamRight * cs + gCamUp * sn;
         axisLong = -gCamRight * sn + gCamUp * cs;
 
-        float radScale = (isM2 || isShow3D) ? 0.48 : (isMutiny ? 0.54 : 1.0);
+        bool isDawnMote = isShow3D && (gFilmTime >= 338.0);
+        float radScale = isDawnMote ? 0.18 : ((isM2 || isShow3D) ? 0.48 : (isMutiny ? 0.54 : 1.0));
         float desiredRad = (0.0085 + 0.0070 * frac((float)instId * 0.371)) * radScale;
-        halfWid = max(desiredRad, pixelWorldSize * ((isM2 || isShow3D || isMutiny) ? 0.85 : 1.05));
+        halfWid = max(desiredRad, pixelWorldSize * ((isM2 || isShow3D || isMutiny) ? 0.78 : 1.05));
         halfLen = halfWid;
-        energy *= saturate(desiredRad / max(halfWid, 1e-4)) * (((isM2 || isShow3D) ? 0.42 : (isMutiny ? 0.52 : 0.55)) * moteGate);
+        energy *= saturate(desiredRad / max(halfWid, 1e-4)) * ((isDawnMote ? 0.16 : ((isM2 || isShow3D) ? 0.42 : (isMutiny ? 0.52 : 0.55))) * moteGate);
     }
 
     // Smooth lifecycle fade at birth & death so looping/respawning particles never pop

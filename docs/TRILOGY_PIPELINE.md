@@ -38,6 +38,10 @@ The M2 shader counts actual issued ray queries using wave reductions into a GPU 
 
 The 180-second synth has a separate duration-gated branch: rail pulse/minor ninths, warm major aerial movement, then sanctuary/bloom/finale. The 60-second synthesis arithmetic is retained. WASAPI presentation tracking, migration observer, 768-sample seek crossfade, and 576-sample gain ramps remain in place.
 
+## RTX showcase additions
+
+On top of the Z-prepass / NRD / RTXDI pipeline, the DXR shading path adds three ray-marched light-shaft visibility rays per exterior pixel, the RT sky draws last at the far plane and carries the shafts into open sky, and the composite pass binds `[2]=sceneDistance, [3]=sceneHdr, [4]=bloomMip0` for autofocus bokeh depth of field and the lens model. Frame timings in the table below predate these additions and must be re-measured.
+
 ## Candid visual weaknesses and scope boundaries
 
 - **Stylized procedural geometry, not survey-accurate CAD**: Landmarks (Oriental Pearl, Jin Mao, Shanghai Tower, SWFC, Houhai supertall, Taipei 101) and urban blocks are stylized low-to-mid-poly procedural interpretations rather than survey-verified architectural models, photogrammetry, or botanical CT scans. Surrounding mid-rise/high-rise blocks still rely on procedural curtain-wall UV/world-space mullion and room-occupancy patterns rather than bespoke per-building facade textures, street furniture, or vehicular traffic.

@@ -1,0 +1,50 @@
+name: Windows base-only
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  base:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [x64-base-release, x64-base-debug]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native baseline
+        run: ./scripts/build.ps1 -Preset ${{ matrix.preset }}
+      - name: CPU tests and cue provenance
+        run: |
+          $dir = if ('${{ matrix.preset }}' -eq 'x64-base-debug') { 'build/x64-debug' } else { 'build/x64-release' }
+          & "$dir/boo_unit_tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
+          & "$dir/boo_sah_sah.exe" --validate-cues --no-activate
+          if ($LASTEXITCODE -ne 0) { throw 'Cue/manifest validation failed' }
+      - name: Zero optional SDK static imports
+        run: |
+          $dir = if ('${{ matrix.preset }}' -eq 'x64-base-debug') { 'build/x64-debug' } else { 'build/x64-release' }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin not found' }
+          $deps = (& $dumpbin.FullName /dependents "$dir/boo_sah_sah.exe") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
+          Write-Host $deps
+          if ($deps -match '(?i)nvcuda|cudart|cublas|openvino|nvEncodeAPI|Spout|mfreadwrite|assimp|gltf|fbx|usd') { throw 'Forbidden optional import' }
+      - name: Package and verify install, upgrades, rollback, uninstall
+        run: ./scripts/package_release.ps1 -Preset ${{ matrix.preset }} -ExcludeOpenVinoRuntime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.preset }}
+          path: build/dist/BooSahSah-Setup-win64.exe
+          if-no-files-found: error

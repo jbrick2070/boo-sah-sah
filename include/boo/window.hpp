@@ -42,7 +42,56 @@ enum class TransportCommand : uint8_t {
     SelectModeFinale,
     StepBack, StepForward, SeekBack, SeekForward, SeekBackLong, SeekForwardLong,
     RevealPreroll, VolumeDown, VolumeUp, CaptureClean,
+    // Interactive NVIDIA-RTX-style Explore & Studio commands
+    ToggleExploreMode,
+    TogglePracticalLamps,
+    ToggleRtxSplitWipe,
+    ResetInteractiveLighting,
+    HeroPreset1,
+    HeroPreset2,
+    HeroPreset3,
+    HeroPreset4,
+    HeroPreset5,
+    HeroPreset6,
+    CycleAovMode,
+    ResetAovMode,
+    SpawnMarbles,
+    ClearMarbles,
+    SoloEngineRT,
+    SoloEngineTensor,
+    SoloEngineNPU,
+    SoloEngineCUDA,
+    SoloEngineCodec,
+    RestoreAllEngines,
+    NextMusicTrack,
+    PrevMusicTrack,
+    OpenAudioFileDialog,
+    ClearCustomAudio,
     Quit
+};
+
+struct WindowInputSnapshot {
+    float mouseX = 0.0f;
+    float mouseY = 0.0f;
+    float dragRmbDx = 0.0f;
+    float dragRmbDy = 0.0f;
+    float dragLmbDx = 0.0f;
+    float dragLmbDy = 0.0f;
+    float wheelNotches = 0.0f;
+    bool lmbDown = false;
+    bool lmbJustPressed = false;
+    bool rmbDown = false;
+    bool rmbJustPressed = false;
+    bool mmbJustPressed = false;
+    bool altDown = false;
+    bool shiftDown = false;
+    bool hasFocus = false;
+    // Continuous 6-DOF flight axes when window has focus & Explore mode is active
+    float moveForward = 0.0f; // W (+1) / S (-1)
+    float moveRight   = 0.0f; // D (+1) / A (-1)
+    float moveUp      = 0.0f; // E,PgUp (+1) / Q,PgDn,Ctrl (-1)
+    float sunAzimKey  = 0.0f; // ] (+1) / [ (-1) when in Explore mode
+    float sunElevKey  = 0.0f; // Shift+] (+1) / Shift+[ (-1)
 };
 
 class AppWindow {
@@ -66,8 +115,14 @@ public:
     bool pumpMessages();
 
     bool popCommand(TransportCommand& outCmd);
+    bool popDroppedFile(std::wstring& outPath);
+    void onDroppedFileFromWndProc(std::wstring path);
     void setTitle(const std::string& utf8Title);
     void toggleBorderlessFullscreen();
+    void showGraphicsFailure(const std::string& reason);
+    bool paintGraphicsFailureFromWndProc();
+    void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
+    void fitFullscreenToMonitor();
 
     HWND hwnd() const noexcept { return hwnd_; }
     uint32_t clientWidth() const noexcept { return clientWidth_; }
@@ -79,6 +134,14 @@ public:
     void pushCommandFromWndProc(TransportCommand cmd);
     void onResizeFromWndProc(uint32_t w, uint32_t h, bool minimized);
 
+    void setExploreKeyCapture(bool enabled) noexcept { exploreKeyCapture_ = enabled; }
+    bool exploreKeyCapture() const noexcept { return exploreKeyCapture_; }
+    WindowInputSnapshot consumeInputSnapshot() noexcept;
+    void onMouseButtonFromWndProc(int button, bool down, int x, int y);
+    void onMouseMoveFromWndProc(int x, int y);
+    void onMouseWheelFromWndProc(int delta);
+    void onFocusLostFromWndProc() noexcept;
+
 private:
     HWND hwnd_ = nullptr;
     uint32_t clientWidth_ = 1920;
@@ -86,8 +149,24 @@ private:
     bool fullscreen_ = false;
     bool minimized_ = false;
     bool resized_ = false;
+    bool exploreKeyCapture_ = false;
+    int lastMouseX_ = 0;
+    int lastMouseY_ = 0;
+    bool hasMousePos_ = false;
+    bool lmbDown_ = false;
+    bool rmbDown_ = false;
+    bool lmbJustPressed_ = false;
+    bool rmbJustPressed_ = false;
+    bool mmbJustPressed_ = false;
+    float accumRmbDx_ = 0.0f;
+    float accumRmbDy_ = 0.0f;
+    float accumLmbDx_ = 0.0f;
+    float accumLmbDy_ = 0.0f;
+    float accumWheel_ = 0.0f;
     int windowedRect_[4] = {100, 100, 1380, 820};
     std::deque<TransportCommand> commandQueue_;
+    std::deque<std::wstring> droppedFiles_;
+    std::wstring graphicsFailureText_;
 };
 
 } // namespace boo

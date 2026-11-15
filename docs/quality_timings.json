@@ -1,0 +1,287 @@
+{
+  "date": "2026-11-12",
+  "adapter": "NVIDIA GeForce RTX 5080 Laptop GPU (16 GB VRAM, Driver 621.14, DXR Tier 1.2)",
+  "baseline_commit": "3478b3c",
+  "playback_window_seconds": 3,
+  "measure": "D3D12 GPU timestamp milliseconds; native preset canvas (balanced=1920x1080, showcase=2560x1440), 2560x1440 presentation window, sequential runs with --no-activate",
+  "rows": [
+    {
+      "preset": "balanced",
+      "seconds": 36,
+      "before_p50": 2.66472,
+      "before_p95": 3.02043,
+      "after_p50": 3.03538,
+      "after_p95": 3.67778,
+      "before_frames": 360,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 95,
+      "before_p50": 5.06451,
+      "before_p95": 5.43623,
+      "after_p50": 3.10326,
+      "after_p95": 3.69832,
+      "before_frames": 359,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 175,
+      "before_p50": 3.57779,
+      "before_p95": 3.90061,
+      "after_p50": 4.30787,
+      "after_p95": 5.03927,
+      "before_frames": 359,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 225,
+      "before_p50": 2.76378,
+      "before_p95": 3.10577,
+      "after_p50": 3.16547,
+      "after_p95": 3.62961,
+      "before_frames": 359,
+      "after_frames": 167,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 260,
+      "before_p50": null,
+      "before_p95": null,
+      "after_p50": 2.37491,
+      "after_p95": 2.84031,
+      "before_frames": null,
+      "after_frames": 152,
+      "after_peak_vram_mib": 1142.17,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 275,
+      "before_p50": 7.73877,
+      "before_p95": 8.86038,
+      "after_p50": 4.11773,
+      "after_p95": 4.72694,
+      "before_frames": 346,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 318,
+      "before_p50": 7.81827,
+      "before_p95": 8.92867,
+      "after_p50": 4.10336,
+      "after_p95": 4.70164,
+      "before_frames": 341,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 342,
+      "before_p50": 2.67176,
+      "before_p95": 3.03054,
+      "after_p50": 4.55197,
+      "after_p95": 5.70218,
+      "before_frames": 360,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "seconds": 355,
+      "before_p50": 2.91024,
+      "before_p95": 3.25464,
+      "after_p50": 4.4753,
+      "after_p95": 5.04325,
+      "before_frames": 359,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 36,
+      "before_p50": 3.09203,
+      "before_p95": 3.36315,
+      "after_p50": 4.90086,
+      "after_p95": 5.59531,
+      "before_frames": 359,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 95,
+      "before_p50": 7.08898,
+      "before_p95": 8.19071,
+      "after_p50": 4.99626,
+      "after_p95": 5.53982,
+      "before_frames": 358,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 175,
+      "before_p50": 4.232,
+      "before_p95": 4.60468,
+      "after_p50": 6.6761,
+      "after_p95": 7.28973,
+      "before_frames": 359,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 225,
+      "before_p50": 3.58406,
+      "before_p95": 3.89588,
+      "after_p50": 5.3264,
+      "after_p95": 6.05312,
+      "before_frames": 359,
+      "after_frames": 166,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 260,
+      "before_p50": null,
+      "before_p95": null,
+      "after_p50": 3.93581,
+      "after_p95": 4.46099,
+      "before_frames": null,
+      "after_frames": 153,
+      "after_peak_vram_mib": 1510.05,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 275,
+      "before_p50": 9.97214,
+      "before_p95": 10.977,
+      "after_p50": 6.20179,
+      "after_p95": 6.81575,
+      "before_frames": 278,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 318,
+      "before_p50": 11.1409,
+      "before_p95": 11.7717,
+      "after_p50": 6.34806,
+      "after_p95": 7.05161,
+      "before_frames": 257,
+      "after_frames": 170,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 342,
+      "before_p50": 3.22186,
+      "before_p95": 3.52871,
+      "after_p50": 7.56739,
+      "after_p95": 8.19055,
+      "before_frames": 359,
+      "after_frames": 169,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "seconds": 355,
+      "before_p50": 3.62538,
+      "before_p95": 3.96657,
+      "after_p50": 7.42659,
+      "after_p95": 8.70403,
+      "before_frames": 359,
+      "after_frames": 168,
+      "after_peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    }
+  ],
+  "hero_10s_camera_move": [
+    {
+      "preset": "balanced",
+      "window": "342.0s -> 352.0s (10s Dawn Bathroom camera move)",
+      "p50_ms": 4.5744,
+      "p95_ms": 5.27534,
+      "frames": 551,
+      "peak_vram_mib": 1123.66,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "window": "342.0s -> 352.0s (10s Dawn Bathroom camera move)",
+      "p50_ms": 7.28768,
+      "p95_ms": 8.44443,
+      "frames": 560,
+      "peak_vram_mib": 1491.54,
+      "quality_downgrades": 0
+    }
+  ],
+  "interactive_explore_nrd": [
+    {
+      "preset": "balanced",
+      "explore_preset": 1,
+      "label": "Preset 1 Dawn Bathroom Wide (NRD Convergence)",
+      "p50_ms": 2.90522,
+      "p95_ms": 3.29743,
+      "frames": 173,
+      "peak_vram_mib": 1124.22,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "balanced",
+      "explore_preset": 2,
+      "label": "Preset 2 CNC Faucet & Basin Macro (NRD Convergence)",
+      "p50_ms": 3.73874,
+      "p95_ms": 4.67725,
+      "frames": 173,
+      "peak_vram_mib": 1124.22,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "explore_preset": 1,
+      "label": "Preset 1 Dawn Bathroom Wide (NRD Convergence)",
+      "p50_ms": 4.70669,
+      "p95_ms": 5.20013,
+      "frames": 174,
+      "peak_vram_mib": 1492.1,
+      "quality_downgrades": 0
+    },
+    {
+      "preset": "showcase",
+      "explore_preset": 2,
+      "label": "Preset 2 CNC Faucet & Basin Macro (NRD Convergence)",
+      "p50_ms": 6.23022,
+      "p95_ms": 7.11805,
+      "frames": 175,
+      "peak_vram_mib": 1492.1,
+      "quality_downgrades": 0
+    }
+  ]
+}

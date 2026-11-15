@@ -102,6 +102,10 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
         else if (fullKey == "audio.mute") parseBoolVal(val, ioSettings.mute);
         else if (fullKey == "audio.master_volume") ioSettings.masterVolume = static_cast<float>(std::atof(val.c_str()));
         else if (fullKey == "audio.force_silent_clock") parseBoolVal(val, ioSettings.forceSilentClock);
+        else if (fullKey == "audio.audio_file" || fullKey == "audio.music_file") {
+            const std::string af = unquoteTomlString(val);
+            if (!af.empty()) ioSettings.audioInputPath = af;
+        }
         else if (fullKey == "hardware.enable_signal_hijack") parseBoolVal(val, ioSettings.enableSignalHijack);
         else if (fullKey == "hardware.disable_rt") parseBoolVal(val, ioSettings.disableRT);
         else if (fullKey == "hardware.disable_cuda") parseBoolVal(val, ioSettings.disableCUDA);
@@ -215,6 +219,8 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.injectVramPressure = true;
         } else if (a == "--inject-npu-timeout") {
             ioSettings.injectNpuTimeout = true;
+        } else if (a == "--inject-device-lost") {
+            ioSettings.injectDeviceLost = true;
         } else if (a == "--enable-spout") {
             ioSettings.enableSpout = true;
         } else if (a == "--disable-spout") {
@@ -225,6 +231,9 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
         } else if (a == "--media-input") {
             const auto* v = requireNext(i, a); if (!v) return false;
             ioSettings.mediaInputPath = *v;
+        } else if (a == "--audio-file" || a == "--music") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.audioInputPath = *v;
         } else if (a == "--camera-input") {
             ioSettings.enableCameraInput = true;
         } else if (a == "--inject-media-fail") {
@@ -275,6 +284,12 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.motionScale = 0.35f;
         } else if (a == "--legacy-m0-visual") {
             ioSettings.legacyM0Visual = true;
+        } else if (a == "--explore") {
+            ioSettings.startInExploreMode = true;
+        } else if (a == "--explore-preset") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.startInExploreMode = true;
+            ioSettings.initialExplorePreset = static_cast<uint32_t>(std::clamp(std::atoi(v->c_str()), 1, 6));
         } else {
             if (outError) *outError = "Unrecognized command-line argument: " + a;
             return false;
@@ -298,9 +313,12 @@ std::string buildCliHelpText() {
         "  --captions / --no-captions  Toggle HUD lower-third captions (default: on)\n"
         "  --reduced-flash             Photosensitivity-safe zero-pulse lighting envelope\n"
         "  --reduced-motion            Dampen orbital camera excursion (motion_scale=0.35)\n"
+        "  --explore                   Start in interactive RTX Explore studio mode\n"
+        "  --explore-preset <1..6>     Start at hero camera preset (1=Dawn Wide, 2=Faucet Macro, 3=Calathea, 4=Orchid, 5=Cathedral, 6=Sanctuary)\n"
         "  --legacy-m0-visual          Force Milestone M0 test visual renderer\n"
         "  --loop                      Loop timeline playback\n"
         "  --mute                      Start audio muted\n"
+        "  --audio-file <path>         Load custom MP3/WAV/FLAC/M4A soundtrack (or drag & drop onto window)\n"
         "  --force-silent-clock        Use monotonic QPC silence-fallback clock\n\n"
         "Hardware Fault Injection & Overrides (SPEC_v4 Section 8.3):\n"
         "  --disable-rt                Disable DXR raytracing\n"
@@ -313,6 +331,7 @@ std::string buildCliHelpText() {
         "  --inject-shader-fail        Force fallback to embedded precompiled safe shader\n"
         "  --inject-audio-fail         Simulate missing audio endpoint\n"
         "  --inject-npu-timeout        Simulate NPU inference stall/timeout -> graceful failover\n"
+        "  --inject-device-lost        Exercise one bounded graphics teardown/recreate (safe simulation)\n"
         "  --enable-spout              Publish clean 16:9 CanvasClean via Spout2 (zero HUD)\n"
         "  --spout-name <name>         Spout2 sender name (default: BooSahSah_Clean)\n"
         "  --media-input <path>        Opt-in local video file for Signal Hijack (1280x720 NV12 cap)\n"
@@ -332,7 +351,9 @@ std::string buildCliHelpText() {
         "  --headless-probe            Probe capabilities, validate cues, and exit\n"
         "  --export-diagnostics <json> Write local Hardware Orchestra diagnostics JSON\n"
         "  --log-file <path>           Write structured log file\n\n"
-        "Keyboard Transport (Noninteractive Demoscene Controls):\n"
+        "Keyboard & Interactive RTX Showcase Controls:\n"
+        "  F / RMB-Drag: Toggle Interactive Explore 6-DOF Camera (WASDQE + Mouse + Wheel FOV + Gamepad)\n"
+        "  F2-F7: Hero Macro Presets | Alt+LMB Drag / [ ]: Live Sun Time-of-Day | J: Lamps | H: Draggable RTX Split | F8: Reset\n"
         "  ,/.: Paused frame step | Left/Right: Seek 2s (Shift: 10s) | G: Reveal pre-roll\n"
         "  -/=: Volume | F12: Clean BMP + JSON | Tab: Full/Compact/A-B/Off | K: Captions\n"
         "  Space: Play/Pause | R: Restart | N/P: Next/Prev Act | L: Loop | M: Mute\n"

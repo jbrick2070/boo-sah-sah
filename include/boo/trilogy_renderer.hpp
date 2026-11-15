@@ -8,12 +8,17 @@ class TrilogyMeshRenderer {
 public:
     explicit TrilogyMeshRenderer(D3D12Context& context);
     ~TrilogyMeshRenderer();
-    bool initialize(bool injectMeshFailure, std::string* error, ShowVisualMode visualMode = ShowVisualMode::M2Trilogy180s);
+    bool initialize(bool injectMeshFailure, std::string* error,
+                    ShowVisualMode visualMode = ShowVisualMode::M2Trilogy180s,
+                    void* tensorTexture = nullptr);
     // Pass target resources must be in PIXEL_SHADER_RESOURCE state on entry and exit.
     bool record(void* commandList, const FrameContext& frame, const M1CameraState& camera,
                 void* hdr, void* distance, uint64_t tensorSrv, uint32_t width, uint32_t height,
                 uint32_t slot, bool raytracing, bool canonical);
     bool hardwareVerified() const;
+    bool nrdActive() const;
+    // 0 = Deterministic Spatial Cross-Bilateral, 1 = NRD REBLUR_DIFFUSE_SPECULAR Motion, 2 = NRD REFERENCE PT Accum
+    uint32_t activeDenoiseMode() const noexcept;
     uint32_t verifiedHits() const;
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;

@@ -21,6 +21,11 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <wrl/client.h>
+#include <wincodec.h>
+#include <psapi.h>
+#include <charconv>
+#include <iomanip>
+#include <sstream>
 
 #include <algorithm>
 #include <cmath>
@@ -501,7 +506,12 @@ bool testNoActivateWindowTransitions() {
         {'R', TransportCommand::Restart}, {'N', TransportCommand::NextAct}, {'P', TransportCommand::PrevAct},
         {'X', TransportCommand::ToggleRtRuntime}, {'C', TransportCommand::ToggleCudaRuntime},
         {'T', TransportCommand::ToggleTensorRuntime}, {'V', TransportCommand::ToggleCodecRuntime},
-        {'A', TransportCommand::CycleAbCompareEngine}
+        {'A', TransportCommand::CycleAbCompareEngine},
+        {'F', TransportCommand::ToggleExploreMode}, {'J', TransportCommand::TogglePracticalLamps},
+        {'H', TransportCommand::ToggleRtxSplitWipe}, {VK_F8, TransportCommand::ResetInteractiveLighting},
+        {VK_F2, TransportCommand::HeroPreset1}, {VK_F3, TransportCommand::HeroPreset2},
+        {VK_F4, TransportCommand::HeroPreset3}, {VK_F5, TransportCommand::HeroPreset4},
+        {VK_F6, TransportCommand::HeroPreset5}, {VK_F7, TransportCommand::HeroPreset6}
     };
     for (const auto& [key, expected] : keys) {
         SendMessageW(window.hwnd(), WM_KEYDOWN, key, 0);
@@ -1575,6 +1585,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(spout.publishedFrameCount() == 1ULL);
 
     // Open independent D3D11 receiver device on matching LUID & read shared Spout2 texture
@@ -1651,6 +1662,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(readReceiverRgba(rxFromHudOff));
     BOO_CHECK(rxFromHudOn == rxFromHudOff);
 
@@ -1663,6 +1675,28 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     BOO_CHECK(d3d.executeSingleCommandListAndWait([&](void* cmdRaw) {
         spout.recordCleanPublish(d3d, cmdRaw, fx.canvasCleanResourceRaw(), fx.canvasWidth(), fx.canvasHeight());
     }, &err));
+    // Force a real publication fence timeout without hanging/resetting hardware.
+    // Its GPU queue wait is released from the CPU once receiver exclusion is checked.
+    Microsoft::WRL::ComPtr<ID3D12Fence> publicationGate;
+    BOO_CHECK(SUCCEEDED(static_cast<ID3D12Device*>(d3d.deviceRaw())->CreateFence(
+        0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&publicationGate))));
+    HANDLE receiverMutex = OpenMutexA(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE,
+        (testName + "_SpoutAccessMutex").c_str());
+    BOO_CHECK(receiverMutex != nullptr);
+    BOO_CHECK(SUCCEEDED(static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw())->Wait(publicationGate.Get(), 1)));
+    const bool timedOut = !spout.completePublish();
+    const uint64_t countAfterTimeout = spout.publishedFrameCount();
+    DWORD receiverWait = WAIT_FAILED;
+    std::thread receiverAttempt([&] {
+        receiverWait = WaitForSingleObject(receiverMutex, 20);
+        if (receiverWait == WAIT_OBJECT_0 || receiverWait == WAIT_ABANDONED) ReleaseMutex(receiverMutex);
+    });
+    receiverAttempt.join();
+    const HRESULT released = publicationGate->Signal(1);
+    CloseHandle(receiverMutex);
+    BOO_CHECK(SUCCEEDED(released));
+    BOO_CHECK(timedOut && countAfterTimeout == 2 && receiverWait == WAIT_TIMEOUT);
+    BOO_CHECK(spout.completePublish());
     BOO_CHECK(readReceiverRgba(rxFromAct3));
     BOO_CHECK(rxFromAct3 != rxFromHudOn);
     BOO_CHECK(spout.publishedFrameCount() == 3ULL);
@@ -1960,14 +1994,395 @@ bool testSignalHijackMediaIngestCameraPrivacyAndFallback() {
     return true;
 }
 
+bool testInteractiveExploreLightingAndNrdConvergence() {
+    using namespace boo;
+
+    D3D12Context d3d;
+    std::string err;
+    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+
+    CueSheet cue;
+    ValidationReport validation;
+    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath("assets/cues/film_360s.json"), cue, validation) && validation.valid);
+
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Balanced);
+    spec.renderWidth = 960;
+    spec.renderHeight = 540;
+
+    M1TaipeiSliceEffect fx(
+        d3d, spec,
+        false, false, false, false, false, false, true, false,
+        ShowVisualMode::FullFilm360s);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+    fx.setDisableRt(false);
+
+    const int64_t bathroomSample = 346LL * 48000LL;
+    auto makeBaseBathroomCtx = [&]() {
+        auto ctx = makeM1TestContext(bathroomSample, 0u);
+        const size_t sceneIdx = findSceneIndexAtSample(cue, bathroomSample);
+        const auto& scene = cue.scenes.at(sceneIdx);
+        ctx.sampleRate = cue.sampleRate;
+        ctx.actIndex = static_cast<uint32_t>(sceneIdx);
+        ctx.actProgress = float(double(bathroomSample - scene.startSample) /
+                                double(std::max<int64_t>(1, scene.endSample - scene.startSample)));
+        ctx.randomSeed = scene.deterministicSeed;
+        ctx.edition = Edition::Family;
+        ctx.qualityPreset = QualityPresetId::Balanced;
+        ctx.showOverlay = false;
+        ctx.hudMode = 3u;
+        ctx.showCaptions = false;
+        ScriptedDirector dir;
+        dir.reset(cue.seed);
+        const auto mood = dir.evaluate(ctx, &scene);
+        ctx.moodIrisAngle = mood.irisAngle;
+        ctx.moodIntensity = mood.lightTension;
+        ctx.moodPaletteAccent = mood.spectralShift;
+        ctx.moodBloomStrength = mood.bloomStrength;
+        ctx.moodCutAccent = mood.cutAccent;
+        return ctx;
+    };
+
+    const FrameContext canonicalCtx = makeBaseBathroomCtx();
+    std::vector<uint8_t> baseA, baseB;
+    std::vector<uint32_t> rgb10A, rgb10B;
+    uint32_t cw = 0, ch = 0;
+
+    // 1. Canonical baseline render at 346.0 s (Dawn Bathroom)
+    fx.resetTo(346.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(canonicalCtx, baseA, cw, ch, &err, &rgb10A));
+    BOO_CHECK(cw == 960u && ch == 540u);
+    uint64_t nonFinite = 0;
+    BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+
+    // 2. Interactive 6-DOF Hero Preset 2 (CNC Faucet Macro) + NRD / Progressive PT accumulation (8 SPP)
+    FrameContext macroCtx = canonicalCtx;
+    macroCtx.interactive.exploreActive = true;
+    macroCtx.interactive.blendWeight = 1.0f;
+    macroCtx.interactive.activePreset = 2u;
+    macroCtx.interactive.eye[0] = 0.05f;    macroCtx.interactive.eye[1] = 3.83f;    macroCtx.interactive.eye[2] = 5.76f;
+    macroCtx.interactive.target[0] = -0.18f; macroCtx.interactive.target[1] = 3.67f; macroCtx.interactive.target[2] = 6.34f;
+    macroCtx.interactive.fovYRadians = 0.44f;
+    macroCtx.interactive.accumulate = true;
+
+    std::vector<uint8_t> macroSpp1, macroSpp8;
+    std::vector<uint32_t> macroRgb10Spp8;
+    for (uint32_t s = 0; s < 8u; ++s) {
+        macroCtx.presentationFrame = s;
+        macroCtx.interactive.accumFrame = s;
+        std::vector<uint8_t> cur;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(
+            macroCtx, cur, cw, ch, &err, (s == 7u) ? &macroRgb10Spp8 : nullptr));
+        BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+        if (s == 0u) macroSpp1 = std::move(cur);
+        if (s == 7u) macroSpp8 = std::move(cur);
+    }
+    BOO_CHECK(computeMeanAbsDiffRgb01(macroSpp1, baseA) > 0.025);
+    BOO_CHECK(macroSpp8 != macroSpp1);
+    BOO_CHECK(computeMeanAbsDiffRgb01(macroSpp8, macroSpp1) < 0.085);
+
+    // 3. Pass-4 Studio Bar + Draggable Split Curtain isolation (must never contaminate Pass-3 CanvasClean!)
+    HudTelemetrySnapshot hud{};
+    hud.filmTimeSeconds = 346.0;
+    hud.durationSeconds = 360.0;
+    hud.fps = 60.0f;
+    hud.canvasWidth = 960;
+    hud.canvasHeight = 540;
+    hud.swapchainBits = 8;
+
+    FrameContext wipeLeft = macroCtx;
+    wipeLeft.showOverlay = true;
+    wipeLeft.hudMode = 2u;
+    wipeLeft.interactive.abSplitRatio = 0.26f;
+    wipeLeft.interactive.accumFrame = 7u;
+    fx.setAbCompareEngine(AbCompareEngine::RT);
+
+    std::vector<uint8_t> presWipe26, presWipe74, verifyClean;
+    std::vector<uint32_t> verifyRgb10;
+    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(wipeLeft, hud, 960, 540, presWipe26, &err));
+    BOO_CHECK(fx.readLastRenderedCanvasForTest(verifyClean, cw, ch, &err, &verifyRgb10));
+
+    FrameContext wipeRight = wipeLeft;
+    wipeRight.interactive.abSplitRatio = 0.74f;
+    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(wipeRight, hud, 960, 540, presWipe74, &err));
+    if (!d3d.isWarp()) {
+        BOO_CHECK(presWipe26 != presWipe74);
+    }
+
+    // 4. Live Sun Time-of-Day Override + RTXDI ReSTIR Practical Lamps Toggle at Midnight
+    FrameContext sunGolden = canonicalCtx;
+    sunGolden.interactive.exploreActive = true;
+    sunGolden.interactive.blendWeight = 1.0f;
+    sunGolden.interactive.eye[0] = 0.34f;    sunGolden.interactive.eye[1] = 4.02f;    sunGolden.interactive.eye[2] = 5.12f;
+    sunGolden.interactive.target[0] = -0.18f; sunGolden.interactive.target[1] = 3.88f; sunGolden.interactive.target[2] = 6.32f;
+    sunGolden.interactive.fovYRadians = 0.56f;
+    sunGolden.interactive.sunOverride = true;
+    sunGolden.interactive.sunDir[0] = 0.80f; sunGolden.interactive.sunDir[1] = 0.34f; sunGolden.interactive.sunDir[2] = -0.49f;
+    sunGolden.interactive.sunScale = 1.05f;
+
+    FrameContext sunNightLampsOn = sunGolden;
+    sunNightLampsOn.interactive.sunDir[0] = 0.80f; sunNightLampsOn.interactive.sunDir[1] = -0.28f; sunNightLampsOn.interactive.sunDir[2] = -0.49f;
+    sunNightLampsOn.interactive.sunScale = 1.0f;
+    sunNightLampsOn.interactive.lampsOff = false;
+
+    FrameContext sunNightLampsOff = sunNightLampsOn;
+    sunNightLampsOff.interactive.lampsOff = true;
+
+    std::vector<uint8_t> imgGolden, imgNightOn, imgNightOff;
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunGolden, imgGolden, cw, ch, &err));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunNightLampsOn, imgNightOn, cw, ch, &err));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(sunNightLampsOff, imgNightOff, cw, ch, &err));
+
+    const auto mGolden = computeRgba8LumaMetrics(imgGolden);
+    const auto mNightOn = computeRgba8LumaMetrics(imgNightOn);
+    const auto mNightOff = computeRgba8LumaMetrics(imgNightOff);
+    BOO_CHECK(computeMeanAbsDiffRgb01(imgGolden, imgNightOn) > 0.015);
+    BOO_CHECK(mGolden.meanLuma > mNightOn.meanLuma);
+    if (!d3d.isWarp()) {
+        BOO_CHECK(mNightOn.meanLuma > mNightOff.meanLuma + 0.002);
+        BOO_CHECK(computeMeanAbsDiffRgb01(imgNightOn, imgNightOff) > 0.003);
+    }
+
+    // 5. Live Motion NRD::REBLUR_DIFFUSE_SPECULAR + Dynamic Ray-Traced Marbles RTX Physics Spheres
+    {
+        const bool hadNrdStationary = (!d3d.isWarp() && fx.activeDenoiseMode() == 2u);
+
+        FrameContext noMarblesCtx = macroCtx;
+        noMarblesCtx.interactive.accumulate = false;
+        noMarblesCtx.interactive.accumFrame = 0u;
+        noMarblesCtx.interactive.marbleCount = 0u;
+        std::vector<uint8_t> imgNoMarbles;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(noMarblesCtx, imgNoMarbles, cw, ch, &err));
+        BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+        if (hadNrdStationary) {
+            BOO_CHECK(fx.activeDenoiseMode() == 1u); // Seamless REBLUR motion denoiser engagement!
+        }
+
+        FrameContext marblesMotionCtx = noMarblesCtx;
+        marblesMotionCtx.interactive.marbleCount = 6u;
+        static constexpr uint32_t kTestMarbleMats[6] = {3u, 4u, 35u, 8u, 23u, 31u};
+        for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+            const float ang = static_cast<float>(mIdx) * 1.0471976f;
+            const float rad = 0.021f;
+            const float px = -0.180f + std::cos(ang) * 0.145f;
+            const float pz =  6.245f + std::sin(ang) * 0.105f;
+            const float py =  3.620f + rad;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][0] = px;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][1] = py;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][2] = pz;
+            marblesMotionCtx.interactive.marblePosRad[mIdx][3] = rad;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][0] = px - 0.015f;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][1] = py;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][2] = pz - 0.010f;
+            marblesMotionCtx.interactive.marblePrevPos[mIdx][3] = 0.0f;
+            marblesMotionCtx.interactive.marbleRotQuat[mIdx][3] = 1.0f;
+            marblesMotionCtx.interactive.marbleMat[mIdx] = kTestMarbleMats[mIdx];
+        }
+
+        std::vector<uint8_t> imgMarblesMotion;
+        for (uint32_t f = 0; f < 4u; ++f) {
+            marblesMotionCtx.presentationFrame = 20u + f;
+            marblesMotionCtx.interactive.accumFrame = f;
+            marblesMotionCtx.interactive.eye[0] = 0.05f + 0.018f * static_cast<float>(f);
+            for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+                marblesMotionCtx.interactive.marblePrevPos[mIdx][0] = marblesMotionCtx.interactive.marblePosRad[mIdx][0];
+                marblesMotionCtx.interactive.marblePosRad[mIdx][0] += 0.012f;
+            }
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(marblesMotionCtx, imgMarblesMotion, cw, ch, &err));
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+            if (hadNrdStationary) {
+                BOO_CHECK(fx.activeDenoiseMode() == 1u);
+            }
+        }
+        BOO_CHECK(computeMeanAbsDiffRgb01(imgMarblesMotion, imgNoMarbles) > 0.004);
+
+        // Seamless hand-off back to NRD::REFERENCE when camera & marbles settle
+        FrameContext marblesSettled = marblesMotionCtx;
+        marblesSettled.interactive.accumulate = true;
+        marblesSettled.interactive.accumFrame = 0u;
+        for (uint32_t mIdx = 0; mIdx < 6u; ++mIdx) {
+            marblesSettled.interactive.marblePrevPos[mIdx][0] = marblesSettled.interactive.marblePosRad[mIdx][0];
+        }
+        std::vector<uint8_t> imgMarblesRef;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(marblesSettled, imgMarblesRef, cw, ch, &err));
+        if (hadNrdStationary) {
+            BOO_CHECK(fx.activeDenoiseMode() == 2u);
+        }
+    }
+
+    // 6. 8-Mode Live Buffer / AOV Inspection (Base Color, Normal, ORM, Direct, GI, Refl/Refr, Ray Heatmap)
+    {
+        FrameContext aovCtx = macroCtx;
+        aovCtx.interactive.accumulate = false;
+        aovCtx.interactive.accumFrame = 0u;
+
+        std::array<std::vector<uint8_t>, 8> aovCanvases{};
+        for (uint32_t mode = 1u; mode <= 7u; ++mode) {
+            aovCtx.interactive.aovMode = mode;
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(aovCtx, aovCanvases[mode], cw, ch, &err));
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &err) && nonFinite == 0);
+            const auto mAov = computeRgba8LumaMetrics(aovCanvases[mode]);
+            BOO_CHECK(mAov.meanLuma > 0.008);
+        }
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[1], aovCanvases[2]) > 0.03);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[2], aovCanvases[3]) > 0.03);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[5], aovCanvases[6]) > 0.015);
+        BOO_CHECK(computeMeanAbsDiffRgb01(aovCanvases[7], aovCanvases[1]) > 0.03);
+
+        // Verify Pass-4 AOV banner renders on presented output while keeping Pass-3 CanvasClean pure
+        aovCtx.showOverlay = true;
+        aovCtx.hudMode = 1u;
+        aovCtx.interactive.aovMode = 2u;
+        std::vector<uint8_t> aovPres, aovCleanAfterPres;
+        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(aovCtx, hud, 960, 540, aovPres, &err));
+        BOO_CHECK(fx.readLastRenderedCanvasForTest(aovCleanAfterPres, cw, ch, &err));
+        BOO_CHECK(aovCleanAfterPres == aovCanvases[2]);
+        BOO_CHECK(aovPres != aovCleanAfterPres);
+    }
+
+    // 7. Return to Canonical Film Mode -> MUST match baseline frame bit-for-bit (`rgb10A == rgb10B`)!
+    fx.resetTo(346.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(canonicalCtx, baseB, cw, ch, &err, &rgb10B));
+    BOO_CHECK(rgb10A == rgb10B && baseA == baseB);
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
+
+// Live audio drive must reach the image (mesh emissives via the packed scene DWORD, composite lens pump
+// via gAudioKick), stay deterministic for a given drive, and leave no state behind that could change a
+// later zero-drive render (seek determinism). Captures and the other gates always run with zero drive.
+bool testAudioReactiveDriveReachesCanvasDeterministically() {
+    using namespace boo;
+    D3D12Context d3d;
+    std::string err;
+    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    spec.renderWidth = 960;
+    spec.renderHeight = 540;
+    M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, ShowVisualMode::FullFilm360s);
+    BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+
+    // 05:20 night skyline: lit curtain-wall windows, jade accents and light shafts are all in frame.
+    auto ctxZero = makeM1TestContext(15360000LL, 6u);
+    ctxZero.randomSeed = 307001ULL;
+    ctxZero.edition = Edition::Family;
+    ctxZero.showOverlay = false;
+    ctxZero.hudMode = 3;
+    auto ctxFull = ctxZero;
+    ctxFull.audioReactive.low = 1.0f;
+    ctxFull.audioReactive.mid = 1.0f;
+    ctxFull.audioReactive.high = 1.0f;
+    ctxFull.audioReactive.beat = 1.0f;
+    ctxFull.audioReactive.level = 1.0f;
+    auto ctxBeat = ctxZero;
+    ctxBeat.audioReactive.beat = 1.0f;
+
+    uint32_t w = 0, h = 0;
+    std::vector<uint8_t> rgba;
+    std::vector<uint32_t> zero10, full10, fullRepeat10, beat10, zeroAgain10;
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxZero, rgba, w, h, &err, &zero10));
+    BOO_CHECK(w == 960 && h == 540);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxFull, rgba, w, h, &err, &full10));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxFull, rgba, w, h, &err, &fullRepeat10));
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxBeat, rgba, w, h, &err, &beat10));
+    fx.resetTo(0.0);
+    BOO_CHECK(fx.renderHeadlessCanvasForTest(ctxZero, rgba, w, h, &err, &zeroAgain10));
+
+    BOO_CHECK(full10 != zero10);        // band + beat drive reaches the canvas
+    BOO_CHECK(beat10 != zero10);        // beat alone reaches the canvas (composite lens pump)
+    BOO_CHECK(full10 == fullRepeat10);  // deterministic for a given drive
+    BOO_CHECK(zeroAgain10 == zero10);   // no residual state leaks into later zero-drive renders
+
+    fx.shutdown();
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
+
+#include "film_capture_gate.hpp"
+#include "film_stress_gate.hpp"
+
 } // namespace
+
+bool testQuarantinedGpuRetirement() {
+    using Microsoft::WRL::ComPtr;
+    boo::D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 64, 64, true, true, &error));
+    auto* device = static_cast<ID3D12Device*>(d3d.deviceRaw());
+    auto* queue = static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw());
+    ComPtr<ID3D12Fence> gate, marker;
+    BOO_CHECK(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))));
+    BOO_CHECK(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))));
+    BOO_CHECK(SUCCEEDED(queue->Wait(gate.Get(), 1)));
+    BOO_CHECK(SUCCEEDED(queue->Signal(marker.Get(), 1)));
+    BOO_CHECK(d3d.injectSynchronizationFailureForTest());
+    BOO_CHECK(!d3d.checkDeviceHealthy() && !d3d.waitForGpu());
+    BOO_CHECK(marker->GetCompletedValue() == 0);
+    // A healthy queue is deliberately blocked. Teardown must drain it despite
+    // quarantine, and must not mistake the failure flag for retirement.
+    std::thread releaseGate([gate] { Sleep(50); gate->Signal(1); });
+    const bool drained = d3d.retireGpuForShutdown();
+    releaseGate.join();
+    BOO_CHECK(drained && marker->GetCompletedValue() == 1);
+    BOO_CHECK(SUCCEEDED(device->GetDeviceRemovedReason()));
+    BOO_CHECK(!d3d.checkDeviceHealthy()); // Drain never un-quarantines allocators.
+    BOO_CHECK(d3d.retireGpuForShutdown()); // Idempotent.
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    d3d.shutdown();
+    return true;
+}
 
 int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
-    if(argc>1 && std::string(argv[1])=="--trilogy-captures") {runTest("M2CapturesAndDeterminism",testM2CapturesAndDeterminism);return gTestsFailed?1:0;}
+    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, interactiveCaptures = false, validationCaptures = false, filmStress = false, lifecycleTests = false;
+    for (int arg = 1; arg < argc; ++arg) {
+        const std::string option = argv[arg];
+        if (option == "--no-activate") noActivate = true;
+        else if (option == "--require-debug-layer") gRequireDebugLayer = true;
+        else if (option == "--trilogy-captures") trilogyCaptures = true;
+        else if (option == "--film-captures") filmCaptures = true;
+        else if (option == "--hero-video-capture") heroVideoCapture = true;
+        else if (option == "--interactive-captures") interactiveCaptures = true;
+        else if (option == "--validation-captures") validationCaptures = true;
+        else if (option == "--film-stress") filmStress = true;
+        else if (option == "--lifecycle-tests") lifecycleTests = true;
+        else if (option == "--capture-dir" && arg + 1 < argc) gFilmCaptureDirectory = argv[++arg];
+        else if (option == "--stress-iterations" && arg + 1 < argc) {
+            const std::string value = argv[++arg];
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), gFilmStressIterations);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || gFilmStressIterations < 200 || gFilmStressIterations > 100000) {
+                std::cerr << "--stress-iterations must be an integer in [200, 100000].\n"; return 2;
+            }
+        }
+        else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
+    }
+    if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(filmStress) + int(lifecycleTests) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
+    if ((trilogyCaptures || filmCaptures || heroVideoCapture || interactiveCaptures || validationCaptures || filmStress || lifecycleTests) && !noActivate) {
+        std::cerr << "Automated integration gates require --no-activate.\n";
+        return 2;
+    }
+    if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
+    if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", testHeroVideoCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (interactiveCaptures) { runTest("InteractiveShowcaseCaptures", testInteractiveShowcaseCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (validationCaptures) { runTest("ValidationShowcaseCaptures", testValidationShowcaseCaptures); return gTestsFailed ? 1 : 0; }
+    if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }
+    if (lifecycleTests) {
+        runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);
+        runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
+        return gTestsFailed ? 1 : 0;
+    }
     runTest("CapabilityProbeHonestyAndPermutations", testCapabilityProbeHonestyAndPermutations);
     runTest("D3D12HeadlessAndShaderFallback", testD3D12HeadlessAndShaderFallback);
+    runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);
     runTest("AudioAndSilentFallbackClockIntegration", testAudioAndSilentFallbackClockIntegration);
     runTest("WasapiPresentationClockAndMigrationLifecycle", testWasapiPresentationClockAndMigrationLifecycle);
     runTest("AdHocNumericalBenchmarksVerification", testAdHocNumericalBenchmarksVerification);
@@ -1976,10 +2391,12 @@ int main(int argc, char** argv) {
     runTest("StandaloneHardwareSolosRtCudaTensor", testStandaloneHardwareSolosRtCudaTensor);
     runTest("MadameNNpuOpenVinoAndSoloNpuFailover", testMadameNNpuOpenVinoAndSoloNpuFailover);
     runTest("FullFilm360sRevealsEditionsAndM7CombinedFailover", testFullFilm360sRevealsEditionsAndM7CombinedFailover);
+    runTest("AudioReactiveDriveReachesCanvasDeterministically", testAudioReactiveDriveReachesCanvasDeterministically);
     runTest("Spout2CleanSenderAndLiveD3d11Receiver", testSpout2CleanSenderAndLiveD3d11Receiver);
     runTest("SignalHijackMediaIngestCameraPrivacyAndFallback", testSignalHijackMediaIngestCameraPrivacyAndFallback);
+    runTest("InteractiveExploreLightingAndNrdConvergence", testInteractiveExploreLightingAndNrdConvergence);
     runTest("NativeCanvasModesAndCapture", testNativeCanvasModesAndCapture);
-    if (argc > 1 && std::string(argv[1]) == "--no-activate") {
+    if (noActivate) {
         runTest("NoActivateWindowTransitions", testNoActivateWindowTransitions);
         runTest("LiveNoActivateSwapchainDeterminism", testLiveNoActivateSwapchainDeterminism);
         runTest("M2LiveNoActivateSwapchainDeterminism", testM2LiveNoActivateSwapchainDeterminism);
