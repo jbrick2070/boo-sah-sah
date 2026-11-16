@@ -72,6 +72,8 @@ Copy-Item -Force (Join-Path $RepoRoot "assets\textures\*.btex") (Join-Path $Stag
 Copy-Item -Force (Join-Path $RepoRoot "assets\models\madame_n_*") (Join-Path $StageDir "assets\models\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\audio\*.mp3") (Join-Path $StageDir "assets\audio\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\cues\*.json") (Join-Path $StageDir "assets\cues\")
+New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\strings") | Out-Null
+Copy-Item -Force (Join-Path $RepoRoot "assets\strings\*.json") (Join-Path $StageDir "assets\strings\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\manifest.json") (Join-Path $StageDir "assets\manifest.json")
 
 # 4. Runtime configuration & quality presets

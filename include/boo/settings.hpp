@@ -45,6 +45,9 @@ struct AppSettings {
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     bool showOverlay = true;
     bool showCaptions = true;
+    // "auto" follows the Windows display language; otherwise a catalog tag such as "ja-JP" or "en-US".
+    std::string language = "auto";
+    std::filesystem::path stringsDir = "assets/strings";
     bool reducedFlash = false;
     float motionScale = 1.0f;
     bool legacyM0Visual = false;

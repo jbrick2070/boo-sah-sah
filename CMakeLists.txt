@@ -388,11 +388,13 @@ add_library(boo_core STATIC
     src/render/nrd_bridge.cpp
     src/render/trilogy_renderer.cpp
     src/render/m1_taipei_slice.cpp
+    src/render/ui_text.cpp
     src/media/media_foundation_input.cpp
     src/integrations/spout_sender.cpp
     src/bench/benchmarks.cpp
     src/app/settings.cpp
     src/app/window.cpp
+    src/app/localization.cpp
     src/app/diagnostics.cpp
     "${M0_FALLBACK_VS_HPP}"
     "${M0_FALLBACK_PS_HPP}"
@@ -420,6 +422,9 @@ target_link_libraries(boo_core PUBLIC
     user32
     gdi32
     shell32
+    d2d1            # localized on-screen text (system fonts only)
+    dwrite
+    windowscodecs
 )
 
 # Stage runtime data directories into build folder for convenient direct launch
@@ -429,6 +434,7 @@ add_custom_target(boo_stage_assets ALL
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/cues" "${CMAKE_BINARY_DIR}/assets/cues"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/strings" "${CMAKE_BINARY_DIR}/assets/strings"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/manifest.json" "${CMAKE_BINARY_DIR}/assets/manifest.json"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${CMAKE_BINARY_DIR}/config"
     DEPENDS boo_shaders
