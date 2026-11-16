@@ -8,11 +8,13 @@
 #include "boo/director.hpp"
 #include "boo/health.hpp"
 #include "boo/json.hpp"
+#include "boo/localization.hpp"
 #include "boo/logging.hpp"
 #include "boo/m1_scene.hpp"
 #include "boo/media_input.hpp"
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
+#include "boo/ui_text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1185,6 +1187,120 @@ bool testAudioReactiveFollowerBeatAndFlashSafety() {
     return true;
 }
 
+bool testUiTextLanguages() {
+    using boo::UiText;
+    BOO_CHECK(boo::uiLanguageCount() == 25);
+    BOO_CHECK(std::string(boo::uiLanguageTag(0)) == "en-US");
+    for (size_t lang = 0; lang < boo::uiLanguageCount(); ++lang) {
+        for (uint32_t id = 0; id < static_cast<uint32_t>(UiText::Count); ++id) {
+            const std::wstring text = boo::uiTextAt(lang, static_cast<UiText>(id));
+            BOO_CHECK(text.size() > 8);
+            // Every translation of the first two strings keeps the product name; the box body keeps the API name.
+            if (id != static_cast<uint32_t>(UiText::GraphicsFailureBody)) BOO_CHECK(text.find(L"BOO SAH SAH") != std::wstring::npos);
+            if (id == static_cast<uint32_t>(UiText::UnsupportedGpuBody)) BOO_CHECK(text.find(L"Direct3D 12") != std::wstring::npos);
+            if (lang > 0) BOO_CHECK(text != boo::uiTextAt(0, static_cast<UiText>(id)));
+        }
+    }
+    // Windows LANGIDs: fr-FR, zh-CN, zh-TW, zh-HK, pt-PT, ar-SA; an unlisted language (Greek) falls back to English.
+    BOO_CHECK(boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x040C) == boo::uiTextAt(1, UiText::UnsupportedGpuTitle));
+    const wchar_t* simplified = boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0804);
+    const wchar_t* traditional = boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0404);
+    BOO_CHECK(simplified != traditional);
+    BOO_CHECK(boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0C04) == traditional);
+    BOO_CHECK(boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0816) == boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0416));
+    BOO_CHECK(boo::uiTextForLanguage(UiText::UnsupportedGpuTitle, 0x0408) == boo::uiTextAt(0, UiText::UnsupportedGpuTitle));
+    BOO_CHECK(boo::uiLanguageIsRightToLeft(0x0401));
+    BOO_CHECK(!boo::uiLanguageIsRightToLeft(0x0409) && !boo::uiLanguageIsRightToLeft(0x0408));
+    return true;
+}
+
+// The string catalogs: every language has every key, protected tokens survive translation, every
+// caption the film can show has a catalog entry, and every HUD label fits its box in every language.
+bool testUiStringCatalogs() {
+    using namespace boo;
+    const std::filesystem::path dir = "assets/strings";
+    const std::vector<std::string> languages = uiAvailableLanguages(dir);
+    BOO_CHECK(languages.size() == 25);
+
+    UiStrings catalog;
+    BOO_CHECK(catalog.load(dir, "en-US"));
+    BOO_CHECK(!catalog.active()); // English never uses the text atlas
+
+    // Every caption line the film or the NPU solo can show resolves to a catalog key.
+    size_t captionLines = 0;
+    for (const ShowVisualMode mode : {ShowVisualMode::FullFilm360s, ShowVisualMode::SoloNPU}) {
+        for (const Edition edition : {Edition::Family, Edition::Midnight}) {
+            std::string last;
+            for (int half = 0; half <= 720; ++half) {
+                const CaptionLine cap = evaluateFilmCaption(mode, static_cast<int64_t>(half) * 24000, 48000, edition, true);
+                if (!cap.active || std::string(cap.text) == last) continue;
+                last = std::string(cap.text);
+                ++captionLines;
+                if (catalog.captionKey(last).empty()) std::cout << "  caption not in catalog: " << last << "\n";
+                BOO_CHECK(!catalog.captionKey(last).empty());
+            }
+        }
+    }
+    BOO_CHECK(captionLines >= 24);
+
+    std::vector<std::string> keys;
+    {
+        const JsonParseResult source = parseJsonFile(dir / "en-US.json");
+        BOO_CHECK(source.ok);
+        for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
+    }
+    BOO_CHECK(keys.size() == 72);
+
+    UiTextLayer layer;
+    size_t problems = 0;
+    for (const std::string& tag : languages) {
+        if (tag == "en-US") continue;
+        BOO_CHECK(catalog.load(dir, tag));
+        BOO_CHECK(catalog.active() && catalog.languageTag() == tag);
+        BOO_CHECK(catalog.rightToLeft() == (tag == "ar-SA"));
+        for (const std::string& key : keys) {
+            const std::wstring* text = catalog.find(key);
+            if (!text || text->empty()) { std::cout << "  " << tag << " is missing " << key << "\n"; ++problems; continue; }
+            const auto keeps = [&](const wchar_t* token) { return text->find(token) != std::wstring::npos; };
+            bool ok = true;
+            if (key == "hud.act") ok = keeps(L"{n}");
+            if (key == "hud.mode_film" || key == "hud.mode_free") ok = keeps(L"F:");
+            if (key == "hud.bench") ok = keeps(L"[B]");
+            if (key == "hud.all") ok = keeps(L"[") && keeps(L"]");
+            if (key == "hud.ost.synth") ok = keeps(L"RTX");
+            if (key == "hud.ost.custom") ok = keeps(L"MP3+");
+            if (key == "hud.live_gpu") ok = keeps(L"GPU");
+            if (!ok) { std::cout << "  " << tag << " " << key << " lost a protected token\n"; ++problems; }
+        }
+        if (layer.ready()) {
+            for (uint32_t uiScale = 1; uiScale <= 3; ++uiScale) {
+                for (uint32_t i = 0; i < static_cast<uint32_t>(UiLabel::Count); ++i) {
+                    const float fit = layer.labelFit(catalog, static_cast<UiLabel>(i), uiScale);
+                    if (fit < UiTextLayer::kMinLabelFit - 0.01f) {
+                        std::cout << "  " << tag << " " << uiLabelSpec(static_cast<UiLabel>(i)).key << " does not fit at HUD scale " << uiScale << "\n";
+                        ++problems;
+                    }
+                }
+            }
+        }
+    }
+    BOO_CHECK(problems == 0);
+
+    // The pseudo-language exercises the same path with accented, longer text.
+    BOO_CHECK(catalog.load(dir, "qps-ploc") && catalog.active() && catalog.size() == keys.size());
+    // A language without a catalog, and English, both leave the glyph tables in charge.
+    BOO_CHECK(catalog.load(dir, "el-GR") && !catalog.active());
+
+    BOO_CHECK(uiMatchLanguage({"pt-PT"}, languages) == "pt-BR");
+    BOO_CHECK(uiMatchLanguage({"zh-Hant-HK"}, languages) == "zh-TW");
+    BOO_CHECK(uiMatchLanguage({"zh-Hans-SG"}, languages) == "zh-CN");
+    BOO_CHECK(uiMatchLanguage({"nn-NO"}, languages) == "nb-NO");
+    BOO_CHECK(uiMatchLanguage({"el-GR", "fr-CA"}, languages) == "fr-FR");
+    BOO_CHECK(uiMatchLanguage({"en-GB", "de-DE"}, languages) == "en-US");
+    BOO_CHECK(uiMatchLanguage({"el-GR"}, languages) == "en-US");
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1210,6 +1326,8 @@ int main() {
     runTest("AudioClicklessCrossfadeAndGainRamps", testAudioClicklessCrossfadeAndGainRamps);
     runTest("AudioReactiveFollowerBeatAndFlashSafety", testAudioReactiveFollowerBeatAndFlashSafety);
     runTest("TimelineClockSwitchAndTaipei101FinaleFraming", testTimelineClockSwitchAndTaipei101FinaleFraming);
+    runTest("UiTextLanguages", testUiTextLanguages);
+    runTest("UiStringCatalogs", testUiStringCatalogs);
 
     std::cout << "\nUnit Test Summary: " << (gTestsRun - gTestsFailed) << "/" << gTestsRun << " passed.\n";
     return gTestsFailed == 0 ? 0 : 1;

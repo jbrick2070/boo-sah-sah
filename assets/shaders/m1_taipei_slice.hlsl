@@ -1848,7 +1848,37 @@ cbuffer M1PresentCB : register(b0)
 Texture2D<float4> gCanvasCleanTex     : register(t0);
 Texture2D<float4> gCanvasAbCompareTex : register(t1);
 Texture2D<float4> gCodecDecodedTex    : register(t2);
+// Localized text coverage atlas (include/boo/ui_text.hpp). Only read when gHudFlags bit 16 or 17 is set;
+// English leaves both clear and draws every word with the glyph tables below, unchanged.
+Texture2D<float>  gUiTextTex          : register(t3);
 SamplerState      gLinearClamp        : register(s0);
+
+// Label slots: the same order as enum UiLabel in include/boo/ui_text.hpp.
+static const uint UI_LBL_PREV = 0u, UI_LBL_PLAY = 1u, UI_LBL_PAUSE = 2u, UI_LBL_NEXT = 3u;
+static const uint UI_LBL_MODE_FILM = 4u, UI_LBL_MODE_FREE = 5u, UI_LBL_LIVE_GPU = 6u;
+static const uint UI_LBL_COL_SIZE = 7u, UI_LBL_COL_RATE = 8u, UI_LBL_STATE_LIVE = 9u, UI_LBL_BENCH = 13u;
+static const uint UI_LBL_CAM_FREE = 14u, UI_LBL_CAM_FILM = 15u, UI_LBL_LAMP = 16u, UI_LBL_WIPE = 17u;
+static const uint UI_LBL_MARBLES = 18u, UI_LBL_SUN = 19u, UI_LBL_AZIMUTH = 20u, UI_LBL_MUTE = 21u;
+static const uint UI_LBL_MUSIC = 22u, UI_LBL_RESET = 23u, UI_LBL_NEXT_SCENE = 24u, UI_LBL_SOLO = 25u;
+static const uint UI_LBL_ALL = 26u, UI_LBL_ACT1 = 27u, UI_LBL_SCENE_FIRST = 34u, UI_LBL_SCENE_CUSTOM = 40u;
+static const uint UI_LBL_AOV_FIRST = 41u, UI_LBL_LIVE_CAMERA = 48u, UI_LBL_OST_SYNTH = 49u, UI_LBL_OST_CUSTOM = 50u;
+static const float UI_CAPTION_TOP = 960.0;
+
+// A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
+// the same site uses; `cells` is the room the label has, in 5-unit glyph cells. Returns `fallback`
+// (the glyph-table English) when no translation is loaded.
+float uiLabel(float2 px, float2 origin, float scale, float cells, uint id, float fallback)
+{
+    if ((gHudFlags & 0x10000u) == 0u)
+        return fallback;
+    float2 rel = floor(px) - floor(origin - float2(0.0, 2.5 * scale));
+    float2 box = float2(cells * 5.0 * scale, 11.0 * scale);
+    float2 cell = float2(160.0, 20.0) * clamp(floor(gSwapchainAndCanvas.y / 540.0), 1.0, 3.0);
+    if (any(rel < 0.0) || any(rel >= box) || any(rel >= cell))
+        return 0.0;
+    float2 base = float2((float)(id & 3u), (float)(id >> 2u)) * cell;
+    return gUiTextTex.Load(int3(base + rel, 0));
+}
 
 // 5-tap Catmull-Rom bicubic upscale/downsample filter for crisp 1080p->4K or 720p->1080p scaling
 float3 sampleTexCatmullRom(Texture2D<float4> tex, float2 uv, float2 texSize)
@@ -2683,7 +2713,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     }
                     float tPrv = max(
                         sampleGlyph(px, prvMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 60u),
-                        sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u));
+                        uiLabel(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 4.0, UI_LBL_PREV,
+                            sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u)));
                     sdr = lerp(sdr, colEnamel, tPrv);
 
                     // [PLAY] / [PAUS]
@@ -2700,6 +2731,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float tPly = isPaused
                         ? sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 76u, 65u, 89u)
                         : sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 65u, 85u, 83u);
+                    tPly = uiLabel(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 5.4, isPaused ? UI_LBL_PLAY : UI_LBL_PAUSE, tPly);
                     sdr = lerp(sdr, colEnamel, tPly);
 
                     // [NXT >] (prominent Next Scene button!)
@@ -2712,7 +2744,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                             sdr = colJade;
                     }
                     float tNxt = max(
-                        sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u),
+                        uiLabel(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 5.0, UI_LBL_NEXT,
+                            sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u)),
                         sampleGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
                     sdr = lerp(sdr, colEnamel, tNxt);
                 }
@@ -2736,6 +2769,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float expTxt = expActive
                         ? sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 73u, 76u, 77u, 32u, 32u)
                         : sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 82u, 69u, 69u, 32u, 32u);
+                    expTxt = uiLabel(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 8.8, expActive ? UI_LBL_MODE_FILM : UI_LBL_MODE_FREE, expTxt);
                     sdr = lerp(sdr, expActive ? colEnamel : expCol, expTxt);
                 }
             }
@@ -2762,11 +2796,14 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float hdrTxt = sampleWord8(
                 px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale,
                 76u, 73u, 86u, 69u, 32u, 71u, 80u, 85u);
+            hdrTxt = uiLabel(px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale, 15.0, UI_LBL_LIVE_GPU, hdrTxt);
             sdr = lerp(sdr, colJade, hdrTxt);
 
             float colSzTxt = sampleWord4(px, liveMin + float2(128.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 83u, 73u, 90u, 69u);
             float colMsTxt = sampleWord4(px, liveMin + float2(188.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 32u, 77u, 83u, 32u);
             float colRtTxt = sampleWord4(px, liveMin + float2(246.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 82u, 65u, 84u, 69u);
+            colSzTxt = uiLabel(px, liveMin + float2(128.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 8.0, UI_LBL_COL_SIZE, colSzTxt);
+            colRtTxt = uiLabel(px, liveMin + float2(246.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 8.0, UI_LBL_COL_RATE, colRtTxt);
             sdr = lerp(sdr, colAmber, max(colSzTxt, max(colMsTxt, colRtTxt)));
 
             [unroll]
@@ -2777,8 +2814,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float3 mCol = livePillarModeColor(modeNib);
                 float4 pm = gLivePillarMetrics[p];
 
-                // Pillar name + runtime toggle key: "RT X", "CUDA", "TNSR", "CODC"
-                uint n0 = 82u, n1 = 84u, n2 = 91u, n3 = 88u; // RT[X
+                // Pillar name: "RT", "CUDA", "TNSR", "CODC"
+                uint n0 = 82u, n1 = 84u, n2 = 32u, n3 = 32u; // RT
                 if (p == 1u) { n0 = 67u; n1 = 85u; n2 = 68u; n3 = 65u; } // CUDA
                 if (p == 2u) { n0 = 84u; n1 = 78u; n2 = 83u; n3 = 82u; } // TNSR
                 if (p == 3u) { n0 = 67u; n1 = 79u; n2 = 68u; n3 = 67u; } // CODC
@@ -2802,6 +2839,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if (modeNib == 2u) { s0 = 79u; s1 = 70u; s2 = 70u; s3 = 32u; } // OFF
                 if (modeNib == 3u) { s0 = 70u; s1 = 76u; s2 = 84u; s3 = 32u; } // FLT
                 float pillTxt = sampleWord4(px, pillMin + float2(4.0 * uiScale, 2.0 * uiScale), 1.45 * uiScale, s0, s1, s2, s3);
+                pillTxt = uiLabel(px, pillMin + float2(4.0 * uiScale, 2.0 * uiScale), 1.45 * uiScale, 5.0,
+                                  UI_LBL_STATE_LIVE + ((modeNib >= 1u && modeNib <= 3u) ? modeNib : 0u), pillTxt);
                 sdr = lerp(sdr, mCol, pillTxt);
 
                 // Workload scale, live ms, and live rate/quality
@@ -2833,6 +2872,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     px, cardMin + float2(10.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale,
                     66u, 69u, 78u, 67u, 72u, 32u, 91u, 66u),
                 sampleGlyph(px, cardMin + float2(70.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 93u));
+            bTitle = uiLabel(px, cardMin + float2(10.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 11.0, UI_LBL_BENCH, bTitle);
             sdr = lerp(sdr, colAmber, bTitle);
 
             float hdrFill = ((gHudFlags & 64u) != 0u) ? gBenchProgress : 1.0;
@@ -3019,6 +3059,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float tExp = expOn
                 ? sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 82u, 69u, 69u) // FREE
                 : sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 73u, 76u, 77u); // FILM
+            tExp = uiLabel(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 5.6, expOn ? UI_LBL_CAM_FREE : UI_LBL_CAM_FILM, tExp);
             sdr = lerp(sdr, expC, tExp);
 
             // 2. REBLUR / NRD / ACC denoiser + live SPP convergence readout (rx = 60..152)
@@ -3054,6 +3095,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = lmpC;
             }
             float tLmp = sampleWord4(px, barMin + float2(162.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
+            tLmp = uiLabel(px, barMin + float2(162.0 * u, 9.5 * u), 1.35 * u, 4.7, UI_LBL_LAMP, tLmp);
             sdr = lerp(sdr, lmpC, tLmp);
 
             // 4. RTX Split WIPE [H] toggle pill (rx = 200..240 — persistent in exact same spot!)
@@ -3068,6 +3110,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = wipC;
             }
             float tWip = sampleWord4(px, barMin + float2(206.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
+            tWip = uiLabel(px, barMin + float2(206.0 * u, 9.5 * u), 1.35 * u, 4.7, UI_LBL_WIPE, tWip);
             sdr = lerp(sdr, wipeOn ? colEnamel : wipC, tWip);
 
             // 5. Buffer / AOV Inspection [I / F9] pill (rx = 244..284)
@@ -3096,6 +3139,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = mrbC;
             }
             float tMrb = sampleWord4(px, barMin + float2(295.0 * u, 9.5 * u), 1.35 * u, 77u, 82u, 66u, 76u);
+            tMrb = uiLabel(px, barMin + float2(295.0 * u, 9.5 * u), 1.35 * u, 4.9, UI_LBL_MARBLES, tMrb);
             sdr = lerp(sdr, mrbOn ? colEnamel : mrbC, tMrb);
 
             // 7. Prominent Scene Switcher: [<] (336..354) + [1..6] (357..444) + [>] (447..465) + Scene Name (470..530)
@@ -3138,10 +3182,12 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
 
             // Active Scene Name Readout ("BATHRM", "FAUCET", "LEAVES", "ORCHID", "ENAMEL", "SANCTU", or "ACT 1..7")
             uint sn0=65u, sn1=67u, sn2=84u, sn3=32u, sn4=49u, sn5=32u;
+            uint snLabel = (presetId >= 1u && presetId <= 6u) ? (UI_LBL_SCENE_FIRST + presetId - 1u) : UI_LBL_SCENE_CUSTOM;
             if (!expOn) {
                 uint curActNum = (gFilmTime < 45.0) ? 1u : (gFilmTime < 100.0) ? 2u : (gFilmTime < 150.0) ? 3u :
                                  (gFilmTime < 195.0) ? 4u : (gFilmTime < 245.0) ? 5u : (gFilmTime < 275.0) ? 6u : 7u;
                 sn4 = 48u + curActNum;
+                snLabel = UI_LBL_ACT1 + curActNum - 1u;
             } else if (presetId == 1u) { sn0=66u; sn1=65u; sn2=84u; sn3=72u; sn4=82u; sn5=77u; } // BATHRM
             else if (presetId == 2u)   { sn0=70u; sn1=65u; sn2=85u; sn3=67u; sn4=69u; sn5=84u; } // FAUCET
             else if (presetId == 3u)   { sn0=76u; sn1=69u; sn2=65u; sn3=86u; sn4=69u; sn5=83u; } // LEAVES
@@ -3150,10 +3196,12 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             else if (presetId == 6u)   { sn0=83u; sn1=65u; sn2=78u; sn3=67u; sn4=84u; sn5=85u; } // SANCTU
             else                       { sn0=67u; sn1=85u; sn2=83u; sn3=84u; sn4=79u; sn5=77u; } // CUSTOM
             float tScnName = sampleWord8(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, sn0, sn1, sn2, sn3, sn4, sn5, 32u, 32u);
+            tScnName = uiLabel(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, 8.9, snLabel, tScnName);
             sdr = lerp(sdr, expOn ? colJade : colAmber, tScnName);
 
             // Row 2: Draggable [SUN] (34..152) + [AZM] (186..304) + [MP3] (312..350) + [MUSC/MUTE] (354..396) + [RST] (400..438) + [NEXT SCN >] (442..530)
             float tSunLbl = sampleWord4(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 83u, 85u, 78u, 32u);
+            tSunLbl = uiLabel(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 3.5, UI_LBL_SUN, tSunLbl);
             sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
 
             float2 sunMin  = barMin + float2(34.0 * u, 34.0 * u);
@@ -3167,6 +3215,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 sdr = colEnamel;
 
             float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 65u, 90u, 77u, 32u);
+            tAzmLbl = uiLabel(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 3.5, UI_LBL_AZIMUTH, tAzmLbl);
             sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
 
             float2 azmMin  = barMin + float2(186.0 * u, 34.0 * u);
@@ -3209,6 +3258,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float tMus = audMuted
                 ? sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 84u, 69u)  // MUTE
                 : sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 83u, 67u); // MUSC
+            tMus = uiLabel(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 5.0, audMuted ? UI_LBL_MUTE : UI_LBL_MUSIC, tMus);
             sdr = lerp(sdr, audMuted ? colEnamel : musC, tMus);
 
             // [RST] Lighting & Studio Reset Pill (rx = 400..438)
@@ -3223,6 +3273,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = rstC;
             }
             float tRst = sampleWord4(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 82u, 83u, 84u, 32u);
+            tRst = uiLabel(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 4.1, UI_LBL_RESET, tRst);
             sdr = lerp(sdr, rstC, tRst);
 
             // Prominent Row-2 [NEXT SCN >] One-Click Scene Button (rx = 442..530)
@@ -3235,7 +3286,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     sdr = colJade;
             }
             float tNxtScn = max(
-                sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u),
+                uiLabel(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 9.9, UI_LBL_NEXT_SCENE,
+                    sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u)),
                 sampleGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
             sdr = lerp(sdr, colEnamel, tNxtScn);
         }
@@ -3262,6 +3314,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if (curAovMode == 7u) { b0=82u; b1=65u; b2=89u; b3=32u; b4=72u; b5=69u; b6=65u; b7=84u; } // RAY HEAT
                 float tLbl = sampleWord4(px, aovBoxMin + float2(10.0 * u, 5.5 * u), 1.45 * u, a0, a1, a2, a3);
                 float tMod = sampleWord8(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, b0, b1, b2, b3, b4, b5, b6, b7);
+                tMod = uiLabel(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, 16.8, UI_LBL_AOV_FIRST + clamp(curAovMode, 1u, 7u) - 1u, tMod);
                 sdr = lerp(sdr, colAmber, tLbl);
                 sdr = lerp(sdr, colEnamel, tMod);
             }
@@ -3310,7 +3363,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float ostM0 = sampleWord8(px, ostBoxMin + float2(8.5 * u, 6.0 * u), ostSc, w0a, w0b, w0c, w0d, w0e, w0f, w0g, w0h);
                 float ostM1 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 40.0 * ostSc, 6.0 * u), ostSc, w1a, w1b, w1c, w1d, w1e, w1f, w1g, w1h);
                 float ostM2 = sampleWord8(px, ostBoxMin + float2(8.5 * u + 80.0 * ostSc, 6.0 * u), ostSc, w2a, w2b, w2c, w2d, w2e, w2f, w2g, w2h);
-                sdr = lerp(sdr, colEnamel, max(ostM0, max(ostM1, ostM2)) * trkToastAlpha);
+                float ostTxt = max(ostM0, max(ostM1, ostM2));
+                // Track titles 1..4 are proper names; only the two descriptive notices are translated.
+                if (trkSlot == 0u || trkSlot == 5u)
+                    ostTxt = uiLabel(px, ostBoxMin + float2(8.5 * u, 6.0 * u), ostSc, 24.0, (trkSlot == 5u) ? UI_LBL_OST_CUSTOM : UI_LBL_OST_SYNTH, ostTxt);
+                sdr = lerp(sdr, colEnamel, ostTxt * trkToastAlpha);
             }
         }
     }
@@ -3339,6 +3396,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float tSolo = sampleWord8(px, soloMin + float2(8.0 * u, 5.5 * u), 1.4 * u, 83u, 79u, 76u, 79u, 58u, 32u, 32u, 32u);
             float tEng  = sampleWord8(px, soloMin + float2(52.0 * u, 5.5 * u), 1.4 * u, s0, s1, s2, s3, s4, s5, s6, s7);
             float tAll  = sampleWord8(px, soloMin + float2(174.0 * u, 5.5 * u), 1.4 * u, 91u, 65u, 76u, 76u, 93u, 32u, 32u, 32u);
+            tSolo = uiLabel(px, soloMin + float2(8.0 * u, 5.5 * u), 1.4 * u, 6.0, UI_LBL_SOLO, tSolo);
+            tAll  = uiLabel(px, soloMin + float2(174.0 * u, 5.5 * u), 1.4 * u, 7.4, UI_LBL_ALL, tAll);
             sdr = lerp(sdr, colAmber, tSolo);
             sdr = lerp(sdr, colJade, tEng);
             sdr = lerp(sdr, colEnamel, tAll);
@@ -3424,6 +3483,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
 
         float textW = max(4.0, ((float)charCount * 5.0 - 1.0) * capScale);
         float textH = 6.0 * capScale;
+        // A translated caption arrives as a ready-drawn block (up to two lines) in the text atlas;
+        // gCaptionPacked[0].xy then carries its size in pixels instead of characters.
+        const bool capLocalized = (gHudFlags & 0x20000u) != 0u;
+        if (capLocalized)
+        {
+            capScale = baseScale;
+            textW = (float)gCaptionPacked[0].x;
+            textH = (float)gCaptionPacked[0].y;
+        }
         float padX  = 12.0 * capScale;
         float padY  = 6.0 * capScale;
         float2 boxSz = float2(textW + 2.0 * padX, textH + 2.0 * padY);
@@ -3449,7 +3517,17 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float3 bdrCol = isEndCard ? colAmber : (isMidEd ? colOrchid : colJade);
                 sdr = lerp(sdr, bdrCol, 0.78 * capAlpha);
             }
-            float gMask = samplePackedCaption(px, boxMin + float2(padX, padY), capScale, charCount);
+            float gMask = 0.0;
+            if (capLocalized)
+            {
+                float2 capRel = floor(px) - floor(boxMin + float2(padX, padY));
+                if (all(capRel >= 0.0) && capRel.x < textW && capRel.y < textH)
+                    gMask = gUiTextTex.Load(int3(capRel.x, UI_CAPTION_TOP + capRel.y, 0));
+            }
+            else
+            {
+                gMask = samplePackedCaption(px, boxMin + float2(padX, padY), capScale, charCount);
+            }
             float3 txtCol = isEndCard ? lerp(colEnamel, colAmber, 0.28) : colEnamel;
             sdr = lerp(sdr, txtCol, gMask * capAlpha);
         }
@@ -3481,6 +3559,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float camTxt = max(
                 sampleWord8(px, tOrg, tScale, 76u, 73u, 86u, 69u, 32u, 67u, 65u, 77u),
                 sampleWord4(px, tOrg + float2(8.0 * 5.0 * tScale, 0.0), tScale, 69u, 82u, 65u, 32u));
+            camTxt = uiLabel(px, tOrg, tScale, 13.4, UI_LBL_LIVE_CAMERA, camTxt);
             sdr = lerp(sdr, colEnamel, camTxt);
         }
     }

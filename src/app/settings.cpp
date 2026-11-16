@@ -93,6 +93,7 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
         else if (fullKey == "display.quality_preset") parseQualityPreset(unquoteTomlString(val), ioSettings.qualityPreset);
         else if (fullKey == "display.show_overlay") parseBoolVal(val, ioSettings.showOverlay);
         else if (fullKey == "display.captions") parseBoolVal(val, ioSettings.showCaptions);
+        else if (fullKey == "display.language") ioSettings.language = unquoteTomlString(val);
         else if (fullKey == "display.reduced_flash") parseBoolVal(val, ioSettings.reducedFlash);
         else if (fullKey == "display.reduced_motion") {
             bool rm = false;
@@ -278,6 +279,9 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.showCaptions = true;
         } else if (a == "--no-captions") {
             ioSettings.showCaptions = false;
+        } else if (a == "--lang") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.language = *v;
         } else if (a == "--reduced-flash") {
             ioSettings.reducedFlash = true;
         } else if (a == "--reduced-motion") {
@@ -311,6 +315,7 @@ std::string buildCliHelpText() {
         "  --fullscreen / --windowed   Display mode\n"
         "  --vsync <0|1> / --no-vsync  Vertical sync toggle (default: on)\n"
         "  --captions / --no-captions  Toggle HUD lower-third captions (default: on)\n"
+        "  --lang <auto|tag>           On-screen language, e.g. ja-JP (default: auto = Windows display language)\n"
         "  --reduced-flash             Photosensitivity-safe zero-pulse lighting envelope\n"
         "  --reduced-motion            Dampen orbital camera excursion (motion_scale=0.35)\n"
         "  --explore                   Start in interactive RTX Explore studio mode\n"

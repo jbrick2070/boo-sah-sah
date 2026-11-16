@@ -3,6 +3,7 @@
 #include "boo/logging.hpp"
 #include "boo/m1_scene.hpp"
 #include "boo/trilogy_renderer.hpp"
+#include "boo/ui_text.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -1115,11 +1117,12 @@ struct M1TaipeiSliceEffect::Impl {
     // Owned descriptor heaps:
     // rtvHeap (7 entries):
     //   [0]=sceneHdr, [1]=sceneDepth, [2..4]=bloomMips[0..2], [5]=canvasClean, [6]=canvasAbCompare
-    // srvUavHeap (14 entries):
+    // srvUavHeap (18 entries):
     //   [0]=UAV sceneHdr (u1), [1]=UAV sceneDepth (u2),
     //   [2]=SRV sceneDepth, [3]=SRV sceneHdr, [4..6]=SRV bloomMips[0..2], [7]=SRV tensorFieldTex,
     //   [8]=SRV canvasClean, [9]=SRV canvasAbCompare, [10]=SRV codecDecodedTex,
-    //   [11]=UAV tensorFieldTex, [12]=RAW UAV nv12PackBuf, [13]=Structured UAV particleGpuBuf
+    //   [11]=UAV tensorFieldTex, [12]=RAW UAV nv12PackBuf, [13]=Structured UAV particleGpuBuf,
+    //   [14..17]=present-pass table: SRV canvasClean, canvasAbCompare, codecDecodedTex, uiTextTex
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
     ComPtr<ID3D12DescriptorHeap> srvUavHeap;
     uint32_t rtvDescSize = 0;
@@ -1158,6 +1161,13 @@ struct M1TaipeiSliceEffect::Impl {
     bool codecHwTexValid = false;
 
     ComPtr<ID3D12Resource> presentCbUpload; // 512 bytes * kTotalUploadSlots
+
+    // Localized text atlas (R8, include/boo/ui_text.hpp). Created only when a non-English catalog is loaded.
+    ComPtr<ID3D12Resource> uiTextTex;
+    std::array<ComPtr<ID3D12Resource>, kTotalUploadSlots> uiTextUploadBuf;
+    std::unique_ptr<UiTextLayer> uiTextLayer;
+    bool ensureUiTextResources(ID3D12Device* dev);
+    void uploadUiText(ID3D12Device* dev, ID3D12GraphicsCommandList* cmd, uint32_t cbSlot, bool labels, bool caption);
     ComPtr<ID3D12Resource> abVerifyUav;
 
     // Dedicated GPU hardware timestamp query heap for exact Pass 1 RT/Raster execution ms (works in headless & swapchain!)
@@ -1475,6 +1485,7 @@ bool M1TaipeiSliceEffect::Impl::allocateStaticPillarResources(D3D12Context& d3d)
     D3D12_SHADER_RESOURCE_VIEW_DESC srvCodec = srvTensor;
     srvCodec.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     dev->CreateShaderResourceView(codecDecodedTex.Get(), &srvCodec, srvCpuAt(10u));
+    dev->CreateShaderResourceView(codecDecodedTex.Get(), &srvCodec, srvCpuAt(16u));
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uavTensor{};
     uavTensor.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1648,6 +1659,8 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
     srvClean.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
     dev->CreateShaderResourceView(canvasClean.Get(), &srvClean, srvCpuAt(8u));
     dev->CreateShaderResourceView(canvasAbCompare.Get(), &srvClean, srvCpuAt(9u));
+    dev->CreateShaderResourceView(canvasClean.Get(), &srvClean, srvCpuAt(14u));
+    dev->CreateShaderResourceView(canvasAbCompare.Get(), &srvClean, srvCpuAt(15u));
 
     return true;
 }
@@ -2301,7 +2314,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     {
         D3D12_DESCRIPTOR_RANGE presentSrvRange{};
         presentSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        presentSrvRange.NumDescriptors = 3;
+        presentSrvRange.NumDescriptors = 4; // t3 = localized text atlas
         presentSrvRange.BaseShaderRegister = 0;
 
         D3D12_ROOT_PARAMETER presParams[2]{};
@@ -2483,7 +2496,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     rtvHd.NumDescriptors = 7;
     rtvHd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     D3D12_DESCRIPTOR_HEAP_DESC suHd{};
-    suHd.NumDescriptors = 14;
+    suHd.NumDescriptors = 18;
     suHd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     suHd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&rtvHd, IID_PPV_ARGS(&impl_->rtvHeap))) ||
@@ -2496,6 +2509,16 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     }
     impl_->rtvDescSize = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     impl_->srvUavDescSize = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // t3 of the present pass is a null view until a translated catalog needs the text atlas.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC nullText{};
+        nullText.Format = DXGI_FORMAT_R8_UNORM;
+        nullText.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nullText.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nullText.Texture2D.MipLevels = 1;
+        dev->CreateShaderResourceView(nullptr, &nullText, impl_->srvCpuAt(17u));
+    }
 
     if (!impl_->allocateStaticPillarResources(d3d_)) {
         res.status = BackendStatus::Faulted;
@@ -3451,6 +3474,79 @@ void M1TaipeiSliceEffect::Impl::uploadCodecRgbaToGpu(
     codecHwTexValid = markHwVerified;
 }
 
+bool M1TaipeiSliceEffect::Impl::ensureUiTextResources(ID3D12Device* dev) {
+    if (uiTextTex && uiTextLayer) return uiTextLayer->ready();
+    if (!dev) return false;
+    if (!uiTextLayer) uiTextLayer = std::make_unique<UiTextLayer>();
+    if (!uiTextLayer->ready()) return false;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    const D3D12_RESOURCE_DESC desc = makeTex2dDesc(
+        UiTextAtlasLayout::kWidth, UiTextAtlasLayout::kHeight, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_NONE);
+    if (FAILED(dev->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&uiTextTex)))) {
+        uiTextTex.Reset();
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    dev->CreateShaderResourceView(uiTextTex.Get(), &srv, srvCpuAt(17u));
+    return true;
+}
+
+// Copies the changed band(s) of the CPU atlas to the texture. Each frame slot has its own upload
+// buffer, so a copy still queued on the GPU never has its source rewritten.
+void M1TaipeiSliceEffect::Impl::uploadUiText(ID3D12Device* dev, ID3D12GraphicsCommandList* cmd, uint32_t cbSlot, bool labels, bool caption) {
+    if (!uiTextTex || !uiTextLayer || cbSlot >= kTotalUploadSlots || (!labels && !caption)) return;
+    constexpr uint64_t kPitch = UiTextAtlasLayout::kWidth; // 3072: a multiple of the 256-byte row and 512-byte placement alignments
+    ComPtr<ID3D12Resource>& buf = uiTextUploadBuf[cbSlot];
+    if (!buf) {
+        D3D12_HEAP_PROPERTIES uploadHeap{};
+        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        const D3D12_RESOURCE_DESC bufDesc = makeBufferDesc(kPitch * UiTextAtlasLayout::kHeight);
+        if (FAILED(dev->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buf)))) {
+            buf.Reset();
+            return;
+        }
+    }
+    struct Band { uint32_t top; uint32_t rows; };
+    Band bands[2]; uint32_t bandCount = 0;
+    if (labels)  bands[bandCount++] = {0u, UiTextAtlasLayout::kCaptionTop};
+    if (caption) bands[bandCount++] = {UiTextAtlasLayout::kCaptionTop, UiTextAtlasLayout::kCaptionMaxH};
+
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE noRead{0, 0};
+    if (FAILED(buf->Map(0, &noRead, reinterpret_cast<void**>(&mapped))) || !mapped) return;
+    for (uint32_t b = 0; b < bandCount; ++b) {
+        std::memcpy(mapped + kPitch * bands[b].top, uiTextLayer->pixels() + kPitch * bands[b].top, kPitch * bands[b].rows);
+    }
+    buf->Unmap(0, nullptr);
+
+    transitionResource(cmd, uiTextTex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (uint32_t b = 0; b < bandCount; ++b) {
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = uiTextTex.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = buf.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = kPitch * bands[b].top;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+        src.PlacedFootprint.Footprint.Width = UiTextAtlasLayout::kWidth;
+        src.PlacedFootprint.Footprint.Height = bands[b].rows;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(kPitch);
+        cmd->CopyTextureRegion(&dst, 0, bands[b].top, 0, &src, nullptr);
+    }
+    transitionResource(cmd, uiTextTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
 void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     ID3D12Device* dev,
     ID3D12GraphicsCommandList* cmd,
@@ -3586,7 +3682,29 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
 
     const CaptionLine cap = evaluateFilmCaption(
         visualMode, ctx.samplePosition, ctx.sampleRate, ctx.edition, ctx.showCaptions);
-    if (cap.active && cap.alpha > 0.005f && !cap.text.empty()) {
+    // Translated text: labels and the current caption are drawn into the text atlas; English skips this
+    // entirely and keeps the shader glyph tables.
+    const UiStrings& uiStrings = UiStrings::instance();
+    bool captionLocalized = false;
+    if (uiStrings.active() && ensureUiTextResources(dev)) {
+        const bool capShown = cap.active && cap.alpha > 0.005f && !cap.text.empty();
+        const std::wstring* capText = capShown ? uiStrings.findCaption(cap.text) : nullptr;
+        const uint32_t uiScale = std::clamp<uint32_t>(targetHeight / 540u, 1u, UiTextAtlasLayout::kMaxUiScale);
+        const float capBaseScale = std::clamp(lb.height / 285.0f, 1.0f, 6.0f) * (cap.isEndCard ? 0.90f : 1.0f);
+        const UiTextLayer::Frame uiFrame = uiTextLayer->prepare(uiStrings, uiScale, capText, 7.6f * capBaseScale, lb.width * 0.86f);
+        uploadUiText(dev, cmd, cbSlot, uiFrame.labelsDirty, uiFrame.captionDirty);
+        pc.hudFlags |= (1u << 16u);
+        if (capText && uiFrame.captionValid) {
+            captionLocalized = true;
+            pc.hudFlags |= (1u << 17u);
+            pc.captionPacked[0] = uiFrame.captionWidth;
+            pc.captionPacked[1] = uiFrame.captionHeight;
+            pc.captionStyle[0] = cap.alpha;
+            pc.captionStyle[1] = 1.0f;
+            pc.captionStyle[2] = cap.isEndCard ? 1.0f : 0.0f;
+        }
+    }
+    if (!captionLocalized && cap.active && cap.alpha > 0.005f && !cap.text.empty()) {
         const size_t nChars = std::min<size_t>(cap.text.size(), 64u);
         for (size_t i = 0; i < nChars; ++i) {
             const uint32_t b = static_cast<uint8_t>(cap.text[i]);
@@ -3648,7 +3766,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     cmd->SetGraphicsRootSignature(presentRootSig.Get());
     cmd->SetPipelineState(psoPresentHud.Get());
     cmd->SetGraphicsRootConstantBufferView(0, presentCbUpload->GetGPUVirtualAddress() + cbOffset);
-    cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(8u)); // t0=canvasClean, t1=canvasAbCompare, t2=codecDecodedTex
+    cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(14u)); // t0=canvasClean, t1=canvasAbCompare, t2=codecDecodedTex, t3=uiTextTex
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
 }

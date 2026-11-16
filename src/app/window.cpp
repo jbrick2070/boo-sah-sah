@@ -1,4 +1,5 @@
 #include "boo/window.hpp"
+#include "boo/localization.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -400,9 +401,7 @@ void AppWindow::fitFullscreenToMonitor() {
 }
 
 void AppWindow::showGraphicsFailure(const std::string& reason) {
-    graphicsFailureText_ = L"BOO SAH SAH\n\nGraphics playback could not be restored.\n"
-                           L"The audio and timeline remain available. Close the show and restart to retry.\n\n" +
-                           utf8ToWide(reason);
+    graphicsFailureText_ = std::wstring(L"BOO SAH SAH\n\n") + uiText(UiText::GraphicsFailureBody) + L"\n\n" + utf8ToWide(reason);
     if (hwnd_) {
         InvalidateRect(hwnd_, nullptr, TRUE);
         UpdateWindow(hwnd_);
@@ -421,7 +420,8 @@ bool AppWindow::paintGraphicsFailureFromWndProc() {
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(235, 240, 240));
     auto oldFont = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
-    DrawTextW(dc, graphicsFailureText_.c_str(), -1, &r, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+    const UINT align = uiIsRightToLeft() ? (DT_RIGHT | DT_RTLREADING) : DT_LEFT;
+    DrawTextW(dc, graphicsFailureText_.c_str(), -1, &r, align | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
     SelectObject(dc, oldFont);
     EndPaint(hwnd_, &ps);
     return true;

@@ -8,12 +8,14 @@
 #include "boo/diagnostics.hpp"
 #include "boo/director.hpp"
 #include "boo/health.hpp"
+#include "boo/localization.hpp"
 #include "boo/logging.hpp"
 #include "boo/m1_scene.hpp"
 #include "boo/media_input.hpp"
 #include "boo/render.hpp"
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
+#include "boo/ui_text.hpp"
 #include "boo/window.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -24,6 +26,7 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include <d3d12.h>
 #include <wrl/client.h>
 
@@ -46,6 +49,17 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
 namespace {
+
+// <Pictures>\BOO SAH SAH: where captures go when the working folder cannot be written. Empty on failure.
+std::filesystem::path userCaptureFolder() {
+    PWSTR pictures = nullptr;
+    std::filesystem::path out;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, KF_FLAG_CREATE, nullptr, &pictures)) && pictures) {
+        out = std::filesystem::path(pictures) / L"BOO SAH SAH";
+    }
+    CoTaskMemFree(pictures);
+    return out;
+}
 
 bool openNativeAudioFilePicker(void* hwndRaw, std::filesystem::path& outPath) {
     HMODULE hComDlg = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -1455,11 +1469,41 @@ int main(int argc, char** argv) {
             "No usable D3D12 adapter was detected.";
         BOO_LOG_ERROR("D3D12", msg);
         if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
-            MessageBoxW(nullptr, L"BOO SAH SAH requires a compatible Direct3D 12 device.\nSee logs for Hardware Orchestra diagnostics.",
-                        L"BOO SAH SAH — Unsupported Graphics Device", MB_ICONERROR | MB_OK);
+            MessageBoxW(nullptr, uiText(UiText::UnsupportedGpuBody), uiText(UiText::UnsupportedGpuTitle),
+                        MB_ICONERROR | MB_OK | (uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u));
         }
         return 1;
     }
+
+    // On-screen language. "auto" follows the Windows display language; timed automation runs stay
+    // English so their frames do not depend on the PC they run on.
+    {
+        // Found beside the exe when the working directory is elsewhere (Start menu, Store package).
+        const std::filesystem::path stringsDir = resolveResourcePath(settings.stringsDir);
+        std::string lang = settings.language;
+        if (lang.empty() || lang == "auto") {
+            lang = (settings.autoExitSeconds > 0.0)
+                ? std::string("en-US")
+                : uiMatchLanguage(uiWindowsPreferredLanguages(), uiAvailableLanguages(stringsDir));
+        }
+        std::string langError;
+        if (!UiStrings::instance().load(stringsDir, lang, &langError)) {
+            BOO_LOG_WARN("UI", "On-screen text stays English: " + langError);
+        } else {
+            BOO_LOG_INFO("UI", "On-screen language: " + UiStrings::instance().languageTag());
+        }
+    }
+    const auto titleWord = [](const char* key, const wchar_t* english) {
+        const std::wstring w = UiStrings::instance().textOr(key, english);
+        const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+        std::string s(static_cast<size_t>(std::max(n, 0)), '\0');
+        if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+        return s;
+    };
+    const std::string titleAct = titleWord("win.act", L"Act");
+    const std::string titleExplore = titleWord("win.explore", L"Explore");
+    const std::string titleWipe = titleWord("win.wipe", L"Wipe");
+    const std::string titleLamp = titleWord("win.lamp", L"Lamp");
 
     // 3. Initialize 48 kHz WASAPI Audio Engine or silent monotonic clock fallback
     AudioEngine audio;
@@ -2588,8 +2632,14 @@ int main(int argc, char** argv) {
         if (captureRequested && !graphicsUnavailable) {
             captureRequested = false;
             std::string captureError;
-            if (!orchestrator.captureClean(fctx, "diagnostics/captures", &captureError))
-                BOO_LOG_WARN("Capture", captureError);
+            if (!orchestrator.captureClean(fctx, "diagnostics/captures", &captureError)) {
+                // Started from the Start menu or the Store package, the working folder is not writable
+                // (System32, or the read-only install folder). Save to the user's Pictures instead.
+                std::string fallbackError = "Pictures folder unavailable";
+                const std::filesystem::path pictures = userCaptureFolder();
+                if (pictures.empty() || !orchestrator.captureClean(fctx, pictures, &fallbackError))
+                    BOO_LOG_WARN("Capture", captureError + " | " + fallbackError);
+            }
         }
         if (!window.isMinimized() && !graphicsUnavailable) {
             HudTelemetrySnapshot hud{};
@@ -2695,20 +2745,24 @@ int main(int argc, char** argv) {
                 const uint32_t spp = fctx.interactive.accumulate ? (fctx.interactive.accumFrame + 1u) : 1u;
                 std::snprintf(expTag, sizeof(expTag), " [EXPLORE %u SPP] |", spp);
             }
-            char titleBuf[320]{};
+            char titleBuf[512]{};
             std::snprintf(
                 titleBuf,
                 sizeof(titleBuf),
-                "BOO SAH SAH |%s %s | Act %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [F]=Explore [H]=Wipe [J]=Lamp [Tab]=HUD",
+                "BOO SAH SAH |%s %s | %s %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [F]=%s [H]=%s [J]=%s [Tab]=HUD",
                 expTag,
                 TimelineClock::formatTimecode(tick.samplePosition, cueSheet.sampleRate).c_str(),
+                titleAct.c_str(),
                 actIdx + 1,
                 cueSheet.scenes.size(),
                 activeCue.sceneId.c_str(),
                 smoothFps,
                 lastGpuMs,
                 d3d.swapchainChannelBits(),
-                toString(qualityLadder.currentPreset()));
+                toString(qualityLadder.currentPreset()),
+                titleExplore.c_str(),
+                titleWipe.c_str(),
+                titleLamp.c_str());
             window.setTitle(titleBuf);
         }
 

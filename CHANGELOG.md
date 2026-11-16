@@ -15,6 +15,16 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
   - A given drive renders identically every time.
   - A later zero-drive render is unaffected, so seek determinism holds.
 - Rain-ripple band-limiting now scales with the real canvas height and field of view. It is unchanged at the 1440p reference, keeps resolvable ripple detail at 4K, and filters slightly harder at 720p.
+- **24 languages besides English**, following the Windows display language (`--lang <tag>` overrides):
+  - Captions, the end card, HUD labels, the camera indicator and window-title words come from string catalogs in `assets/strings`. They are drawn with Windows system fonts through DirectWrite into a text atlas (`include/boo/ui_text.hpp`, `src/render/ui_text.cpp`) that the present pass samples one texel per pixel. Arabic is shaped and laid out right to left. No font is bundled.
+  - English keeps the shader glyph tables and is unchanged, apart from the fix below.
+  - The Store package description (`packaging/msix/descriptions.json`), the Store listing text (`packaging/store-listing.md`), and the two Windows message texts (`src/app/localization.cpp`) are translated too.
+  - Unit tests `UiTextLanguages` and `UiStringCatalogs` (complete catalogs, protected tokens kept, every caption line has an entry, every HUD label fits its box at every HUD size).
+
+### Fixed
+- The first row of the LIVE GPU table read `RT[X` (a key hint cut off by the four-character label). It now reads `RT`.
+- The capture key (F12) silently saved nothing when the app was started from the Start menu or the Store package, where the working folder cannot be written (`create_directories: Access is denied`). It now falls back to `Pictures\BOO SAH SAH`.
+- `packaging/msix/make-msix.ps1` failed on every run: it tried to create an `Assets` folder that the staged app already has.
 
 ### Notes
 - The drive is packed as RGBA8 into the one spare scene DWORD (root signature size unchanged). It is zero in test / capture contexts, debug AOV modes and progressive accumulation, so deterministic seek captures are unaffected.
