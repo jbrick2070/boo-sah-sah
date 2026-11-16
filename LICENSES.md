@@ -9,13 +9,13 @@ All C++20 source files (`src/`, `include/`, `tools/`, `tests/`), HLSL shaders (`
 
 | Asset Family | Paths | Provenance | License |
 |---|---|---|---|
-| Runtime & Tools C++20 / HLSL | `src/`, `include/`, `tools/`, `assets/shaders/` | Original first-party project code | Proprietary / Project First-Party |
-| Cue Schedules & Presets | `assets/cues/*.json`, `config/*` | Original first-party timeline & quality specifications | Proprietary / Project First-Party |
+| Runtime & Tools C++20 / HLSL | `src/`, `include/`, `tools/`, `assets/shaders/` | Original first-party project code | MIT (`LICENSE`) |
+| Cue Schedules & Presets | `assets/cues/*.json`, `config/*` | Original first-party timeline & quality specifications | `config/*`: MIT. `assets/cues/*.json`: CC BY-NC 4.0 (`LICENSE-ASSETS.md`) |
 | Packed 3D Meshes (`.bmesh`) | `assets/meshes/*.bmesh` | Generated deterministically by `tools/gen_trilogy_meshes.py` (procedural + CC0 scans) | CC0-1.0 |
 | Packed PBR & IBL Textures (`.btex`) | `assets/textures/*.btex` | Generated deterministically by `tools/gen_pbr_textures.py` (authored + CC0 scans) | CC0-1.0 |
-| Presentation Vector Glyphs | `tools/gen_title_glyphs.py`, generated table in `assets/shaders/m1_taipei_slice.hlsl` | 60 original capsule-SDF glyphs: Latin, digits/punctuation, 台北, and 一–七; no third-party font source | Proprietary / Project First-Party |
-| Original 4-Track Soundtrack (OST) | `assets/audio/01_neon_orchid.mp3` .. `04_glass_dragon.mp3` | Original first-party soundtrack (*Neon Orchid*, *Acid Lotus*, *Velvet Cipher*, *Glass Dragon*) | Proprietary / Project First-Party |
-| Madame N Stage-Director IR | `assets/models/madame_n_director.{xml,bin,json}` | Generated deterministically by `tools/gen_madame_n_model.py` | Proprietary / Project First-Party |
+| Presentation Vector Glyphs | `tools/gen_title_glyphs.py`, generated table in `assets/shaders/m1_taipei_slice.hlsl` | 60 original capsule-SDF glyphs: Latin, digits/punctuation, 台北, and 一–七; no third-party font source | MIT (`LICENSE`) |
+| Original 4-Track Soundtrack (OST) | `assets/audio/01_neon_orchid.mp3` .. `04_glass_dragon.mp3` | Original first-party soundtrack (*Neon Orchid*, *Acid Lotus*, *Velvet Cipher*, *Glass Dragon*) | CC BY-NC 4.0 (`LICENSE-ASSETS.md`) |
+| Madame N Stage-Director IR | `assets/models/madame_n_director.{xml,bin,json}` | Generated deterministically by `tools/gen_madame_n_model.py` | MIT (`LICENSE`) |
 | Poly Haven Scanned PBR, Botanical & HDRI Sources | `third_party/polyhaven_cc0/` (`provenance.json`) | Public-domain CC0-1.0 scans & HDRI compiled into `.bmesh` / `.btex` | CC0-1.0 |
 
 The seven distributed mesh assets are `shanghai_trestle`, `shenzhen_evtol`, `taipei_101_hero`, `glass_orchid_hero`, `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove`. The four distributed GPU texture-array assets are `pbr_albedo_alpha.btex` (`BC7_UNORM_SRGB`), `pbr_normal.btex` (`BC5_UNORM`), `pbr_ormt.btex` (`BC7_UNORM`), and `pbr_ibl_env.btex` (`RGBA16F`). The limited Chinese title glyphs do not constitute a general Chinese font.
