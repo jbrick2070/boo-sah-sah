@@ -2,7 +2,7 @@
 
 Paste each block into the matching Partner Center field. Limits are Partner Center's: notes for certification 2,000 characters, restricted capability justification 500.
 
-> **Blocker: the GitHub repository is private.** The Store must be able to open the privacy policy address without signing in, and the website and support links must work for customers. A link into this repository fails certification. Before submitting, either make the repository public, or publish `PRIVACY.md` at any public address (for example a public GitHub page or your own site) and use that address below.
+> The repository is public. The privacy policy address below works once `PRIVACY.md` is on `main` (PR "License and public privacy policy"). Check it in a signed-out browser window before submitting.
 
 ## Notes for certification (Submission options)
 
@@ -40,12 +40,12 @@ Declared for one optional effect that mixes the live camera into the film. It is
 | Field | Value |
 | --- | --- |
 | Category | Entertainment (or Photo & video) |
-| Privacy policy URL | A public address of `PRIVACY.md` (required because of the camera capability). Not a link into the private repository |
-| Website | Optional. A public page, or leave empty |
-| Support contact | A public page or an email address you choose to publish |
+| Privacy policy URL | `https://github.com/jbrick2070/boo-sah-sah/blob/main/PRIVACY.md` (required because of the camera capability) |
+| Website | `https://github.com/jbrick2070/boo-sah-sah` |
+| Support contact | `https://github.com/jbrick2070/boo-sah-sah/issues` (issues must be enabled on the repository) |
 | Minimum hardware | Windows 11 22H2 or newer, x64, Direct3D 12 GPU (Feature Level 11_0 or higher), stereo audio output |
 | Recommended hardware | A ray-tracing GPU (NVIDIA RTX, AMD RDNA 2 or newer, Intel Arc) for the full image |
-| Copyright and trademark | (c) 2026 Jeffrey A Brick. Original film, procedural art and music. Scanned textures and models are CC0 (Poly Haven); see LICENSES.md |
+| Copyright and trademark | (c) 2026 Jeffrey A Brick. Code MIT; soundtrack and cue sheets CC BY-NC 4.0. Scanned textures and models are CC0 (Poly Haven); see LICENSES.md |
 
 ## Age rating questionnaire (IARC)
 

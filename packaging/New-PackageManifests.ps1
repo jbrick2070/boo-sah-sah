@@ -45,8 +45,8 @@ Publisher: BOO SAH SAH Project
 PublisherUrl: https://github.com/$Repo
 PackageName: BOO SAH SAH
 PackageUrl: https://github.com/$Repo
-License: Proprietary
-LicenseUrl: https://github.com/$Repo/blob/main/LICENSES.md
+License: MIT
+LicenseUrl: https://github.com/$Repo/blob/main/LICENSE
 ShortDescription: A 360-second real-time film for Windows, rendered live with Direct3D 12 ray tracing.
 Tags:
 - film
@@ -79,7 +79,7 @@ $s = @{
   version = $Version
   description = 'A 360-second real-time film for Windows, rendered live with Direct3D 12 ray tracing.'
   homepage = "https://github.com/$Repo"
-  license = 'Proprietary'
+  license = 'MIT'
   architecture = @{ '64bit' = @{ url = "$base/boo-sah-sah-win64-portable.zip"; hash = $hash['boo-sah-sah-win64-portable.zip'].ToLowerInvariant() } }
   shortcuts = @(, @('boo_sah_sah.exe', 'BOO SAH SAH'))
   checkver = 'github'
