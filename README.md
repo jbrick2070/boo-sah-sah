@@ -134,3 +134,4 @@ Graphics failure triggers at most one teardown/recreation attempt while preservi
 - [Historical M1 Verification Report](docs/m1_verification_report.md)
 - [Changelog (M0–M10)](CHANGELOG.md)
 - [Licenses & Asset Provenance](LICENSES.md)
+- License: code and shaders are [MIT](LICENSE); the original soundtrack and cue sheets are [CC BY-NC 4.0](LICENSE-ASSETS.md); Poly Haven scans are CC0.
