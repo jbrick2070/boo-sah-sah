@@ -41,10 +41,25 @@ if (Test-Path -LiteralPath $layout) {
 }
 New-Item -ItemType Directory -Path $layout | Out-Null
 Copy-Item -Path (Join-Path $Stage '*') -Destination $layout -Recurse
-New-Item -ItemType Directory -Path (Join-Path $layout 'Assets') | Out-Null
+# The staged app already has an assets folder (shaders, meshes); the logos go beside them.
+New-Item -ItemType Directory -Force -Path (Join-Path $layout 'Assets') | Out-Null
 Copy-Item -Path (Join-Path $PSScriptRoot 'assets\*.png') -Destination (Join-Path $layout 'Assets')
+# Languages: descriptions.json maps a language tag to the package description. en-US is first and is the default.
+$descriptions = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'descriptions.json')) | ConvertFrom-Json
+$languages = @($descriptions.PSObject.Properties.Name)
+if ($languages[0] -ne 'en-US') { throw 'descriptions.json must list en-US first (the default language).' }
+foreach ($lang in $languages) {
+  if ($lang -notmatch '^[a-z]{2}-[A-Z]{2}$') { throw "descriptions.json: bad language tag $lang" }
+  $text = [string]$descriptions.$lang
+  if (-not $text.Trim() -or $text.Length -gt 2048) { throw "descriptions.json: the $lang description is empty or over 2048 characters." }
+  $dir = Join-Path $layout "Strings\$lang"; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $resw = "<?xml version=`"1.0`" encoding=`"utf-8`"?>`n<root>`n  <data name=`"AppDescription`" xml:space=`"preserve`"><value>$([Security.SecurityElement]::Escape($text))</value></data>`n</root>`n"
+  [IO.File]::WriteAllText((Join-Path $dir 'Resources.resw'), $resw, (New-Object Text.UTF8Encoding($false)))
+}
+$resources = ($languages | ForEach-Object { "    <Resource Language=`"$($_.ToLowerInvariant())`" />" }) -join "`n"
 $manifest = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'AppxManifest.xml')).
-  Replace('$IDENTITY_NAME$', $IdentityName).Replace('$PUBLISHER$', $Publisher).Replace('$PUBLISHER_DISPLAY$', $PublisherDisplay).Replace('$VERSION$', $Version)
+  Replace('$IDENTITY_NAME$', $IdentityName).Replace('$PUBLISHER$', $Publisher).Replace('$PUBLISHER_DISPLAY$', $PublisherDisplay).Replace('$VERSION$', $Version).
+  Replace('$RESOURCES$', $resources)
 [IO.File]::WriteAllText((Join-Path $layout 'AppxManifest.xml'), $manifest, (New-Object Text.UTF8Encoding($false)))
 
 $priconfig = Join-Path $out "priconfig-$Version.xml"
@@ -58,6 +73,7 @@ if ($LASTEXITCODE) { throw 'makepri new failed.' }
 Remove-Item -LiteralPath $priconfig -Force
 $extra = Get-ChildItem -LiteralPath $layout -Filter '*.pri' | Where-Object Name -ne 'resources.pri'
 if ($extra) { throw "makepri split the resources ($($extra.Name -join ', ')); the package needs one resources.pri." }
+Remove-Item -LiteralPath (Join-Path $layout 'Strings') -Recurse -Force   # compiled into resources.pri; not needed in the package
 
 & $makeappx pack /d $layout /p $msix /o /h SHA256 | Out-Null
 if ($LASTEXITCODE) { throw 'makeappx pack failed (run it by hand to see why).' }

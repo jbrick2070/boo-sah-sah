@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Microsoft Store package of BOO SAH SAH. make-msix.ps1 fills in the three Partner Center values and the version.
+<!-- Microsoft Store package of BOO SAH SAH. make-msix.ps1 fills in the three Partner Center values, the version,
+     and the language list and description (from descriptions.json).
      Identity name, publisher and publisher display name must be copied exactly from Partner Center
      (Product management > Product identity). -->
 <Package
@@ -9,27 +10,29 @@
   IgnorableNamespaces="uap rescap">
   <Identity Name="$IDENTITY_NAME$" Publisher="$PUBLISHER$" Version="$VERSION$" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>BOO SAH SAH</DisplayName>
+    <!-- Must match the name reserved in Partner Center exactly: "Boo Sah Sah". -->
+    <DisplayName>Boo Sah Sah</DisplayName>
     <PublisherDisplayName>$PUBLISHER_DISPLAY$</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
-    <Description>A 360-second real-time film for Windows, rendered live with Direct3D 12 ray tracing.</Description>
+    <Description>ms-resource:AppDescription</Description>
   </Properties>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
   <Resources>
-    <Resource Language="en-us" />
+$RESOURCES$
   </Resources>
   <Applications>
     <Application Id="App" Executable="boo_sah_sah.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="BOO SAH SAH" Description="A 360-second real-time film for Windows, rendered live with Direct3D 12 ray tracing."
+      <uap:VisualElements DisplayName="Boo Sah Sah" Description="ms-resource:AppDescription"
         BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
     </Application>
   </Applications>
   <Capabilities>
     <!-- A Win32 Direct3D 12 app: it loads optional GPU helper libraries (NRD, OpenVINO) from its own folder. -->
     <rescap:Capability Name="runFullTrust" />
-    <!-- Only used when the viewer turns on the opt-in webcam input (key W); off by default. -->
+    <!-- Only used when the viewer turns on the opt-in webcam input (key W); off by default.
+         Covered by PRIVACY.md, whose web address is the privacy policy in the Store listing. -->
     <DeviceCapability Name="webcam" />
   </Capabilities>
 </Package>
