@@ -1596,6 +1596,7 @@ int main(int argc, char** argv) {
         audio.shutdown();
         return 1;
     }
+    window.showLoading();
     (void)window.pumpMessages();
 
     D3D12Context d3d;
@@ -1609,10 +1610,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    (void)window.pumpMessages();
+
     // 5. Initialize cue-routed primary + embedded-safe-fallback visual effects
     M1TaipeiSliceEffect* liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, startupSpec, orchestrator);
 
+    (void)window.pumpMessages();
     const HardwareResult visualInit = orchestrator.initializeEffects(false);
+    (void)window.pumpMessages();
     BOO_LOG_INFO("Render", std::string("Active visual backend: ") + orchestrator.activeEffectName() +
                            " [" + visualInit.diagnosticCode + "]");
 
@@ -2714,6 +2719,7 @@ int main(int argc, char** argv) {
                 double completedGpuMs = 0.0;
                 const bool presented = d3d.endFrameAndPresent(settings.vsync, completedGpuMs);
                 const bool published = spoutSender.completePublish();
+                if (presented) window.hideLoading();
                 if (!presented || !published) {
                     recoverGraphics(presented ? "Spout GPU publication did not retire." : "Frame submission or Present failed.");
                 } else if (completedGpuMs > 0.0) {

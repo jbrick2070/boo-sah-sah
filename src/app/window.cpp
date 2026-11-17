@@ -68,6 +68,7 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         case WM_PAINT:
             if (self->paintGraphicsFailureFromWndProc()) return 0;
+            if (self->paintLoadingFromWndProc()) return 0;
             break;
         case WM_SYSKEYDOWN: {
             if (wParam == VK_RETURN && (lParam & (1 << 29)) && !(lParam & 0x40000000)) {
@@ -232,6 +233,7 @@ bool AppWindow::create(
     fullscreen_ = minimized_ = resized_ = false;
     commandQueue_.clear();
     graphicsFailureText_.clear();
+    loading_ = false;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     const HINSTANCE hInst = GetModuleHandleW(nullptr);
@@ -423,6 +425,46 @@ bool AppWindow::paintGraphicsFailureFromWndProc() {
     const UINT align = uiIsRightToLeft() ? (DT_RIGHT | DT_RTLREADING) : DT_LEFT;
     DrawTextW(dc, graphicsFailureText_.c_str(), -1, &r, align | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
     SelectObject(dc, oldFont);
+    EndPaint(hwnd_, &ps);
+    return true;
+}
+
+void AppWindow::showLoading() {
+    loading_ = true;
+    if (hwnd_) {
+        InvalidateRect(hwnd_, nullptr, TRUE);
+        UpdateWindow(hwnd_);
+    }
+}
+
+bool AppWindow::paintLoadingFromWndProc() {
+    if (!hwnd_ || !loading_) return false;
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(hwnd_, &ps);
+    RECT r{};
+    GetClientRect(hwnd_, &r);
+    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    const int dpi = static_cast<int>(GetDpiForWindow(hwnd_));
+    const int titlePx = MulDiv(30, dpi, 96);
+    const int bodyPx = MulDiv(17, dpi, 96);
+    HFONT titleFont = CreateFontW(-titlePx, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT bodyFont = CreateFontW(-bodyPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    SetBkMode(dc, TRANSPARENT);
+    const int midY = (r.top + r.bottom) / 2;
+    const UINT rtl = uiIsRightToLeft() ? DT_RTLREADING : 0;
+    auto oldFont = SelectObject(dc, titleFont ? titleFont : GetStockObject(DEFAULT_GUI_FONT));
+    SetTextColor(dc, RGB(235, 240, 240));
+    RECT titleRect{r.left, midY - titlePx - bodyPx / 2, r.right, midY};
+    DrawTextW(dc, L"BOO SAH SAH", -1, &titleRect, DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, bodyFont ? bodyFont : GetStockObject(DEFAULT_GUI_FONT));
+    SetTextColor(dc, RGB(150, 200, 195));
+    RECT bodyRect{r.left, midY + bodyPx / 2, r.right, midY + bodyPx * 3};
+    DrawTextW(dc, uiText(UiText::Loading), -1, &bodyRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | rtl);
+    SelectObject(dc, oldFont);
+    if (titleFont) DeleteObject(titleFont);
+    if (bodyFont) DeleteObject(bodyFont);
     EndPaint(hwnd_, &ps);
     return true;
 }

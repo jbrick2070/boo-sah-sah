@@ -5,12 +5,13 @@
 
 namespace boo {
 
-// The words the app shows through Windows itself (message boxes and the GDI graphics-failure panel).
+// The words the app shows through Windows itself (message boxes, the GDI loading screen and the GDI graphics-failure panel).
 // The in-film HUD and titles are drawn by shader glyph tables and are not covered here.
 enum class UiText : uint32_t {
     UnsupportedGpuBody,
     UnsupportedGpuTitle,
     GraphicsFailureBody,
+    Loading,
     Count
 };
 

@@ -121,6 +121,10 @@ public:
     void toggleBorderlessFullscreen();
     void showGraphicsFailure(const std::string& reason);
     bool paintGraphicsFailureFromWndProc();
+    // GDI "Loading..." screen shown from window creation until the first frame is presented.
+    void showLoading();
+    void hideLoading() noexcept { loading_ = false; }
+    bool paintLoadingFromWndProc();
     void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
     void fitFullscreenToMonitor();
 
@@ -167,6 +171,7 @@ private:
     std::deque<TransportCommand> commandQueue_;
     std::deque<std::wstring> droppedFiles_;
     std::wstring graphicsFailureText_;
+    bool loading_ = false;
 };
 
 } // namespace boo

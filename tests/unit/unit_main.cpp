@@ -1194,9 +1194,9 @@ bool testUiTextLanguages() {
     for (size_t lang = 0; lang < boo::uiLanguageCount(); ++lang) {
         for (uint32_t id = 0; id < static_cast<uint32_t>(UiText::Count); ++id) {
             const std::wstring text = boo::uiTextAt(lang, static_cast<UiText>(id));
-            BOO_CHECK(text.size() > 8);
+            BOO_CHECK(text.size() > (id == static_cast<uint32_t>(UiText::Loading) ? 2u : 8u));
             // Every translation of the first two strings keeps the product name; the box body keeps the API name.
-            if (id != static_cast<uint32_t>(UiText::GraphicsFailureBody)) BOO_CHECK(text.find(L"BOO SAH SAH") != std::wstring::npos);
+            if (id != static_cast<uint32_t>(UiText::GraphicsFailureBody) && id != static_cast<uint32_t>(UiText::Loading)) BOO_CHECK(text.find(L"BOO SAH SAH") != std::wstring::npos);
             if (id == static_cast<uint32_t>(UiText::UnsupportedGpuBody)) BOO_CHECK(text.find(L"Direct3D 12") != std::wstring::npos);
             if (lang > 0) BOO_CHECK(text != boo::uiTextAt(0, static_cast<UiText>(id)));
         }
