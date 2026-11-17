@@ -7,7 +7,7 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-BOO SAH SAH is a six-minute (360 s) real-time film for Windows 11. It is not a game: there is no gameplay, no score, no sign-in, no ads, no purchases and no network use. The app works fully offline.
+BOO SAH SAH is a real-time GPU demo for Windows 11. It is not a game: there is no gameplay, no score, no sign-in, no ads, no purchases and no network use. The app works fully offline.
 
 To test:
 1. Turn the sound on and launch the app from the Start menu. The film starts by itself and plays in a window. Press F11 to toggle fullscreen and Esc at any time to exit.

@@ -47,7 +47,7 @@ PackageName: BOO SAH SAH
 PackageUrl: https://github.com/$Repo
 License: MIT
 LicenseUrl: https://github.com/$Repo/blob/main/LICENSE
-ShortDescription: A 360-second real-time demo for Windows, rendered live with Direct3D 12 ray tracing.
+ShortDescription: A real-time GPU demo for Windows, rendered live with Direct3D 12 ray tracing.
 Tags:
 - demo
 - direct3d12
@@ -77,7 +77,7 @@ ManifestVersion: 1.6.0
 
 $s = @{
   version = $Version
-  description = 'A 360-second real-time demo for Windows, rendered live with Direct3D 12 ray tracing.'
+  description = 'A real-time GPU demo for Windows, rendered live with Direct3D 12 ray tracing.'
   homepage = "https://github.com/$Repo"
   license = 'MIT'
   architecture = @{ '64bit' = @{ url = "$base/boo-sah-sah-win64-portable.zip"; hash = $hash['boo-sah-sah-win64-portable.zip'].ToLowerInvariant() } }
