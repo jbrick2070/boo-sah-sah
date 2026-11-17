@@ -91,7 +91,7 @@ When Explore mode is inactive, playback remains 100% deterministic and identical
 
 | Input | Function |
 |---|---|
-| `F` / Right-Mouse Drag / `F:EXPLOR` Pill | Toggle **6-DOF Interactive Explore Camera** (smooth `0.65 s` cubic blend back to live film camera on exit) |
+| `F` / Right-Mouse Drag / `F:EXPLOR` Pill | Toggle **6-DOF Interactive Explore Camera**. The film and music keep playing while you fly; `Space` pauses and resumes inside Explore, and a paused, still camera refines into the path-traced reference frame (smooth `0.65 s` cubic blend back to live film camera on exit) |
 | `W` `A` `S` `D` + `Q` / `E` (in Explore) | Fly Forward / Left / Back / Right + Down / Up (`Shift` = 3.5x sprint, `Ctrl`/`Alt` = 0.22x macro precision) |
 | Mouse Wheel / Gamepad `LT` `RT` | Smooth optical FOV zoom (`14 deg` macro telephoto to `85 deg` wide angle) |
 | XInput Gamepad (`Y` button + Sticks) | `Y` toggles Explore; Left Stick moves, Right Stick looks, `LB` cycles AOVs, `RB` spawns physics marbles, `D-Pad Left/Right` cycles Hero Presets |

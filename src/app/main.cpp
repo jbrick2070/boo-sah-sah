@@ -355,10 +355,10 @@ struct InteractiveExploreController {
         blendT = 1.0f;
         hasPrevState = false;
         window.setExploreKeyCapture(true);
-        clock.pause();
+        // The film and music keep running while you fly; Space pauses inside Explore, and a paused,
+        // still camera refines into the progressive path-traced frame.
         if (audioClockReady) {
             audio.setExploreAmbient(true);
-            audio.setPaused(true);
         }
         BOO_LOG_INFO("Explore", "Interactive RTX Explore camera ENABLED [F] (WASDQE + Mouse + Wheel + Alt-Drag Sun + NRD PT)");
     }
@@ -760,8 +760,9 @@ struct InteractiveExploreController {
         }
 
         const bool wasExploring = exploreActive;
+        const bool wasPaused = clock.state() == boo::TransportState::Paused || clock.state() == boo::TransportState::Ended;
         clock.seekToSeconds(targetSec);
-        clock.pause();
+        if (wasPaused) clock.pause(); else clock.resume();
         if (audioClockReady) {
             audio.setExploreAmbient(true);
             if (!wasExploring || !audio.hasExternalAudioFile()) {
@@ -769,7 +770,7 @@ struct InteractiveExploreController {
                     audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
                 }
             }
-            audio.setPaused(true);
+            audio.setPaused(clock.state() == boo::TransportState::Paused || clock.state() == boo::TransportState::Ended);
         }
         orchestrator.resetTo(clock.currentSeconds());
 
@@ -1988,13 +1989,8 @@ int main(int argc, char** argv) {
                     running = false;
                     break;
                 case TransportCommand::TogglePlayPause:
-                    if (interactiveCtrl.exploreActive &&
-                        (clock.state() == TransportState::Paused || clock.state() == TransportState::Ended)) {
-                        interactiveCtrl.exitExplore(clock, audio, audioClockReady, window);
-                    } else {
-                        clock.togglePause();
-                        audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
-                    }
+                    clock.togglePause();
+                    audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
                     break;
                 case TransportCommand::Restart: {
                     if (interactiveCtrl.exploreActive) {
