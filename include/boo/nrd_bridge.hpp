@@ -22,6 +22,7 @@ public:
     bool initialize(std::string* outReason = nullptr);
     bool resize(uint32_t width, uint32_t height);
     void shutdown() noexcept;
+    void resetHistory() noexcept;
 
     bool isAvailable() const noexcept;
     const std::string& statusString() const noexcept;

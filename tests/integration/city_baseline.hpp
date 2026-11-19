@@ -28,7 +28,8 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
         auto ctx = makeFilmGateContext(cue, anchor + offset * step, Edition::Family);
         if (gRoomBaseline) {
             auto& view = ctx.interactive;
-            view.exploreActive = true;
+            // Pin the camera without submitting Explore motion to the temporal denoiser.
+            // Hardware interactive history is exercised by the dedicated InteractiveCaptures suite.
             view.blendWeight = 1.0f;
             view.eye[0] = shot.oblique ? -1.50f : -0.45f;
             view.eye[1] = 0.16f;
@@ -106,9 +107,23 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
     std::vector<uint32_t> reference, replay;
     std::vector<uint8_t> rgba;
     BOO_CHECK(captureAnchor(rgba, reference));
+    std::vector<uint8_t> replayRgba;
     fx.resetTo(context(-warmup).filmTimeSeconds);
     BOO_CHECK(d3d.beginFrame() && present(context(-warmup)));
-    BOO_CHECK(captureAnchor(rgba, replay) && reference == replay);
+    BOO_CHECK(captureAnchor(replayRgba, replay) && replay.size() == reference.size());
+    uint32_t changedPixels = 0, maxCodeDelta = 0;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        if (reference[i] == replay[i]) continue;
+        ++changedPixels;
+        for (unsigned shift : {0u, 10u, 20u, 30u}) {
+            const int a = int((reference[i] >> shift) & 1023u), b = int((replay[i] >> shift) & 1023u);
+            maxCodeDelta = std::max(maxCodeDelta, uint32_t(std::abs(a - b)));
+        }
+    }
+    entry["seek_repeat_equal"] = changedPixels == 0;
+    entry["seek_changed_pixels"] = uint64_t(changedPixels);
+    entry["seek_max_code_delta"] = uint64_t(maxCodeDelta);
+    entry["replay_rgb10_fnv1a64"] = capturePixelHash(replay);
     const auto stats = fx.lastCityDrawStats();
     BOO_CHECK(stats.visibleCityPlacements <= stats.cityPlacements);
     BOO_CHECK(stats.cityDrawBatches <= stats.visibleCityInstances);
@@ -231,6 +246,7 @@ bool testCityBaseline() {
         sequences[0].shots.clear();
         sequences[1].shots = {{176, "taipei_sanctuary", "arcade_front"}, {176, "taipei_sanctuary", "arcade_oblique", true}};
     }
+    bool allSeeksMatched = true;
     for (const auto& sequence : sequences) {
         if (sequence.shots.empty()) continue;
         CueSheet cue;
@@ -245,6 +261,7 @@ bool testCityBaseline() {
         for (const auto& shot : sequence.shots) {
             JsonValue entry(JsonValue::Object{});
             BOO_CHECK(captureCityBaselineShot(d3d, fx, cue, cuePath, shot, directory, summary, samples, entry));
+            allSeeksMatched = entry["seek_repeat_equal"].asBool(false) && allSeeksMatched;
             report["frames"].asArrayMut().push_back(std::move(entry));
             BOO_CHECK(writeFilmGateJson(manifest, report));
         }
@@ -261,5 +278,8 @@ bool testCityBaseline() {
         BOO_CHECK(errors == 0);
     }
     report["complete"] = true;
-    return writeFilmGateJson(manifest, report);
+    report["all_seeks_matched"] = allSeeksMatched;
+    BOO_CHECK(writeFilmGateJson(manifest, report));
+    BOO_CHECK(allSeeksMatched);
+    return true;
 }

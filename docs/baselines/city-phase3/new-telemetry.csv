@@ -1,0 +1,3 @@
+shot,cue,film_id,scene,seconds,sample,frame_count,gpu_p50_ms,gpu_p95_ms,peak_process_local_bytes
+arcade_front,assets/cues/m2_trilogy_180s.json,boo-sah-sah-m2-trilogy-180s,taipei_sanctuary,176,8448000,60,11.088032,11.690048,1477304320
+arcade_oblique,assets/cues/m2_trilogy_180s.json,boo-sah-sah-m2-trilogy-180s,taipei_sanctuary,176,8448000,60,9.965664,10.608128,1477304320

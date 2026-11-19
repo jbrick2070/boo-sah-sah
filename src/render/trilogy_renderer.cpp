@@ -1467,6 +1467,12 @@ uint32_t TrilogyMeshRenderer::activeDenoiseMode() const noexcept {return impl_?i
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}
+void TrilogyMeshRenderer::resetTemporalHistory() noexcept {
+    impl_->nrd.resetHistory();
+    impl_->reblurFrameCounter = 0;
+    impl_->reblurPrevValid = false;
+    impl_->accumValid = false;
+}
 CityDrawStats TrilogyMeshRenderer::lastCityDrawStats() const noexcept {return impl_->lastStats;}
 bool TrilogyMeshRenderer::hasAllAuthoredSceneAssets() const noexcept {
     return impl_->fallbacks == 0 && !impl_->usedFallbackTexture;

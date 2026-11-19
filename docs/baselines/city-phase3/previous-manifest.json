@@ -1,0 +1,142 @@
+{
+  "adapter": "NVIDIA GeForce RTX 5080 Laptop GPU",
+  "all_seeks_matched": true,
+  "capture": "HUD off, no captions or audio-reactive input; RGB10A2 CanvasClean compared word for word after a backward seek; lossless WIC RGB8 PNG of the 8-bit conversion",
+  "complete": true,
+  "controls": "Family, clean canvas, sample-derived ScriptedDirector and analytical audio",
+  "debug_layer": false,
+  "edition": "Family",
+  "frames": [
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/m2_trilogy_180s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-m2-trilogy-180s",
+      "geometry": {
+        "active_instances": 2240,
+        "blas_bytes": 7667712,
+        "city_color_draws": 89,
+        "city_placements": 666,
+        "color_draws": 141,
+        "lod_placements": [
+          8,
+          4,
+          294
+        ],
+        "module_blases": 429,
+        "ray_instances": 2240,
+        "tlas_bytes": 1441792,
+        "visible_city_instances": 948,
+        "visible_city_placements": 306
+      },
+      "gpu_p50_ms": 11.0906,
+      "gpu_p95_ms": 11.6011,
+      "peak_process_local_bytes": 1476386816,
+      "png": "arcade_front.png",
+      "replay_rgb10_fnv1a64": "d543f90371bbf5a4",
+      "rgb10_fnv1a64": "d543f90371bbf5a4",
+      "sample": 8448000,
+      "scene": "taipei_sanctuary",
+      "scene_seed": "13972176293143546493",
+      "seconds": 176,
+      "seek_changed_pixels": 0,
+      "seek_max_code_delta": 0,
+      "seek_repeat_equal": true
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/m2_trilogy_180s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-m2-trilogy-180s",
+      "geometry": {
+        "active_instances": 1951,
+        "blas_bytes": 7667712,
+        "city_color_draws": 93,
+        "city_placements": 666,
+        "color_draws": 145,
+        "lod_placements": [
+          9,
+          9,
+          317
+        ],
+        "module_blases": 429,
+        "ray_instances": 1951,
+        "tlas_bytes": 1441792,
+        "visible_city_instances": 1075,
+        "visible_city_placements": 335
+      },
+      "gpu_p50_ms": 9.88381,
+      "gpu_p95_ms": 10.4767,
+      "peak_process_local_bytes": 1476386816,
+      "png": "arcade_oblique.png",
+      "replay_rgb10_fnv1a64": "161fc994489fef61",
+      "rgb10_fnv1a64": "161fc994489fef61",
+      "sample": 8448000,
+      "scene": "taipei_sanctuary",
+      "scene_seed": "13972176293143546493",
+      "seconds": 176,
+      "seek_changed_pixels": 0,
+      "seek_max_code_delta": 0,
+      "seek_repeat_equal": true
+    }
+  ],
+  "height": 1440,
+  "preset": "Showcase",
+  "render_path": "preferred",
+  "sample_rate": 48000,
+  "schema": 1,
+  "timing": "D3D12 direct queue, clear through presentation draw, excluding DXGI Present wait, external compute queues and readback",
+  "vram": "Maximum sampled DXGI local-segment CurrentUsage for this process at measured frame retirement, bytes",
+  "width": 2560,
+  "window": "24 preroll frames then 60 consecutive samples at 60 Hz from each anchor; nearest-rank percentiles"
+}
