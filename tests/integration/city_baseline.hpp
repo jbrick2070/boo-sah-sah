@@ -1,5 +1,7 @@
 // Included by integration_main.cpp after film_capture_gate.hpp for the verified WIC
 // PNG writer and deterministic film context. This suite never shows its swapchain HWND.
+bool gCityForceRaster = false;
+
 struct CityBaselineShot {
     int seconds;
     const char* sceneId;
@@ -68,6 +70,7 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
     for (const auto kind : {EngineKind::RT, EngineKind::CUDA, EngineKind::Tensor, EngineKind::Codec}) {
         HardwareResult result;
         BOO_CHECK(fx.queryLiveEngineStatus(kind, result));
+        if (gCityForceRaster && kind == EngineKind::RT) BOO_CHECK(result.status == BackendStatus::Substituted);
         auto& backend = entry["backends"][toString(kind)];
         backend["status"] = toString(result.status);
         backend["backend"] = result.activeBackend;
@@ -92,6 +95,28 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
     fx.resetTo(context(-warmup).filmTimeSeconds);
     BOO_CHECK(d3d.beginFrame() && present(context(-warmup)));
     BOO_CHECK(captureAnchor(rgba, replay) && reference == replay);
+    const auto stats = fx.lastCityDrawStats();
+    BOO_CHECK(stats.visibleCityPlacements <= stats.cityPlacements);
+    BOO_CHECK(stats.cityDrawBatches <= stats.visibleCityInstances);
+    if (gCityForceRaster) BOO_CHECK(stats.rayInstances == 0);
+    if (std::string_view(shot.sceneId) == "signal_hijack" || std::string_view(shot.sceneId) == "taipei_sanctuary") {
+        BOO_CHECK(stats.cityDrawBatches > 0 && stats.visibleCityInstances >= 5u * stats.cityDrawBatches);
+    }
+    auto& city = entry["geometry"];
+    city["active_instances"] = uint64_t(stats.activeInstances);
+    city["city_placements"] = uint64_t(stats.cityPlacements);
+    city["visible_city_placements"] = uint64_t(stats.visibleCityPlacements);
+    city["visible_city_instances"] = uint64_t(stats.visibleCityInstances);
+    city["city_color_draws"] = uint64_t(stats.cityDrawBatches);
+    city["color_draws"] = uint64_t(stats.rasterBatches);
+    city["ray_instances"] = uint64_t(stats.rayInstances);
+    city["module_blases"] = uint64_t(stats.templateBlases);
+    city["blas_bytes"] = stats.blasBytes;
+    city["tlas_bytes"] = stats.tlasBytes;
+    city["lod_placements"] = JsonValue::Array{};
+    for (const auto countAtLod : stats.lodPlacements) {
+        city["lod_placements"].asArrayMut().emplace_back(uint64_t(countAtLod));
+    }
     uint64_t nonFinite = 0;
     BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &error) && nonFinite == 0);
     const auto luma = computeRgba8LumaMetrics(rgba);
@@ -129,6 +154,9 @@ bool testCityBaseline() {
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     BOO_CHECK(!ec);
+    if (gRequireDebugLayer) {
+        BOO_CHECK(Logger::instance().openLogFile(directory / "d3d12-validation.log"));
+    }
     JsonValue report(JsonValue::Object{});
     report["schema"] = 1;
     report["complete"] = false;
@@ -156,7 +184,8 @@ bool testCityBaseline() {
     report["sample_rate"] = 48000;
     report["width"] = 2560;
     report["height"] = 1440;
-    report["controls"] = "Family, clean canvas, sample-derived ScriptedDirector and analytical audio, default preferred graphics paths";
+    report["render_path"] = gCityForceRaster ? "forced raster" : "preferred";
+    report["controls"] = "Family, clean canvas, sample-derived ScriptedDirector and analytical audio";
     report["capture"] = "HUD off, no captions or audio-reactive input; RGB10A2 CanvasClean compared word for word after a backward seek; lossless WIC RGB8 PNG of the 8-bit conversion";
     report["timing"] = "D3D12 direct queue, clear through presentation draw, excluding DXGI Present wait, external compute queues and readback";
     report["window"] = "24 preroll frames then 60 consecutive samples at 60 Hz from each anchor; nearest-rank percentiles";
@@ -188,6 +217,7 @@ bool testCityBaseline() {
         const auto cuePath = std::string("assets/cues/") + sequence.file + ".json";
         BOO_CHECK(loadCueSheetFromFile(resolveResourcePath(cuePath), cue, validation) && validation.valid);
         M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, resolveShowVisualMode(cue));
+        if (gCityForceRaster) fx.setDisableRt(true);
         BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
         BOO_CHECK(fx.canvasWidth() == spec.renderWidth && fx.canvasHeight() == spec.renderHeight);
         BOO_CHECK(fx.hasAllAuthoredSceneAssets());
@@ -201,7 +231,14 @@ bool testCityBaseline() {
     }
     summary.close();
     samples.close();
-    BOO_CHECK(summary.good() && samples.good() && d3d.debugErrorCount() == 0);
+    BOO_CHECK(summary.good() && samples.good());
+    if (d3d.debugLayerActive()) {
+        const auto errors = d3d.debugErrorCount();
+        report["validation_errors"] = uint64_t(errors);
+        report["validation_warnings"] = uint64_t(d3d.debugWarningCount());
+        BOO_CHECK(writeFilmGateJson(manifest, report));
+        BOO_CHECK(errors == 0);
+    }
     report["complete"] = true;
     return writeFilmGateJson(manifest, report);
 }

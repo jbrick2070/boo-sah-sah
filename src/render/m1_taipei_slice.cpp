@@ -2902,6 +2902,10 @@ bool M1TaipeiSliceEffect::hasAllAuthoredSceneAssets() const noexcept {
     return impl_ && impl_->trilogyMesh && impl_->trilogyMesh->hasAllAuthoredSceneAssets();
 }
 
+CityDrawStats M1TaipeiSliceEffect::lastCityDrawStats() const noexcept {
+    return impl_ && impl_->trilogyMesh ? impl_->trilogyMesh->lastCityDrawStats() : CityDrawStats{};
+}
+
 GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     const FrameContext& ctx,
     M1CameraState& outCam) const noexcept {

@@ -2352,6 +2352,7 @@ int main(int argc, char** argv) {
         else if (option == "--trilogy-captures") trilogyCaptures = true;
         else if (option == "--film-captures") filmCaptures = true;
         else if (option == "--city-baseline") cityBaseline = true;
+        else if (option == "--city-baseline-raster") { cityBaseline = true; gCityForceRaster = true; }
         else if (option == "--hero-video-capture") heroVideoCapture = true;
         else if (option == "--interactive-captures") interactiveCaptures = true;
         else if (option == "--validation-captures") validationCaptures = true;
