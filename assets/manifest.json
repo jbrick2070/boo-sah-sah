@@ -264,7 +264,7 @@
       "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
-      "sha256": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15"
+      "sha256": "4269b834e07ccd80a138f0f2d0346b800e117306ecd6407ce42a350e69520e92"
     },
     {
       "id": "mesh_shenzhen_evtol",
@@ -527,7 +527,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "ab882f14197cb6ce8ebc2fefc4aea7b16a5027b1914bc8258dd43eccb6332994"
+      "sha256": "58c529fb31b58b444af69fb5fa6ac21480f7bd614fd8541d1edc6e7c644df239"
     },
     {
       "id": "tool_installer_setup_main",
