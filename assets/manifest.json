@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "project": "BOO SAH SAH — The Glass Orchid Protocol",
+  "project": "BOO SAH SAH â€” The Glass Orchid Protocol",
   "milestone": "M10",
   "assets": [
     {
@@ -349,7 +349,7 @@
       "id": "ost_01_neon_orchid",
       "path": "assets/audio/01_neon_orchid.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid — Taiwanese Spy Jazz)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid â€” Taiwanese Spy Jazz)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/01_neon_orchid.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -360,7 +360,7 @@
       "id": "ost_02_acid_lotus",
       "path": "assets/audio/02_acid_lotus.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus — Taiwanese Detroit Techno)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus â€” Taiwanese Detroit Techno)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/02_acid_lotus.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -371,7 +371,7 @@
       "id": "ost_03_velvet_cipher",
       "path": "assets/audio/03_velvet_cipher.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher — Cinematic Taiwanese Synth-Funk)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher â€” Cinematic Taiwanese Synth-Funk)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/03_velvet_cipher.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -382,7 +382,7 @@
       "id": "ost_04_glass_dragon",
       "path": "assets/audio/04_glass_dragon.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon — Progressive Demoscene Electronica)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon â€” Progressive Demoscene Electronica)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/04_glass_dragon.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -583,6 +583,17 @@
       "license": "MIT",
       "attribution_required": true,
       "sha256": "40d0fad55b20ed293c3e27832bf8d179c0acb5e19a9dbcf5df4411cbb0c0902f"
+    },
+    {
+      "id": "tool_encode_taipei_slice",
+      "path": "tools/encode_taipei_slice.py",
+      "kind": "tool",
+      "provenance": "Original matched 10-bit review clip encoder",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "23cf6ba53f2b9eb271d669896c9147189fd1352a76c7d4bc2b5ff93bb9c65dd3"
     }
   ]
 }
