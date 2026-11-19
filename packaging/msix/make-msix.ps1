@@ -114,6 +114,18 @@ function Assert-StorePackage([string]$path) {
     if ($exeHash -ne (Get-FileHash -LiteralPath (Join-Path $Stage 'boo_sah_sah.exe')).Hash) {
       throw 'The Store executable differs from the staged Release executable.'
     }
+    $stageShaders = @(Get-ChildItem -LiteralPath (Join-Path $Stage 'assets/shaders') -File -Filter '*.cso')
+    $packedShaders = @($entries.Keys | Where-Object { $_ -match '^assets/shaders/[^/]+\.cso$' })
+    Assert-SameSet 'Compiled renderer shaders' @($stageShaders | ForEach-Object { 'assets/shaders/' + $_.Name }) $packedShaders
+    foreach ($shader in $stageShaders) {
+      $entry = $entries['assets/shaders/' + $shader.Name]
+      if ($entry.Length -le 0) { throw "Empty compiled renderer shader: $($shader.Name)" }
+      $stream = $entry.Open()
+      try { $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash } finally { $stream.Dispose() }
+      if ($hash -ne (Get-FileHash -LiteralPath $shader.FullName).Hash) {
+        throw "Store shader differs from the staged build: $($shader.Name)"
+      }
+    }
     $assets = (Read-PackedText $entries['assets/manifest.json']) | ConvertFrom-Json
     $soundtrack = @($assets.assets | Where-Object { $_.kind -eq 'audio' } | ForEach-Object { $_.path })
     Assert-SameSet 'Packaged soundtrack files' $soundtrack @($entries.Keys | Where-Object { $_ -match '^assets/audio/[^/]+$' })

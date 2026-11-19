@@ -34,6 +34,7 @@ enum class TransportCommand : uint8_t {
     ToggleSpoutRuntime,
     ToggleCameraRuntime,
     CycleAbCompareEngine,
+    CompareRT, CompareCUDA, CompareTensor, CompareCodec, CompareNPU, CloseComparison,
     ToggleFullscreen,
     SelectModeFull,
     SelectModeRT,

@@ -67,13 +67,15 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_SYSCOMMAND:
             if ((wParam & 0xFFF0u) == kMapAttributionCommand) {
-                MessageBoxW(hwnd,
+                std::wstring credit =
                     L"Taipei · 臺北\n\n© OpenStreetMap contributors\n"
                     L"https://www.openstreetmap.org/copyright\nOpen Data Commons ODbL 1.0\n\n"
                     L"SRTM · NASA / NGA / USGS · Mapzen Terrain Tiles\n"
                     L"https://registry.opendata.aws/terrain-tiles/\n\n"
-                    L"map-data/TAIPEI-MAP-NOTICE.txt",
-                    L"BOO SAH SAH · Taipei", MB_OK | MB_ICONINFORMATION);
+                    L"map-data/TAIPEI-MAP-NOTICE.txt\n\n"
+                    L"Taipei 101 · 台北 101\nC.Y. Lee & Partners · 李祖原聯合建築師事務所\nhttps://www.cylee.com/project/Taipei-101\n\n";
+                credit += uiText(UiText::IndependentProduction);
+                MessageBoxW(hwnd, credit.c_str(), L"BOO SAH SAH · Taipei", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
             break;
@@ -308,7 +310,7 @@ bool AppWindow::create(
     }
     if (HMENU systemMenu = GetSystemMenu(hwnd_, FALSE)) {
         AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(systemMenu, MF_STRING, kMapAttributionCommand, L"Taipei · © OpenStreetMap…");
+        AppendMenuW(systemMenu, MF_STRING, kMapAttributionCommand, L"Taipei 101 · 臺北 · © OpenStreetMap…");
     }
 
     RECT actualClient{};

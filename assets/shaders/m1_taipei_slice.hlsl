@@ -1878,16 +1878,27 @@ static const float UI_CAPTION_TOP = 960.0;
 // A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
 // the same site uses; `cells` is the room the label has, in 5-unit glyph cells. Returns `fallback`
 // (the glyph-table English) when no translation is loaded.
-float uiLabel(float2 px, float2 origin, float scale, float cells, uint id, float fallback)
+float uiLabel(float2 px, float2 origin, float scale, float cells, uint id, float fallback, float nativeScale = 0.0)
 {
     if ((gHudFlags & 0x10000u) == 0u)
         return fallback;
     float2 rel = floor(px) - floor(origin - float2(0.0, 2.5 * scale));
     float2 box = float2(cells * 5.0 * scale, 11.0 * scale);
-    float2 cell = float2(160.0, 20.0) * clamp(floor(gSwapchainAndCanvas.y / 540.0), 1.0, 3.0);
-    if (any(rel < 0.0) || any(rel >= box) || any(rel >= cell))
+    float atlasScale = clamp(floor(gSwapchainAndCanvas.y / 540.0), 1.0, 3.0);
+    float2 cell = float2(160.0, 20.0) * atlasScale;
+    if (any(rel < 0.0) || any(rel >= box))
         return 0.0;
     float2 base = float2((float)(id & 3u), (float)(id >> 2u)) * cell;
+    // The same localized status badge is shown at different sizes in the table
+    // and the responsive comparison banners. Sample the full DirectWrite label.
+    if (nativeScale > 0.0 && abs(nativeScale * atlasScale - scale) > 0.01) {
+        float2 src = (rel + 0.5) * (nativeScale * atlasScale / scale);
+        if (any(src >= cell)) return 0.0;
+        uint w, h;
+        gUiTextTex.GetDimensions(w, h);
+        return gUiTextTex.SampleLevel(gLinearClamp, (base + clamp(src, 0.5, cell - 0.5)) / float2(w,h), 0);
+    }
+    if (any(rel >= cell)) return 0.0;
     return gUiTextTex.Load(int3(base + rel, 0));
 }
 
@@ -2493,18 +2504,27 @@ float3 livePillarModeColor(uint modeNib)
     return float3(0.42, 0.46, 0.56);                    // OFF / STANDBY
 }
 
+uint4 hardwareRowWord(uint engine)
+{
+    if (engine == 1u) return uint4(67u, 85u, 68u, 65u); // CUDA
+    if (engine == 2u) return uint4(84u, 78u, 83u, 82u); // TNSR
+    if (engine == 3u) return uint4(67u, 79u, 68u, 67u); // CODC
+    if (engine == 4u) return uint4(78u, 80u, 85u, 32u); // NPU
+    return uint4(82u, 84u, 32u, 32u);                   // RT
+}
+
 float liveStateLabel(float2 px, float2 origin, float scale, uint state)
 {
     if (state == 4u) {
         float text = sampleWord4(px, origin, scale, 73u, 68u, 76u, 69u); // IDLE
-        return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_IDLE, text);
+        return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_IDLE, text, 1.45);
     }
     uint4 word = uint4(76, 73, 86, 69); // LIVE
     if (state == 1u) word = uint4(83, 85, 66, 32); // SUB
     if (state == 2u) word = uint4(79, 70, 70, 32); // OFF
     if (state == 3u) word = uint4(70, 76, 84, 32); // FLT
     float text = sampleWord4(px, origin, scale, word.x, word.y, word.z, word.w);
-    return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_LIVE + state, text);
+    return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_LIVE + state, text, 1.45);
 }
 
 // DirectorHudBackend in render.hpp distinguishes CPU inference from the scripted director.
@@ -2519,11 +2539,11 @@ float directorStateLabel(float2 px, float2 origin, float scale, uint backend)
 {
     if (backend == 1u) {
         float text = sampleWord8(px, origin, scale, 87u, 65u, 82u, 77u, 85u, 80u, 32u, 32u); // WARMUP
-        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_WARMING, text);
+        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_WARMING, text, 1.45);
     }
     if (backend == 4u) {
         float text = sampleWord8(px, origin, scale, 83u, 67u, 82u, 73u, 80u, 84u, 32u, 32u); // SCRIPT
-        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_SCRIPT, text);
+        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_SCRIPT, text, 1.45);
     }
     if (backend == 3u) return sampleWord4(px, origin + float2(10.0 * scale, 0), scale, 67u, 80u, 85u, 32u);
     return liveStateLabel(px, origin + float2(5.0 * scale, 0), scale, backend == 2u ? 0u : (backend == 5u ? 3u : 2u));
@@ -2856,8 +2876,14 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float hdrTxt = sampleWord8(
                 px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale,
                 72u, 65u, 82u, 68u, 87u, 65u, 82u, 69u);
-            hdrTxt = uiLabel(px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale, 15.0, UI_LBL_HARDWARE, hdrTxt);
+            hdrTxt = uiLabel(px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale, 11.0, UI_LBL_HARDWARE, hdrTxt);
             sdr = lerp(sdr, colJade, hdrTxt);
+            const float2 headerPos = (px - liveMin) / uiScale;
+            if (headerPos.x >= 92.0 && headerPos.x < 120.0 && headerPos.y >= 2.0 && headerPos.y < 18.0) {
+                sdr = lerp(sdr, colJade * 0.22, 0.85);
+                float abText = sampleWord4(px, liveMin + float2(96.0, 6.0) * uiScale, 1.25 * uiScale, 65u, 47u, 66u, 32u);
+                sdr = lerp(sdr, colEnamel, abText);
+            }
 
             float colSzTxt = sampleWord4(px, liveMin + float2(128.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 83u, 73u, 90u, 69u);
             float colMsTxt = sampleWord4(px, liveMin + float2(188.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 32u, 77u, 83u, 32u);
@@ -2880,13 +2906,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 }
                 float4 pm = gLivePillarMetrics[min(p, 3u)];
 
-                // Pillar name: "RT", "CUDA", "TNSR", "CODC"
-                uint n0 = 82u, n1 = 84u, n2 = 32u, n3 = 32u; // RT
-                if (p == 1u) { n0 = 67u; n1 = 85u; n2 = 68u; n3 = 65u; } // CUDA
-                if (p == 2u) { n0 = 84u; n1 = 78u; n2 = 83u; n3 = 82u; } // TNSR
-                if (p == 3u) { n0 = 67u; n1 = 79u; n2 = 68u; n3 = 67u; } // CODC
-                if (director) { n0 = 78u; n1 = 80u; n2 = 85u; n3 = 32u; } // NPU
-                float nameMask = sampleWord4(px, float2(liveMin.x + 8.0 * uiScale, rowY), 1.55 * uiScale, n0, n1, n2, n3);
+                uint4 word = hardwareRowWord(p);
+                float nameMask = sampleWord4(px, float2(liveMin.x + 8.0 * uiScale, rowY), 1.55 * uiScale, word.x, word.y, word.z, word.w);
                 sdr = lerp(sdr, colEnamel, nameMask);
                 if (director) {
                     float shortcut = sampleWord4(px, float2(liveMin.x + 34.0 * uiScale, rowY), 1.3 * uiScale, 91u, 52u, 93u, 32u);
@@ -3031,7 +3052,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         sdr = lerp(sdr, colJade, sampleFixedNumber6(px, float2(62, 12), 2, gVolumeAndPadding.x));
     }
     if (showOverlay && hudMode == 2u) {
-        const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float uiScale = clamp(min(floor(res.y / 540.0), floor(lbSize.x / 480.0)), 1.0, 3.0);
         const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
         float splitX = lbMin.x + lbSize.x * splitRatio;
         if (abs(px.x - splitX) < 1.35 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
@@ -3051,7 +3072,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         }
 
         float4 pm = gLivePillarMetrics[min(abEngine, 3u)];
-        float2 bannerSz    = float2(262.0 * uiScale, 28.0 * uiScale);
+        float2 bannerSz    = float2(min(262.0 * uiScale, (lbSize.x - 40.0 * uiScale) * 0.5), 28.0 * uiScale);
         float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
         float  rightMaxX   = max(lbMin.x + 14.0 * uiScale, lbMin.x + lbSize.x - bannerSz.x - 14.0 * uiScale);
         float2 rightBoxMin = float2(clamp(max(splitX + 14.0 * uiScale, leftBoxMin.x + bannerSz.x + 12.0 * uiScale), lbMin.x + 14.0 * uiScale, rightMaxX), lbMin.y + 14.0 * uiScale);
@@ -3108,20 +3129,45 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         sdr = lerp(sdr, abLeftHwVerified ? colJade : colAmber, lTxt);
         if (directorCompare) {
             float2 at = leftBoxMin + float2(112.0, 8.0) * uiScale;
-            uint pendingState = (gLivePillarMeta.y == 2u || gLivePillarMeta.y == 3u) ? 1u : gLivePillarMeta.y;
+            uint pendingState = measuredDirectorBackend();
+            if (pendingState == 2u || pendingState == 3u) pendingState = 4u;
             float detail = (abLeftHwVerified || cpuDirector)
                 ? max(sampleFixedMs6(px, at, 1.8 * uiScale, gVolumeAndPadding.y),
                       sampleWord4(px, at + float2(57.0 * uiScale, 0.0), 1.8 * uiScale, 77u, 83u, 32u, 32u)) // MS
                 : (pendingState == 4u ? 0.0 : directorStateLabel(px, at, 1.8 * uiScale, pendingState));
-            sdr = lerp(sdr, colEnamel, detail);
+            if (bannerSz.x >= 250.0 * uiScale) sdr = lerp(sdr, colEnamel, detail);
         } else {
-            sdr = lerp(sdr, colEnamel, max(lMs, lVal));
+            if (bannerSz.x >= 250.0 * uiScale) sdr = lerp(sdr, colEnamel, max(lMs, lVal));
         }
 
         float rTxt = sampleWord8(px, rightBoxMin + float2(8.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, rc0, rc1, rc2, rc3, rc4, rc5, rc6, rc7);
         if (directorCompare)
             rTxt = directorStateLabel(px, rightBoxMin + float2(8.0, 8.0) * uiScale, 1.8 * uiScale, 4u);
         sdr = lerp(sdr, colOrchid, rTxt);
+
+        // Current-shot comparisons. Technical abbreviations match the hardware table in every locale.
+        float2 tabPos = (px - lbMin) / uiScale - float2(14.0, 46.0);
+        if (res.x >= 480.0 && res.y >= 300.0 && tabPos.x >= 0.0 && tabPos.x < 238.0 && tabPos.y >= 0.0 && tabPos.y < 21.0) {
+            uint tab = (uint)(tabPos.x / 43.0);
+            float localX = tabPos.x - tab * 43.0;
+            if (localX < 40.0) {
+                bool selected = tab == abEngine;
+                sdr = lerp(sdr, selected ? colJade * 0.18 : float3(0.025, 0.038, 0.060), 0.94);
+                if (tabPos.y >= 19.0 && selected) sdr = colJade;
+                if (tab == 5u) {
+                    float2 center = float2(localX - 11.5, tabPos.y - 10.5);
+                    float stroke = abs(abs(center.x) - abs(center.y));
+                    float crossMark = saturate((1.2 - stroke) * uiScale) * saturate((5.5 - max(abs(center.x), abs(center.y))) * uiScale);
+                    sdr = lerp(sdr, colEnamel, crossMark);
+                } else {
+                    uint4 word = hardwareRowWord(tab);
+                    float inset = tab == 0u ? 13.0 : (tab == 4u ? 9.0 : 6.0);
+                    float2 at = lbMin + float2(14.0 + 43.0 * tab + inset, 52.0) * uiScale;
+                    float label = sampleWord4(px, at, 1.4 * uiScale, word.x, word.y, word.z, word.w);
+                    sdr = lerp(sdr, selected ? colJade : colEnamel, label);
+                }
+            }
+        }
     }
 
     // Persistent Bottom Interactive NVIDIA RTX Studio Dock (Pass 4 only; anchored right above Bottom Bar even during WIPE!)
@@ -3940,10 +3986,10 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     bool isM2 = (gSceneFlags & 2u) != 0u;
     bool isMutiny = (gSceneFlags & 16u) != 0u;
     bool isShow3D = (gSceneFlags & 32u) != 0u;
+    uint detail = (gSceneFlags >> 8u) & 3u;
     // Keep the full simulation workload, but draw a stable sparse subset so
     // the velocity field frames the hero instead of veiling its silhouette.
     if (isMutiny) {
-        uint detail = (gSceneFlags >> 8u) & 3u;
         uint stride = (detail == 0u) ? 9u : ((detail == 1u) ? 5u : 2u);
         if (((instId ^ (instId >> 3u)) % stride) != 0u) return vout;
     }
@@ -4017,7 +4063,22 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         ? (.32 * smoothstep(0, 2, min(abs(gFilmTime - 60), abs(gFilmTime - 120))))
         : (isMutiny ? 0.36 : (isShow3D ? 0.34 : 1.0));
 
-    if (!isMote)
+    // Illuminate two helical streams through the actual simulated positions.
+    // The flow's signed side sets its dye, and the velocity orients the tracers.
+    float streamSide = 0.0;
+    float stream = 0.0;
+    bool tracer = false;
+    if (isMutiny)
+    {
+        float2 radial = center.xz - float2(0.0, 5.50);
+        float phase = (center.y - 5.55) * 1.48;
+        streamSide = dot(radial, float2(cos(phase), sin(phase))) * rsqrt(max(dot(radial, radial), 0.01));
+        stream = smoothstep(0.65, 0.97, abs(streamSide));
+        energy *= lerp(0.13, detail > 0u ? 2.15 : 1.45, stream);
+        tracer = isMote && detail > 0u && (instId & 3u) == 1u;
+    }
+
+    if (!isMote || tracer)
     {
         float3 velProj = vel - viewDir * dot(vel, viewDir);
         float velMag = length(velProj);
@@ -4028,6 +4089,8 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         halfWid = max(desiredWid, pixelWorldSize * 0.75);
         energy *= saturate(desiredWid / max(halfWid, 1e-4));
         halfLen = clamp(length(vel) * ((isM2 || isShow3D) ? 0.010 : 0.013), halfWid * 3.0, (isM2 || isShow3D) ? 0.14 : (isMutiny ? 0.11 : 0.19));
+        if (tracer)
+            halfLen = max(halfWid * 2.8, min(0.095, 0.033 * velMag));
     }
     else
     {
@@ -4092,9 +4155,15 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         tint = baseHue * (0.62 + 0.75 * gRevealOpen01) * (1.0 + gEmissivePulse * 0.45);
     }
 
+    if (isMutiny)
+    {
+        float3 cool = lerp(float3(0.035, 0.54, 0.70), float3(0.33, 1.00, 0.78), stream);
+        float3 warm = isMidnight ? float3(0.96, 0.25, 0.67) : float3(1.00, 0.56, 0.18);
+        tint = lerp(cool, warm, smoothstep(-0.18, 0.18, streamSide)) * (0.62 + 0.25 * gEmissivePulse);
+    }
     vout.position     = float4(ndcX * zCam, ndcY * zCam, 0.5 * zCam, zCam);
     vout.quadUv       = corner;
-    vout.colorAndKind = float4(tint, isMote ? 1.0 : 0.0);
+    vout.colorAndKind = float4(tint, (isMote && !tracer) ? 1.0 : 0.0);
     vout.rayDist      = length(relCenter);
     vout.energyScale  = energy * lifeFade;
     return vout;

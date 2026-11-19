@@ -45,6 +45,9 @@ jobs:
           if ($deps -match '(?i)nvcuda|cudart|cublas|openvino|nvEncodeAPI|Spout|mfreadwrite|assimp|gltf|fbx|usd') { throw 'Forbidden optional import' }
       - name: Package and verify install, upgrades, rollback, uninstall
         run: ./scripts/package_release.ps1 -Preset ${{ matrix.preset }} -ExcludeOpenVinoRuntime
+      - name: Verify the base Store archive and its languages
+        if: matrix.preset == 'x64-base-release'
+        run: ./packaging/msix/make-msix.ps1 -IdentityName 'BooSahSah.BuildCheck' -Publisher 'CN=BooSahSahCI' -PublisherDisplay 'BOO SAH SAH CI'
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.preset }}

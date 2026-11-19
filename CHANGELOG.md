@@ -2,6 +2,27 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.3.0 — The seven-scene film and hardware comparisons
+
+- Taipei gains covered arcades, ceramic walk-ups and stepped office towers. Shenzhen’s waterfront surrounds the aircraft with more varied rooflines and lit floors. Repeated building parts share geometry in the normal view and in ray-traced reflections.
+- Nearby windows show six authored room interiors as the camera moves. Distant blocks use grouped window lighting that stays readable across the skyline.
+- The Hall of Mirrors has etched brass panels, and gold and jade threads run through the Neural Velvet canopy. The director steers two flower-shaped pools of light across Madame N’s stage. Particle Mutiny has two colored streams with tracers that follow their motion. Pearly enamel grows from the bases of the finale’s crystal petals before the dawn reveal.
+- Click a hardware row to compare its effect during any act, including while paused. Switch engines using the tabs above the image, then close the comparison to return to the previous HUD. The NPU comparison shows the active director and scripted lighting on the same GPU-rendered shot. The **[4]** control still opens the sanctuary demonstration.
+- The soundtrack now starts with the film clock after graphics warm-up. Slow startup keeps the opening music aligned with the first scene.
+
+## [Unreleased] — Soundtrack and director comparison
+
+- The bundled soundtrack uses lossless recordings from the four WAV masters. Playback applies the volume control directly. Music imported through the file picker or drag-and-drop keeps its original filename, including Unicode characters.
+- Press **4** to compare the neural stage director with scripted lighting in the same sanctuary shot. The Hardware table identifies the active route and reports completed inferences, latency, and measured rate. Seeking uses scripted lighting until the model returns a result for the new scene.
+- The codec row reads **Idle** between Signal Hijack scenes.
+
+## 1.1.0.0 — Shenzhen aircraft and recursive effects
+
+- The opening camera looks out across Taipei 101, arcaded shophouses and nine rows of city blocks extending toward the mountains. The Shenzhen waterfront gains an elevated railway, a five-car train, a twin-leg tower with skybridges, and outer neighborhoods around the bay.
+- The camera follows the six-rotor aircraft through its approach over Shenzhen. The cockpit, wings, and tilt rotors have new geometry, and six iridescent wakes follow the aircraft down to the pad.
+- Cinema mode keeps the selected rendering resolution during the intercept sequence. Telemetry carries the compressed broadcast in an inset. The full-screen codec and A/B controls remain available.
+- Press **7** to change effects detail. Higher settings add finer recursive patterns to Neural Velvet, more particles, and detail behind city windows. Safe mode uses the lowest setting. The control is localized in all 25 display languages.
+
 ## [Unreleased] — Live Audio Reactivity
 
 ### Added

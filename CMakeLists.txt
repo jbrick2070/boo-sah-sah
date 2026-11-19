@@ -387,6 +387,7 @@ add_library(boo_core STATIC
     src/render/btex.cpp
     src/render/nrd_bridge.cpp
     src/render/trilogy_renderer.cpp
+    src/render/city_modules.cpp
     src/render/m1_taipei_slice.cpp
     src/render/ui_text.cpp
     src/media/media_foundation_input.cpp
@@ -408,6 +409,7 @@ boo_apply_compiler_flags(boo_core)
 
 # Link strictly against inbox Windows 11 system libraries
 target_link_libraries(boo_core PUBLIC
+    bcrypt
     d3d12
     dxgi
     dxguid
@@ -429,6 +431,7 @@ target_link_libraries(boo_core PUBLIC
 
 # Stage runtime data directories into build folder for convenient direct launch
 add_custom_target(boo_stage_assets ALL
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/shaders" "${CMAKE_BINARY_DIR}/assets/shaders"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/meshes" "${CMAKE_BINARY_DIR}/assets/meshes"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/textures" "${CMAKE_BINARY_DIR}/assets/textures"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"

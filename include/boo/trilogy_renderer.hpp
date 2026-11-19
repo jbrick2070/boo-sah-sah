@@ -1,4 +1,5 @@
 #pragma once
+#include "boo/city_draw_stats.hpp"
 #include "boo/render.hpp"
 #include "boo/m1_scene.hpp"
 #include <memory>
@@ -22,6 +23,8 @@ public:
     uint32_t verifiedHits() const;
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;
+    CityDrawStats lastCityDrawStats() const noexcept;
+    void resetTemporalHistory() noexcept;
     bool hasAllAuthoredSceneAssets() const noexcept;
     void retire(uint32_t slot);
     bool resize(uint32_t width, uint32_t height);

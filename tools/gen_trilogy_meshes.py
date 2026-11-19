@@ -659,6 +659,72 @@ def shanghai():
         box('pudong_pavilion', (pv_x, 70.5, 1.45), (9.5, 4.2, 2.3), 14, part=5, bevel=.12, rough=.22)
         box('pudong_pavilion_glow', (pv_x, 68.5, 1.05), (7.6, 0.20, 0.95), 15, part=5, rough=.22)
 
+    # The moving train sees the vertical side frames at close range. A second
+    # flange and diagonal lacing give these posts depth from either direction.
+    # The knees stay over the maintenance walks, outside the rail clearance.
+    for frame, (y, height) in enumerate(truss_nodes):
+        for side in (-1, 1):
+            x = 4.55 * side
+            for fy in (y-.23, y+.23):
+                box('built_up_post_flange', (x, fy, height/2), (.34,.075,height), 11, part=1, rough=.41)
+            for level in range(8):
+                za, zb = .50 + (height-1.1)*level/8, .50 + (height-1.1)*(level+1)/8
+                offset = .22 if level % 2 else -.22
+                rod('post_lacing', (x-side*.13,y+offset,za), (x-side*.13,y-offset,zb),
+                    .047, 0, part=1, verts=6, rough=.42)
+            # This tapered plate supports an open triangular spandrel. A compact
+            # hooded amber lamp marks the inside face of each alternate pier.
+            profile = [(x, height-.12), (side*2.60, height-.12), (side*3.15,height-.54),
+                       (side*3.70,height-.86), (side*4.27,height-1.82), (x,height-2.05)]
+            ring = profile if side > 0 else list(reversed(profile))
+            verts = [(px, y+dy, pz) for dy in (-.16,.16) for px,pz in ring]
+            n = len(ring)
+            mesh('portal_knee_plate', verts,
+                 [tuple(range(n)), tuple(range(2*n-1,n-1,-1))] +
+                 [(j,j+n,(j+1)%n+n,(j+1)%n) for j in range(n)], 11, 1, rough=.44)
+            rod('lower_portal_flange', (side*4.27,y,height-1.82), (side*2.60,y,height-.12),
+                .10, 0, part=1, verts=8, rough=.46)
+            if frame % 2 == 1:
+                box('walkway_lamp_bracket', (x-side*.22,y-.24,2.30), (.52,.60,.28), 0, part=1, bevel=.04, rough=.43)
+                box('walkway_lamp_lens', (x-side*.23,y-.55,2.28), (.32,.055,.15), 15, part=1, bevel=.025, rough=.24)
+        if frame % 2 == 0:
+            # Shallow overhead Warren truss. The continuous slot between chords
+            # frames the next portal, then opens on the existing river span.
+            box('portal_lower_chord', (0,y,height-.54), (8.7,.20,.13), 11, part=1, rough=.40)
+            for bay in range(8):
+                x0 = -4.32 + 1.08 * bay
+                z0,z1 = (height-.50,height-.07) if bay % 2 == 0 else (height-.07,height-.50)
+                rod('portal_lattice_strap',(x0,y,z0),(x0+1.08,y,z1),.068,0,part=1,verts=6,rough=.44)
+
+    # River-facing galleries sit in front of the existing masonry skins. The
+    # recessed windows, columns and continuous stone entablature follow each
+    # block's yaw, so they remain attached around the bend in the embankment.
+    for bx, by, width, depth, height, _, yaw, _ in bund_heritage:
+        ca, sa = math.cos(yaw), math.sin(yaw)
+        def gallery_pos(u, v, z):
+            return (bx+ca*u-sa*v, by+sa*u+ca*v, z)
+        edge = width*.50
+        box('bund_gallery_steps',gallery_pos(edge+.38,0,1.0),(.95,depth*.93,.35),2,part=0,rot_z=yaw,rough=.50)
+        box('bund_gallery_entablature',gallery_pos(edge+.33,0,height*.63),
+            (1.05,depth*.97,.42),2,part=0,rot_z=yaw,rough=.42)
+        for bay in range(7):
+            v = (bay-3)*depth*.135
+            rod('bund_gallery_column',gallery_pos(edge+.56,v,1.16),gallery_pos(edge+.56,v,height*.63),
+                .18,2,part=0,verts=10,rough=.48)
+            if bay < 6:
+                box('bund_recessed_sash',gallery_pos(edge+.07,v+depth*.0675,height*.41),
+                    (.11,depth*.068,height*.23),15 if bay in (1,4) else 38,part=0,rot_z=yaw,rough=.32)
+
+    # North-bank second row behind the four established hero landmarks. Keep the
+    # centre open: these lower, occupied silhouettes step down toward the river.
+    for x,y,w,d,h,mat in [(-62,113,9,8,18,14),(-51,126,10,9,31,13),(-39,120,8,8,23,14),
+                           (48,119,8,10,23,13),(59,128,12,10,34,14),(72,123,10,9,19,5)]:
+        part = 3 if x < 0 else 4
+        box('riverbank_office_podium',(x,y,h*.17),(w*1.12,d*1.10,h*.34),2,part=part,rough=.46)
+        box('riverbank_office_wing',(x-w*.14,y,h*.49),(w*.65,d*.88,h*.97),mat,part=part,rough=.28)
+        box('riverbank_office_annex',(x+w*.29,y+d*.10,h*.33),(w*.31,d*.64,h*.65),mat,part=part,rough=.32)
+        box('riverbank_screened_crown',(x-w*.16,y+d*.04,h*.99),(w*.47,d*.56,h*.12),11,part=part,rough=.38)
+
 def avenue(tag, to_asset, x, depth, surface, length, width, east_west):
     # Keep local metric UVs on both axes so distant vehicle lights stay on the asphalt
     # when a district moves or changes scale for the final interior shot.

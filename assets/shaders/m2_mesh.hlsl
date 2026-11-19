@@ -24,15 +24,24 @@ cbuffer Scene : register(b0) {
 };
 
 cbuffer Draw : register(b1) {
-    float4 row0;
-    float4 row1;
-    float4 row2;
-    uint firstIndex;
-    uint material;
-    uint part;
-    uint unused;
+    float4 taipeiKit; // Kit translation and normalized district-space scale.
+    uint instanceBase;
 };
 
+struct InstanceData {
+    float4 world[3];
+    float4 worldToObject[3];
+    uint meshId;
+    uint materialSlice;
+    uint buildingSeed;
+    uint flags;
+};
+StructuredBuffer<InstanceData> sceneInstances : register(t8);
+StructuredBuffer<uint> meshFirstIndices : register(t9);
+
+uint triangleOffset(uint instanceId, uint primitive) {
+    return meshFirstIndices[sceneInstances[instanceId].meshId] + 3u * primitive;
+}
 StructuredBuffer<Vertex> vertices : register(t0);
 StructuredBuffer<uint>   indices  : register(t1);
 #if defined(M2_RT)
@@ -46,6 +55,8 @@ Texture2DArray<float4> gNormalTex      : register(t5);
 Texture2DArray<float4> gOrmtTex        : register(t6);
 Texture2DArray<float4> gEnvHdrTex      : register(t7);
 
+Texture2DArray<float4> roomFaces : register(t10);
+
 SamplerState linearClamp     : register(s0);
 SamplerState anisoWrap       : register(s1);
 SamplerState equirectSampler : register(s2);
@@ -56,15 +67,6 @@ static const float kSceneFar = 3200.0; // Includes Taipei's surveyed northern mo
 
 float3 norm(float3 v) {
     return v * rsqrt(max(dot(v, v), 1e-10));
-}
-
-float3 transformPoint(float3 p) {
-    float4 q = float4(p, 1.0);
-    return float3(dot(row0, q), dot(row1, q), dot(row2, q));
-}
-
-float3 transformNormal(float3 n) {
-    return norm(float3(dot(row0.xyz, n), dot(row1.xyz, n), dot(row2.xyz, n)));
 }
 
 float hash21(float2 p) {
@@ -148,11 +150,8 @@ uint aovMode() {
     return (interFlags >> 8u) & 0xFu;
 }
 
-uint drawPartId() {
-    return part & 0xFFFFu;
-}
-
-float3 unpackDrawMotion() {
+float3 unpackDrawMotion(uint part, uint unused) {
+    if ((part & 0xffffu) < 900u || (part & 0xffffu) >= 920u) return 0.0.xxx;
     uint hx = (part >> 16u) & 0xFFFFu;
     uint hy = unused & 0xFFFFu;
     uint hz = (unused >> 16u) & 0xFFFFu;
@@ -416,10 +415,95 @@ float velvetFiligree(float2 p, float footprint, float3 neuralColor) {
     return pattern;
 }
 
+// The stelae and enamel columns have longitudinal, object-locked UVs. Retain
+// the same finish when the surface is seen in a mirror or through the flower.
+float3 cathedralFinish(uint material, uint part, float2 uv, float coverage,
+                       inout float3 base, inout float rough, inout float metallic) {
+    if (material == 12u && part >= 200u && part <= 207u) {
+        float across = abs(2.0 * uv.y - 1.0);
+        float end = min(uv.x, 1.0 - uv.x);
+        float fan = abs(frac(5.0 * end - 0.36 * across + 0.50) - 0.50);
+        float aa = clamp(coverage * 5.4, 0.002, 0.22);
+        float etched = (1.0 - smoothstep(0.011, 0.018 + aa, fan))
+                     * (1.0 - smoothstep(0.13, 0.29, end)) * (1.0 - smoothstep(0.045, 0.11, coverage));
+        float edge = smoothstep(0.78, 0.86, across);
+        float brass = max(etched, edge * 0.78);
+        base = lerp(base, float3(0.51, 0.25, 0.082), brass);
+        rough = lerp(0.048, 0.32, brass);
+        metallic = lerp(metallic, 0.86, brass);
+        return brass * float3(0.13, 0.061, 0.015);
+    }
+    if (material == 20u && part >= 210u && part <= 215u) {
+        float height = saturate(uv.x);
+        float rib = 0.5 + 0.5 * cos(kTwoPi * (uv.y * 6.0 + 0.33 * height));
+        float root = (1.0 - smoothstep(0.05, 0.66, height)) * (0.55 + 0.38 * rib);
+        base *= lerp(1.0.xxx, float3(0.32, 0.62, 0.55), root);
+        rough = lerp(rough, 0.28, root);
+        return 0.0.xxx;
+    }
+    return 0.0.xxx;
+}
+
+// Periodic lozenges follow the warp and weft of the exported ribbon. The
+// neural field sets the height of the threads and the strength of the gold weft.
+float3 velvetThreads(float2 uv, float2 uvWidth, float3 field) {
+    float2 loom = float2(uv.x * 56.0, uv.y * 3.0);
+    float spread = dot(uvWidth, float2(56.0, 3.0));
+    float2 distance = abs(frac(float2(loom.x + loom.y, loom.x - loom.y) + 0.5) - 0.5);
+    float2 thread = 1.0 - smoothstep(0.045.xx, (0.085 + min(spread, 0.2)).xx, distance);
+    float visibility = 1.0 - smoothstep(0.12, 0.45, spread);
+    return visibility * (thread.x * float3(0.62, 0.27, 0.082) * (0.32 + 0.55 * field.r)
+                       + thread.y * float3(0.048, 0.31, 0.33) * (0.42 + 0.58 * field.b));
+}
+
 bool isCurtainWall(uint m) { return m == 5u || m == 13u || m == 14u; }
 
 bool isDistrictGlazing(uint m, uint partId) {
-    return isCurtainWall(m) && (act == 1u || (act == 2u && partId >= 2u && partId <= 4u));
+    return isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u || partId == 62u)));
+}
+
+// Unit-room slabs in tangent space. Face slices are back, left, right, floor and ceiling.
+float2 roomCoordinates(InstanceData data, float3 position, float3 T, float3 B, float2 authoredUv) {
+    if ((data.flags & 0xffffu) == 62u) return authoredUv;
+    float3 offset = position - float3(data.world[0].w, data.world[1].w, data.world[2].w);
+    float meters = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+    return float2(dot(offset, T), dot(offset, B)) * meters;
+}
+
+float3 roomEmission(float3 broad, uint seed, float2 meters, float2 meterWidth,
+                    float3 toEye, float3 N, float3 T, float3 B, float distanceMeters) {
+    float2 grid = meters / float2(3.0, 3.2);
+    float2 filterWidth = meterWidth / float2(3.0, 3.2);
+    float facing = saturate(dot(toEye, N));
+    float blend = (1.0 - smoothstep(160.0, 250.0, distanceMeters)) * smoothstep(0.05, 0.18, facing)
+                * (1.0 - smoothstep(0.13, 0.34, max(filterWidth.x, filterWidth.y)));
+    if (blend < 0.001) return broad;
+    float2 window = frac(grid);
+    float2 edges = min(window, 1.0 - window);
+    float2 pane = smoothstep(float2(0.09,0.11), float2(0.12,0.15) + filterWidth, edges);
+    int2 cell = (int2)floor(grid);
+    uint h = asuint(cell.x) * 0x7feb352du ^ asuint(cell.y) * 0x846ca68bu ^ seed;
+    h ^= h >> 15; h *= 0x9e3779b9u; h ^= h >> 16;
+    float3 ray = float3(-dot(toEye,T)/3.0, -dot(toEye,B)/3.2, facing/4.0);
+    float2 wall = (step(0.0, ray.xy) - window) /
+                  (lerp(-1.0.xx, 1.0.xx, step(0.0,ray.xy)) * max(abs(ray.xy), 1e-5));
+    float back = 1.0 / max(ray.z, 1e-5);
+    float3 hit = float3(window, 0) + min(back, min(wall.x, wall.y)) * ray;
+    uint face = 0u;
+    float2 uv = float2(hit.x, 1.0 - hit.y);
+    if (wall.x < back && wall.x < wall.y) {
+        face = ray.x < 0 ? 1u : 2u;
+        uv = float2(hit.z, 1.0 - hit.y);
+    } else if (wall.y < back) {
+        face = ray.y < 0 ? 3u : 4u;
+        uv = float2(hit.x, hit.z);
+    }
+    float mip = log2(max(1.0, 64.0 * max(filterWidth.x, filterWidth.y) / max(facing, 0.15)));
+    float3 room = roomFaces.SampleLevel(linearClamp, float3(saturate(uv), (h % 6u)*5u + face), mip).rgb;
+    float occupancy = ((h >> 8) & 7u) < 3u ? 0.13 : 1.0;
+    float trim = (1.0 - pane.x*pane.y);
+    float3 behindGlass = room * occupancy * (0.75 + 0.25*audioBandForBuilding(float(seed & 255u)));
+    return lerp(broad, behindGlass * (1.0 - trim) + 0.08*broad*trim, blend);
 }
 
 // Exact coverage of a repeated stripe, including its average when several stripes fit in one pixel.
@@ -430,8 +514,71 @@ float facadeStripe(float t, float fraction, float footprint) {
     return saturate((integrals.y - integrals.x) / w);
 }
 
-// Opaque district glazing shares one material evaluation between primary surfaces and reflected views.
-float3 shadeDistrictFacade(uint m, float3 p, float3 geomNormal, float3 toViewer, float3 footprint,
+// At street-block distances, occupied wings and floor plates survive the pixel filter
+// longer than individual rooms. Use the same averaged elevation in a reflection cone.
+float3 shadeBlockWindows(uint m, uint buildingSeed, float3 p, float3 n, float3 footprint,
+                         out float3 base, out float rough, out float metallic) {
+    bool housing = m == 13u;
+    bool jade = m == 5u;
+    bool xAxis = abs(n.z) >= abs(n.x);
+    float width = housing ? 0.78 : (jade ? 0.98 : 0.69);
+    float floorHeight = housing ? 0.51 : 0.65;
+    float u = (xAxis ? p.x : p.z) / width + float(buildingSeed & 31u);
+    float v = p.y / floorHeight;
+    float du = (xAxis ? footprint.x : footprint.z) / width;
+    float dv = footprint.y / floorHeight;
+    float suiteWidth = housing ? 3.0 : (jade ? 4.0 : 6.0);
+    float stackHeight = housing ? 5.0 : (jade ? 8.0 : 6.0);
+    float column = u / suiteWidth;
+    float level = (v + float((buildingSeed >> 5u) & 7u)) / stackHeight;
+
+    float pier = facadeStripe(column, housing ? 0.29 : (jade ? 0.16 : 0.075), du / suiteWidth);
+    float floorPlate = facadeStripe(v, housing ? 0.39 : 0.24, dv);
+    float bay = 1.0 - facadeStripe(u, housing ? 0.20 : 0.12, du);
+    float service = facadeStripe(level, housing ? 0.14 : 0.20, dv / stackHeight);
+    float glass = (1.0 - pier) * (1.0 - floorPlate) * bay * (1.0 - service);
+    float3 cladding = housing ? float3(0.31, 0.22, 0.14) :
+                     (jade ? float3(0.10, 0.20, 0.19) : float3(0.12, 0.17, 0.23));
+    float3 glazing = housing ? float3(0.035, 0.049, 0.048) :
+                    (jade ? float3(0.016, 0.070, 0.069) : float3(0.021, 0.049, 0.094));
+    base = lerp(cladding, glazing, glass);
+    rough = lerp(housing ? 0.55 : 0.37, 0.19, glass);
+    metallic = lerp(housing ? 0.15 : 0.49, 0.16, glass);
+
+    // Tenant leases span a few bays and one to three storeys. Stagger the suites
+    // in adjacent wings so the occupied regions don't become continuous bands.
+    float leaseWidth = housing ? 1.9 : (jade ? 3.7 : 3.1);
+    float leaseHeight = housing ? 1.7 : (jade ? 3.2 : 2.3);
+    float leaseColumn = floor(u / leaseWidth);
+    float seed = float((buildingSeed >> 12u) & 255u);
+    float leaseFloor = floor(v / leaseHeight + frac(leaseColumn * 0.618 + seed * 0.27));
+    float tenant = hash21(float2(leaseColumn + seed, leaseFloor + m));
+    float groupsResolved = 1.0 - smoothstep(0.26, 0.95, max(du / leaseWidth, dv / leaseHeight));
+    float typicalOccupancy = (housing ? 0.52 : 0.38) + 0.21 * (frac(seed * 0.71) - 0.5);
+    float occupancy = lerp(typicalOccupancy, smoothstep(0.91, 1.09, tenant + typicalOccupancy), groupsResolved);
+    float3 interior = housing ? float3(0.74, 0.32, 0.12) :
+                     (jade ? float3(0.13, 0.48, 0.40) : float3(0.30, 0.43, 0.63));
+    float warmth = saturate(2.3 * frac(tenant * 8.7) - 1.35) * groupsResolved;
+    interior = lerp(interior, housing ? float3(0.58, 0.40, 0.22) : float3(0.55, 0.45, 0.33), warmth * 0.58);
+    float3 rooms = interior * ((0.024 + 0.78 * occupancy) * glass);
+    // Recessed apartment stairwells, vertical facade fins, and double-height
+    // office sky lobbies give each family a distinct rhythm across the block.
+    float accent;
+    if (housing || jade) {
+        accent = facadeStripe(column - 0.21, housing ? 0.11 : 0.047, du / suiteWidth)
+               * (1.0 - floorPlate * (housing ? 0.83 : 0.30));
+    } else {
+        float lobbyWing = facadeStripe(column - 0.51, 0.49, du / suiteWidth);
+        accent = facadeStripe(level - 0.17, 0.12, dv / stackHeight) * lobbyWing;
+    }
+    float3 gallery = housing ? float3(0.51, 0.24, 0.095) :
+                    (jade ? float3(0.13, 0.48, 0.43) : float3(0.52, 0.31, 0.14));
+    float band = audioBandForBuilding(float(buildingSeed & 255u));
+    return (rooms + gallery * accent) * ((1.0 - smoothstep(0.08, 0.68, daylight)) * (1.0 + 0.20 * band));
+}
+
+// Near glass keeps motion parallax. Crossfade to the compact elevation as panes shrink.
+float3 shadeDistrictFacade(uint m, uint buildingSeed, float3 p, float3 geomNormal, float3 toViewer, float3 footprint,
                            inout float3 base, inout float rough, inout float metallic) {
     float wall = 1.0 - smoothstep(0.32, 0.82, abs(geomNormal.y));
     if (wall < 0.001) {
@@ -441,6 +588,19 @@ float3 shadeDistrictFacade(uint m, float3 p, float3 geomNormal, float3 toViewer,
         return 0.0.xxx;
     }
 
+    float3 blockBase = 0.0.xxx, blockLight = 0.0.xxx;
+    float blockRough = 0.0, blockMetallic = 0.0;
+    float faceWidth = abs(geomNormal.z) >= abs(geomNormal.x) ? footprint.x : footprint.z;
+    float blockWeight = cityExterior() ? smoothstep(0.012, 0.046, max(faceWidth, footprint.y)) : 0.0;
+    if (blockWeight > 0.0) {
+        blockLight = shadeBlockWindows(m, buildingSeed, p, geomNormal, footprint, blockBase, blockRough, blockMetallic) * wall;
+        if (blockWeight >= 1.0) {
+            base = blockBase;
+            rough = blockRough;
+            metallic = blockMetallic;
+            return blockLight;
+        }
+    }
     bool hotel = m == 13u;
     bool campus = m == 5u;
     bool apartments = act == 2u;
@@ -539,11 +699,31 @@ float3 shadeDistrictFacade(uint m, float3 p, float3 geomNormal, float3 toViewer,
         trim = float3(0.42, 0.23, 0.095);
         light *= 0.78;
     }
-    return (light + trim * gallery * run * (campus ? 0.85 : 0.48)) * night * wall;
+    base = lerp(base, blockBase, blockWeight);
+    rough = lerp(rough, blockRough, blockWeight);
+    metallic = lerp(metallic, blockMetallic, blockWeight);
+    return lerp((light + trim * gallery * run * (campus ? 0.85 : 0.48)) * night * wall, blockLight, blockWeight);
 }
 
 bool isAvenue(uint m, uint partId) {
     return (act == 1u || act == 2u) && m == 1u && (partId == 7u || partId == 8u);
+}
+
+// The painted fairings and wings share a waterline in aircraft space. Integrate
+// the narrow bronze stripe across the pixel or ray footprint so it recedes cleanly.
+void aircraftPaint(uint partId, float localY, float footprint,
+                   inout float3 base, inout float rough, inout float metallic) {
+    float centre = partId == 100u ? 0.072 : 0.36;
+    float w = max(footprint, 0.006);
+    float aboveBelly = saturate((localY - centre + 0.018) / w + 0.5);
+    float aboveStripe = saturate((localY - centre - 0.018) / w + 0.5);
+    float stripe = aboveBelly - aboveStripe;
+    float3 paint = float3(0.017, 0.080, 0.096) * (1.0 - aboveBelly)
+                 + float3(0.62, 0.30, 0.092) * stripe
+                 + float3(0.73, 0.76, 0.72) * aboveStripe;
+    base = paint * (0.88 + 0.12 * base);
+    rough = 0.27 - 0.075 * stripe;
+    metallic = 0.22 + 0.46 * stripe;
 }
 
 float2 avenueCoordinates(float2 uv) {
@@ -754,13 +934,13 @@ bool traceShadow(float3 origin, float3 direction, float distance) {
     q.TraceRayInline(scene, RAY_FLAG_NONE, 0x01u, ray);
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
-            uint cOff = q.CandidateInstanceID() + q.CandidatePrimitiveIndex() * 3u;
+            uint cOff = triangleOffset(q.CandidateInstanceID(), q.CandidatePrimitiveIndex());
             Vertex cv0 = vertices[indices[cOff]];
             Vertex cv1 = vertices[indices[cOff + 1u]];
             Vertex cv2 = vertices[indices[cOff + 2u]];
             float2 cb = q.CandidateTriangleBarycentrics();
             float2 cuv = cv0.uv.xy + cb.x * (cv1.uv.xy - cv0.uv.xy) + cb.y * (cv2.uv.xy - cv0.uv.xy);
-            uint cm = min((uint)cv0.p.w, 41u);
+            uint cm = min(sceneInstances[q.CandidateInstanceID()].materialSlice, 41u);
             float ca = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(cuv, (float)cm), 1.0).a;
             if (ca >= 0.44) {
                 q.CommitNonOpaqueTriangleHit();
@@ -794,11 +974,11 @@ float3 traceShadowTransmittance(float3 origin, float3 direction, float distance,
         }
     }
     if (gq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        uint gOff = gq.CommittedInstanceID() + gq.CommittedPrimitiveIndex() * 3u;
+        uint gOff = triangleOffset(gq.CommittedInstanceID(), gq.CommittedPrimitiveIndex());
         Vertex gv0 = vertices[indices[gOff]];
         Vertex gv1 = vertices[indices[gOff + 1u]];
         Vertex gv2 = vertices[indices[gOff + 2u]];
-        uint gm = min((uint)gv0.p.w, 41u);
+        uint gm = min(sceneInstances[gq.CommittedInstanceID()].materialSlice, 41u);
         if (gm != 40u) {
             float2 gb = gq.CommittedTriangleBarycentrics();
             float3 gObjN = gv0.n.xyz + gb.x * (gv1.n.xyz - gv0.n.xyz) + gb.y * (gv2.n.xyz - gv0.n.xyz);
@@ -846,11 +1026,11 @@ void traceBathroomGiRay(float3 origin, float3 direction, out float3 giRad, out f
         float hitT = q.CommittedRayT();
         outHitT = hitT;
         float3 hitP = origin + direction * hitT;
-        uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
+        uint offset = triangleOffset(q.CommittedInstanceID(), q.CommittedPrimitiveIndex());
         Vertex v0 = vertices[indices[offset]];
         Vertex v1 = vertices[indices[offset + 1u]];
         Vertex v2 = vertices[indices[offset + 2u]];
-        uint hm = min((uint)v0.p.w, 41u);
+        uint hm = min(sceneInstances[q.CommittedInstanceID()].materialSlice, 41u);
         float2 bary = q.CommittedTriangleBarycentrics();
         float2 hitUv = v0.uv.xy + bary.x * (v1.uv.xy - v0.uv.xy) + bary.y * (v2.uv.xy - v0.uv.xy);
         float3 hitAlb = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(hitUv, (float)hm), 4.5).rgb;
@@ -920,13 +1100,13 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
     q.TraceRayInline(scene, dynFlags, mask, ray);
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
-            uint cOff = q.CandidateInstanceID() + q.CandidatePrimitiveIndex() * 3u;
+            uint cOff = triangleOffset(q.CandidateInstanceID(), q.CandidatePrimitiveIndex());
             Vertex cv0 = vertices[indices[cOff]];
             Vertex cv1 = vertices[indices[cOff + 1u]];
             Vertex cv2 = vertices[indices[cOff + 2u]];
             float2 cb = q.CandidateTriangleBarycentrics();
             float2 cuv = cv0.uv.xy + cb.x * (cv1.uv.xy - cv0.uv.xy) + cb.y * (cv2.uv.xy - cv0.uv.xy);
-            uint cm = min((uint)cv0.p.w, 41u);
+            uint cm = min(sceneInstances[q.CandidateInstanceID()].materialSlice, 41u);
             float ca = gAlbedoAlphaTex.SampleLevel(anisoWrap, float3(cuv, (float)cm), 1.0).a;
             if (ca >= 0.44) {
                 q.CommitNonOpaqueTriangleHit();
@@ -935,11 +1115,11 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
     }
 
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        uint offset = q.CommittedInstanceID() + q.CommittedPrimitiveIndex() * 3u;
+        uint offset = triangleOffset(q.CommittedInstanceID(), q.CommittedPrimitiveIndex());
         Vertex v0 = vertices[indices[offset]];
         Vertex v1 = vertices[indices[offset + 1u]];
         Vertex v2 = vertices[indices[offset + 2u]];
-        uint hm = min((uint)v0.p.w, 41u);
+        uint hm = min(sceneInstances[q.CommittedInstanceID()].materialSlice, 41u);
         float2 bary = q.CommittedTriangleBarycentrics();
 
         float3 objN = v0.n.xyz + bary.x * (v1.n.xyz - v0.n.xyz) + bary.y * (v2.n.xyz - v0.n.xyz);
@@ -972,7 +1152,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float bSign = (hitFront ? 1.0 : -1.0) * ((v0.tangent.w >= 0.0) ? 1.0 : -1.0);
         float3 B = cross(hitNGeom, T) * bSign;
 
-        bool districtFacade = isDistrictGlazing(hm, (uint)v0.n.w);
+        bool districtFacade = isDistrictGlazing(hm, (sceneInstances[q.CommittedInstanceID()].flags & 0xffffu));
         float hNormScale = (hm == 34u || hm == 40u || districtFacade) ? 0.04 : saturate(1.0 - mipLod * 0.12);
         hNorXY *= hNormScale;
         float hNz = sqrt(saturate(1.0 - dot(hNorXY, hNorXY)));
@@ -982,6 +1162,13 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float hRough = clamp(hOrm.y, 0.03, 0.98);
         if (hm == 1u) hRough = lerp(hRough, 0.08, wetP);
         float hMetal = saturate(hOrm.z);
+        uint hitPart = (sceneInstances[q.CommittedInstanceID()].flags & 0xffffu);
+        float hitUvWidth = coneSpread * hitT / max(0.2, abs(dot(hitNGeom, direction)));
+        float3 stageTrim = cathedralFinish(hm, hitPart, hitUv, hitUvWidth, hBase, hRough, hMetal);
+        if (act == 1u && hm == 11u && hitPart >= 100u && hitPart <= 115u) {
+            float bodyY = v0.p.y + bary.x * (v1.p.y - v0.p.y) + bary.y * (v2.p.y - v0.p.y);
+            aircraftPaint(hitPart, bodyY, coneSpread * hitT * length(w2o[1]), hBase, hRough, hMetal);
+        }
         float hCoat  = clearcoatForMaterial(hm, hOrm.w, wetP);
         float hTrans = translucencyForMaterial(hm, hOrm.w);
 
@@ -991,11 +1178,18 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             float hitWidth = coneSpread * hitT / max(abs(dot(hitNGeom, direction)), 0.18);
             float3 facadePos = p;
             if (act == 2u) {
-                float3 objPos = v0.p.xyz + bary.x * (v1.p.xyz - v0.p.xyz) + bary.y * (v2.p.xyz - v0.p.xyz);
-                facadePos = objPos * 0.08;
-                hitWidth *= 0.08 * length(w2o[0]);
+                facadePos = (p - taipeiKit.xyz) * taipeiKit.w;
+                hitWidth *= taipeiKit.w;
             }
-            facadeLight = shadeDistrictFacade(hm, facadePos, hitNGeom, -direction, hitWidth.xxx, hBase, hRough, hMetal);
+            facadeLight = shadeDistrictFacade(hm, sceneInstances[q.CommittedInstanceID()].buildingSeed,
+                                             facadePos, hitNGeom, -direction, hitWidth.xxx, hBase, hRough, hMetal);
+            InstanceData roomInstance = sceneInstances[q.CommittedInstanceID()];
+            if ((roomInstance.flags & (1u << 24)) && hitPart >= 60u && hitPart <= 62u && abs(hitNGeom.y) < 0.55) {
+                float metersPerUnit = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+                float2 meters = roomCoordinates(roomInstance, p, T, B, hitUv);
+                facadeLight = roomEmission(facadeLight, roomInstance.buildingSeed, meters, (hitWidth/0.08).xx,
+                                           -direction, hitNGeom, T, B, length(p-eye)*metersPerUnit);
+            }
         } else if (isCurtainWall(hm)) {
             float floorH = (hm == 5u) ? 0.34 : 0.38;
             float bayW   = (hm == 5u) ? 0.25 : 0.32;
@@ -1005,7 +1199,6 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
                      * smoothstep(0.08, 0.15, fx) * (1.0 - smoothstep(0.85, 0.92, fx));
             hBase = lerp(hBase * 0.45, hBase, cw);
         }
-        uint hitPart = (uint)v0.n.w;
         if (isAvenue(hm, hitPart) && objN.y > 0.90) {
             float3 objPos = v0.p.xyz + bary.x * (v1.p.xyz - v0.p.xyz) + bary.y * (v2.p.xyz - v0.p.xyz);
             float2 road = avenueCoordinates(hitUv);
@@ -1078,7 +1271,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             return true;
         }
 
-        float3 hitCol = direct2 + ibl2 + streetLight + (districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT));
+        float3 hitCol = direct2 + ibl2 + stageTrim + streetLight + (districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT));
         if (cityExterior()) {
             hitCol = lerp(hitCol, skyAerialFog(direction), cityHazeWeight(hitT, origin.y, p.y));
         } else if (!inBath) {
@@ -1116,11 +1309,11 @@ bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uin
     ++extraQueries;
 
     if (gq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        uint gOff = gq.CommittedInstanceID() + gq.CommittedPrimitiveIndex() * 3u;
+        uint gOff = triangleOffset(gq.CommittedInstanceID(), gq.CommittedPrimitiveIndex());
         Vertex gv0 = vertices[indices[gOff]];
         Vertex gv1 = vertices[indices[gOff + 1u]];
         Vertex gv2 = vertices[indices[gOff + 2u]];
-        uint gm = min((uint)gv0.p.w, 41u);
+        uint gm = min(sceneInstances[gq.CommittedInstanceID()].materialSlice, 41u);
         float2 gb = gq.CommittedTriangleBarycentrics();
         float3 gObjN = gv0.n.xyz + gb.x * (gv1.n.xyz - gv0.n.xyz) + gb.y * (gv2.n.xyz - gv0.n.xyz);
         float3x3 gw2o = (float3x3)gq.CommittedWorldToObject3x4();
@@ -1144,7 +1337,7 @@ bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uin
 
 
 // =============================================================================
-// Borrowed NVIDIA RTXDI Reservoir Resampling (ReSTIR DI — Weighted RIS)
+// Borrowed NVIDIA RTXDI Reservoir Resampling (ReSTIR DI â€” Weighted RIS)
 // Evaluates dynamic practical emitters with 1 unbiased DXR visibility shadow ray.
 // =============================================================================
 struct RTXDI_DIReservoir {
@@ -1281,11 +1474,20 @@ float shaftMediumDensity(float3 p) {
 #if defined(M2_RT)
 // Directed single scattering in the city exteriors. The harbor also has a wide
 // skylight component, integrated continuously between the lens and each surface.
-float3 rtLightShafts(float3 dir, float maxT, float jitter, inout uint queries) {
+float3 rtLightShafts(float3 dir, float maxT, float jitter, float surfaceVisibility, inout uint queries) {
     bool harbor = (act == 1u);
     uint steps = harbor ? 4u : 3u;
     float marchT = min(maxT, 90.0);
     float3 sd = sceneSunDir();
+    // At night these two sets are lit by practicals in shallow stage haze.
+    // Integrate that local layer and reuse key-light visibility at the surface.
+    // The two colored stage fixtures have their own finite beam integrals.
+    if (!sunOverridden() && (sanctuarySpotsOn() || isGrandTutti())) {
+        float reach = min(marchT, 16.0);
+        float density = shaftMediumDensity(eye + dir * (0.5 * reach));
+        float scattered = 1.0 - exp(-density * reach);
+        return sceneSunRadiance() * scattered * lerp(0.035, 0.105, surfaceVisibility);
+    }
     float acc = 0.0;
     float tau = 0.0;
     [loop] for (uint s = 0u; s < steps; ++s) {
@@ -1324,16 +1526,32 @@ struct VOut {
     float4 uv          : TEXCOORD2;
     nointerpolation uint mat : TEXCOORD3;
     float4 tangentSign : TEXCOORD4;
+    nointerpolation uint flags : TEXCOORD5;
+    nointerpolation uint seed : TEXCOORD6;
+    float localY : TEXCOORD7;
+    float2 roomMeters : TEXCOORD8;
 };
 
-VOut VSMain(uint id : SV_VertexID) {
-    Vertex v = vertices[indices[firstIndex + id]];
+VOut VSMain(uint id : SV_VertexID, uint instanceId : SV_InstanceID) {
+    InstanceData data = sceneInstances[instanceBase + instanceId];
+    Vertex v = vertices[indices[meshFirstIndices[data.meshId] + id]];
+    float4 p = float4(v.p.xyz,1.0);
+    float3x3 worldBasis = float3x3(data.world[0].xyz,data.world[1].xyz,data.world[2].xyz);
+    float3x3 inverseLinear = float3x3(data.worldToObject[0].xyz,data.worldToObject[1].xyz,data.worldToObject[2].xyz);
     VOut o;
-    o.world = transformPoint(v.p.xyz);
-    o.normal = transformNormal(v.n.xyz);
+    o.world = float3(dot(data.world[0],p),dot(data.world[1],p),dot(data.world[2],p));
+    o.normal = norm(mul(v.n.xyz,inverseLinear));
     o.uv = v.uv;
-    o.mat = (uint)v.p.w;
-    o.tangentSign = float4(transformNormal(v.tangent.xyz), v.tangent.w);
+    o.mat = data.materialSlice;
+    o.flags = data.flags;
+    o.seed = data.buildingSeed;
+    o.localY = v.p.y;
+    o.tangentSign = float4(norm(mul(worldBasis,v.tangent.xyz)), v.tangent.w);
+    o.roomMeters = 0.0.xx;
+    if ((data.flags & (1u << 24)) && (o.mat == 5u || o.mat == 13u || o.mat == 14u)) {
+        o.roomMeters = roomCoordinates(data, o.world, o.tangentSign.xyz,
+            cross(o.normal, o.tangentSign.xyz) * o.tangentSign.w, o.uv.xy);
+    }
     float3 d = o.world - eye;
     float z = dot(d, forward);
     float fy = 1.0 / tan(fov * 0.5);
@@ -1379,10 +1597,11 @@ void PSDepthCutout(VOut i) {
 [earlydepthstencil]
 Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     uint matId = min(i.mat, 41u);
-    uint partId = drawPartId();
+    uint partId = i.flags & 0xffffu;
     bool aircraft = (act == 1u && partId >= 100u && partId <= 125u);
     bool districtFacade = isDistrictGlazing(matId, partId);
     float3 worldFootprint = fwidth(i.world);
+    float2 roomWidth = fwidth(i.roomMeters);
     float2 roadFootprint = 2.8 * fwidth(i.uv.xy);
     float3 texCoord = float3(i.uv.xy, (float)matId);
 
@@ -1427,6 +1646,11 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float rough = clamp(ormSample.y, 0.020, 0.98);
     float metallic = saturate(ormSample.z);
     float auxVal = ormSample.w;
+    float2 uvWidth = fwidth(i.uv.xy);
+    float3 stageTrim = cathedralFinish(matId, partId, i.uv.xy, max(uvWidth.x, uvWidth.y), base, rough, metallic);
+    if (aircraft && matId == 11u && partId <= 115u) {
+        aircraftPaint(partId, i.localY, fwidth(i.localY), base, rough, metallic);
+    }
 
     // Ground indoor PVD brushed champagne nickel (mat 23) & botanical Calathea/Fern chlorophyll (mat 29, 36) to Cycles
     if (inBath && matId == 23u) {
@@ -1446,7 +1670,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     if (isAvenue(matId, partId) && i.normal.y > 0.90) {
         float2 road = avenueCoordinates(i.uv.xy);
         float crossRoad = (partId == 7u) ? i.world.z : i.world.x;
-        if (act == 2u) crossRoad = (crossRoad - ((partId == 7u) ? row2.w : row0.w)) * (0.08 / length(row0.xyz));
+        if (act == 2u) crossRoad = (crossRoad - ((partId == 7u) ? taipeiKit.z : taipeiKit.x)) * taipeiKit.w;
         float viewAlong = (partId == 7u) ? v.x : v.z;
         streetLight = avenueLighting(road, roadFootprint, crossRoad - road.y, viewAlong, base);
     }
@@ -1478,11 +1702,15 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float3 facadeFootprint = worldFootprint;
         if (act == 2u) {
             // The Taipei kit translates and rescales during the penthouse transition. Keep rooms on their walls.
-            float districtScale = 0.08 / length(row0.xyz);
-            facadePos = (facadePos - float3(row0.w, row1.w, row2.w)) * districtScale;
+            float districtScale = taipeiKit.w;
+            facadePos = (facadePos - taipeiKit.xyz) * districtScale;
             facadeFootprint *= districtScale;
         }
-        facadeLight = shadeDistrictFacade(matId, facadePos, nGeom, v, facadeFootprint, base, rough, metallic);
+        facadeLight = shadeDistrictFacade(matId, i.seed, facadePos, nGeom, v, facadeFootprint, base, rough, metallic);
+        if ((i.flags & (1u << 24)) && partId >= 60u && partId <= 62u && abs(nGeom.y) < 0.55) {
+            float metersPerUnit = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+            facadeLight = roomEmission(facadeLight, i.seed, i.roomMeters, roomWidth, v, nGeom, T, B, dist * metersPerUnit);
+        }
     } else if (isCurtainWall(matId)) {
         float floorH = (matId == 5u) ? 0.34 : 0.38;
         float bayW   = (matId == 5u) ? 0.25 : 0.32;
@@ -1579,7 +1807,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             if (tq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
                 float tBack = tq.CommittedRayT();
                 glassThickness3D = clamp(tBack, 0.008, 0.24);
-                uint tOff = tq.CommittedInstanceID() + tq.CommittedPrimitiveIndex() * 3u;
+                uint tOff = triangleOffset(tq.CommittedInstanceID(), tq.CommittedPrimitiveIndex());
                 Vertex tv0 = vertices[indices[tOff]];
                 Vertex tv1 = vertices[indices[tOff + 1u]];
                 Vertex tv2 = vertices[indices[tOff + 2u]];
@@ -1834,7 +2062,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     if (!inBath) {
-        shaftInscatter = rtLightShafts(-v, dist, frac(ign + 0.3710), queries);
+        shaftInscatter = rtLightShafts(-v, dist, frac(ign + 0.3710), dot(sunTrans, 1.0.xxx / 3.0), queries);
     }
 
     rayQueryCount = queries;
@@ -1860,6 +2088,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     // 1. Direct Sun / Key GGX + Clearcoat + Curved-Glass Caustics (restirDirect routed to denoised path!)
     float3 diffConservBase = (translucency > 0.02) ? (base * (1.0 - 0.24 * translucency)) : base;
     float3 directSunOnly = evalGgxDirect(n, v, sunDir, diffConservBase, rough, metallic, clearcoat) * sunRad * sunTrans;
+    float3 stageIrradiance = 0.0.xxx;
     if (sanctuarySpotsOn()) {
         [unroll] for (uint fixture = 0; fixture < 2; ++fixture) {
             SanctuarySpot spot = sanctuarySpot(fixture == 0u ? -1.0 : 1.0);
@@ -1867,8 +2096,21 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float radiusSq = max(dot(toward, toward), 0.04);
             float3 lightDirection = toward * rsqrt(radiusSq);
             float cone = smoothstep(0.89, 0.985, dot(-lightDirection, spot.axis));
-            directSunOnly += evalGgxDirect(n, v, lightDirection, diffConservBase, rough, metallic, clearcoat) *
-                             spot.radiance * (48.0 * cone / (1.0 + radiusSq));
+            // A cut-metal gobo projects five overlapping petals from each spot.
+            // Its coordinates follow the real director-steered projection axis.
+            float3 beamRight = norm(cross(spot.axis, float3(0.0, 0.0, 1.0)));
+            float3 beamUp = cross(beamRight, spot.axis);
+            float2 projected = float2(dot(lightDirection, beamRight), dot(lightDirection, beamUp));
+            float radius = max(length(projected), 0.001);
+            float c = projected.x / radius;
+            float c2 = c * c;
+            float petal = c * (16.0 * c2 * c2 - 20.0 * c2 + 5.0);
+            float boundary = 0.19 + 0.077 * petal;
+            float cut = 1.0 - smoothstep(boundary - 0.025, boundary + 0.025, radius);
+            cone *= 0.28 + 0.72 * cut;
+            float3 incident = spot.radiance * (48.0 * cone / (1.0 + radiusSq));
+            directSunOnly += evalGgxDirect(n, v, lightDirection, diffConservBase, rough, metallic, clearcoat) * incident;
+            stageIrradiance += incident * (0.28 + 0.72 * abs(dot(nGeom, lightDirection)));
         }
     }
 
@@ -1963,7 +2205,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 coatRefl = hasTracedReflection ? lerp(reflected, iblSpecEnv, 0.12) : sampleIblEnv(reflect(-v, n), 0.06, inBath);
     float3 specIndirectTerm = (specRadiance * (f0 * envBrdf.x + envBrdf.y) + coatRefl * coatWeight) * specOcclusion;
 
-    float3 emissiveTerm = streetLight + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
+    float3 emissiveTerm = stageTrim + streetLight + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
     if (aircraft && partId >= 110u && partId <= 115u && (matId == 6u || matId == 16u)) {
         // Navigation lamps are continuous and remain identifiable in a still.
         emissiveTerm = ((partId & 1u) == 0u ? float3(2.4, 0.08, 0.025) : float3(0.045, 1.9, 0.72))
@@ -2087,6 +2329,21 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.512), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.512)));
             float3 dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.07 * edgeRim);
             float3 glassTrans = max(transmitted * tirBoost + dispersion, 0.0.xxx) * beer + bodyScatter * (1.0 - beer) + nectarGlow;
+            if (matId == 3u && partId >= 10u && partId <= 16u) {
+                glassTrans += stageIrradiance * (0.014 + 0.085 * midribDepth + 0.045 * crispMargin);
+            }
+            if (isGrandTutti() && matId == 3u && partId >= 10u && partId <= 16u) {
+                // A mineral front climbs the orchid before the tabletop reveal.
+                // The clear margins still refract the set throughout the change.
+                float growth = smoothstep(276.0, 328.0, time) * (1.0 - smoothstep(333.0, 337.5, time));
+                float bladeDepth = uBlade + 0.38 * abs(vBlade);
+                float mineral = growth * (1.0 - smoothstep(growth - 0.16, growth + 0.18, bladeDepth));
+                float ribs = 0.5 + 0.5 * cos(kTwoPi * (7.0 * uBlade - 1.7 * vBlade * vBlade));
+                ribs = lerp(ribs, 0.5, smoothstep(0.025, 0.08, uvWidth.x));
+                float3 nacre = lerp(float3(0.09, 0.34, 0.30), float3(0.87, 0.65, 0.40),
+                                     saturate(0.20 + 0.55 * ribs + 0.22 * n.y));
+                glassTrans = lerp(glassTrans, nacre * (0.45 + 0.42 * saturate(dot(n, sunDir))), mineral * 0.76);
+            }
             float reflMix = isThinCrystalPetal
                 ? clamp(0.032 + 0.48 * fres, 0.032, 0.56)
                 : clamp(0.044 + 0.85 * fres, 0.044, 0.92);
@@ -2142,6 +2399,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float2 tiled = mirrorField(motif + scale * float2(sin(time * 0.13), cos(time * 0.09))) * 2.0 - 1.0;
         float filigree = velvetFiligree(tiled, max(length(ddx(motif)), length(ddy(motif))) * 2.0, field);
         silk += (0.12 + 0.32 * saturate(fieldLuma)) * filigree * lerp(tone, float3(1.0, 0.64, 0.30), velvetRim);
+        silk += velvetThreads(i.uv.xy, uvWidth, field);
         color = silk * 0.68 * (0.55 + 0.55 * velvetRim)
               + specRadiance * (0.34 * fres)
               + float3(0.95, 0.74, 0.38) * (velvetRim * 0.18);
@@ -2233,14 +2491,14 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         o.diffRadHit = float4(clamp(rawDiffIrr, 0.0.xxx, 65504.0.xxx), diffHitDist);
         o.specRadHit = float4(clamp(rawSpecRad, 0.0.xxx, 65504.0.xxx), specHitDist);
         o.modViewZ   = uint4(packHalf2(outDiffMod.rg), packHalf2(float2(outDiffMod.b, outSpecMod.r)), packHalf2(outSpecMod.gb), asuint(viewZ));
-        o.worldMv    = float4(unpackDrawMotion(), 0.0);
+        o.worldMv    = float4(unpackDrawMotion(i.flags, i.seed), 0.0);
     } else {
         o.color      = float4(max(color, 0.0.xxx), 1.0);
         o.normRough  = float4(n, rough);
         o.diffRadHit = float4(0.0, 0.0, 0.0, 0.0);
         o.specRadHit = float4(0.0, 0.0, 0.0, 0.0);
         o.modViewZ   = uint4(0u, 0u, 0u, asuint(600000.0));
-        o.worldMv    = float4(unpackDrawMotion(), 0.0);
+        o.worldMv    = float4(unpackDrawMotion(i.flags, i.seed), 0.0);
     }
 #else
     o.color = float4(max(color, 0.0.xxx), 1.0);
@@ -2262,6 +2520,10 @@ SkyOut VSSky(uint id : SV_VertexID) {
     return o;
 }
 
+#ifdef M2_RT
+// Only visible sky pixels need to trace rays or increment the work counters.
+[earlydepthstencil]
+#endif
 Targets PSSky(SkyOut i) {
     float2 p = i.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 d = norm(forward + right * p.x * aspect * tan(fov * 0.5) + up * p.y * tan(fov * 0.5));
@@ -2283,7 +2545,7 @@ Targets PSSky(SkyOut i) {
             ? frac(interleavedGradientNoise(i.pos.xy + float2(5.588238, 3.143218) * (float)(accumFrame & 255u)) + 0.6180340 * (float)accumFrame)
             : interleavedGradientNoise(i.pos.xy);
         uint skyQueries = 0u;
-        skyCol += rtLightShafts(d, 90.0, frac(ignSky + 0.3710), skyQueries);
+        skyCol += rtLightShafts(d, 90.0, frac(ignSky + 0.3710), 1.0, skyQueries);
         uint waveSkyQueries = WaveActiveSum(skyQueries);
         if (canonical != 0u && WaveIsFirstLane()) {
             InterlockedAdd(verified[1], waveSkyQueries);

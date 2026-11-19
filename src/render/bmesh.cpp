@@ -38,6 +38,7 @@ bool loadBmesh(const std::filesystem::path& path,Bmesh& output,std::string* erro
     if(payload!=u32(p+60)||payload+64!=bytes.size())return fail("Mesh size/count mismatch");
     if(crc(p+64,static_cast<size_t>(payload))!=u32(p+56))return fail("Mesh CRC32 mismatch");
     Bmesh mesh;
+    mesh.sourcePayloadCrc = u32(p+56);
     for(int i=0;i<6;++i) { mesh.bounds[i]=f32(p+32+i*4);if(!std::isfinite(mesh.bounds[i]))return fail("Nonfinite bounds"); }
     for(int i=0;i<3;++i)if(mesh.bounds[i]>mesh.bounds[i+3])return fail("Inverted bounds");
     uint32_t expected=0;

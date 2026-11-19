@@ -10,7 +10,8 @@ There is no gameplay, score, or combat: by default, sit back and watch the deter
 
 - **Minimum (`BASE_ONLY` Safe / Balanced)**:
   - Windows 11 x64 (`22H2` or newer)
-  - Any Direct3D 12 Feature Level `11_0+` GPU (discrete or integrated; WARP software rasterizer supported for diagnostics via `--force-warp`)
+- Any Direct3D 12 Feature Level `11_0+` GPU (discrete or integrated).
+- On Microsoft WARP, the app displays a lightweight procedural orchid with a numerical HUD. It follows the film clock and selected edition, changes with each act, and supports reduced motion and reduced flash. Use `--force-warp` to test this software-rendered diagnostic mode.
   - Stereo audio output device (`48 kHz` WASAPI shared mode; automatically switches to a monotonic QPC silence clock if no audio endpoint is connected)
 - **Optional Hardware Accelerators (Probed Dynamically at Launch — Zero Hard Dependency)**:
   - **RT (`DXR 1.1 / 1.2`)**: DXR-capable GPU for inline `RayQuery` reflections and thin-shell refraction (substitutes SM 6.0 analytic raster when absent/disabled).
@@ -68,7 +69,8 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Left` / `Right` | Seek `-2 s` / `+2 s` (`Shift` + `Left`/`Right`: `-10 s` / `+10 s`) |
 | `,` / `.` (or `[` / `]`) | Step `-1` / `+1` frame (`800` samples @ `48 kHz`) while paused |
 | `G` | Jump to narrative reveal pre-roll |
-| `1` – `6` | Mode: `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU Solo, `5` CUDA Solo, `6` Finale Loop |
+| `7` | Cycle effects detail from low to normal to high. The title bar shows levels 1–3. Safe uses level 1. |
+| `1` – `6` | Mode: `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU comparison, `5` CUDA Solo, `6` Finale Loop |
 | `L` | Toggle timeline loop |
 | `M` | Mute / Unmute audio |
 | `-` / `=` (or `Down` / `Up`) | Master volume `-5%` / `+5%` |
@@ -76,7 +78,7 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `K` | Toggle lower-third captions (`--captions` / `--no-captions`; non-medical end card always shown) |
 | `Q` | Cycle Quality Preset (`Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`) |
 | `Tab` / `F1` | Cycle HUD: `Full Telemetry` -> `Compact Strip` -> `A/B Split-Screen` -> `Off (Clean Cinema)` |
-| `A` | Cycle active A/B Split-Screen pillar (`RT` -> `CUDA` -> `Tensor` -> `Codec`) |
+| `A` | Cycle the split-screen comparison through RT, CUDA, Tensor, Codec, and the stage director. |
 | `X` / `C` / `T` / `U` / `V` | Live failover toggle for **RT** (`X`), **CUDA** (`C`), **Tensor** (`T`), **NPU** (`U`), **Codec** (`V`) |
 | `O` | Toggle live **Spout2** clean-feed sender (`BooSahSah_Clean`) |
 | `W` | Toggle / **One-Key Privacy Stop** for opt-in UVC webcam (`LIVE CAMERA`) |
@@ -86,6 +88,8 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Esc` | Clean shutdown |
 
 ### Interactive NVIDIA-RTX Explore & Lighting Studio Controls (Optional)
+
+Effects detail changes particle density and the number of recursive folds on the Neural Velvet arches. High adds window blinds to nearby city façades. Set the startup level with `--effects-detail high` or `display.effects_detail` in the configuration. In the Shenzhen sequence the film plays at the selected rendering resolution. Telemetry shows the intercepted broadcast in an inset. Use the Codec A/B view to compare it with the native image.
 
 When Explore mode is inactive, playback remains 100% deterministic and identical to the canonical 360-second film.
 
@@ -105,6 +109,8 @@ When Explore mode is inactive, playback remains 100% deterministic and identical
 | `Z` / `Shift+Z` (or Studio Bar `TRK1..4` + `MUSC`) | Cycle the **Built-In 4-Track Original Soundtrack** (`1. Neon Orchid`, `2. Acid Lotus`, `3. Velvet Cipher`, `4. Glass Dragon`) + Procedural RTX Synth (`SYNT`); `Shift+Click` on `TRK1..4` or drag-and-drop `.mp3`/`.wav`/`.flac` imports custom audio |
 | Motion (`RBLR`) & Stillness (`NRD`) Denoising | During interactive camera motion, sun scrubbing, or rolling physics marbles, dynamically loaded **NVIDIA NRD v4.18.0 (`REBLUR_DIFFUSE_SPECULAR`)** denoises 1-SPP demodulated diffuse GI and glossy reflections in real time using 3D world motion vectors. Once stationary, it hands off automatically to **`NRD::REFERENCE`** progressive accumulation up to **`4096 SPP`** |
 
+The four bundled tracks are lossless FLAC recordings from Jeffrey A Brick’s original WAV masters. During playback, the decoded stereo passes directly through the volume control. Track changes use a short crossfade.
+
 Edition changes crossfade the score's voices. The seven acts now include dedicated enamel cathedral, microbial sanctuary, and dawn alcove geometry. Act cards pair Chinese numerals 一–七 with Roman numbers; the original title lettering also includes 台北.
 
 ---
@@ -113,10 +119,20 @@ Edition changes crossfade the score's voices. The seven acts now include dedicat
 
 BOO SAH SAH enforces strict separation between hardware capability detection and verified live execution:
 
-- **Emerald `LIVE` (`Accelerated`)**: The physical hardware accelerator compiled, ran, and verified live output on the active frame (`DXR RayQuery` hit verification, `CUDA` PTX particle integration, `Tensor` PTX `mma.sync`, explicit OpenVINO `"NPU"` inference, or Hardware H.264 bitstream round-trip).
-- **Cyan `SUB` (`Substituted`)**: An honest fallback is rendering the effect (`SM 6.0 Raster`, `8.2K HLSL Compute Particles`, `Scalar HLSL Field`, OpenVINO `CPU` / `ScriptedDirector`, or `SHADER SIGNAL` 8x8 macroblock quantization). Substitutes are **never** labeled as hardware-accelerated.
+Click a row in the **Hardware** table to compare that engine at the current playhead. The five tabs below the split-view labels let you change engines while watching the same shot. Drag the divider to inspect an edge or reflection. The × button closes the comparison and returns to the previous HUD. These controls also work while paused.
+
+The NPU row shows where the stage director runs. `LIVE` means the NPU has completed an inference. `CPU` means OpenVINO has run the model on the CPU. `SCRIPT` means a deterministic script supplies the controls. `WARMUP` appears while the director prepares or waits for its first inference, `OFF` when inference is disabled, and `FLT` for a fault. The Full HUD shows completed inferences, the last inference time in milliseconds, and completions in the past second in hertz. The GPU renders both halves. The left half uses the current shot’s direction and the right half uses its scripted lighting. Shenzhen holds its authored lighting, so both halves match there.
+
+Press `4`, click the **[4]** shortcut beside the NPU row, or click the bottom NPU button for the guided sanctuary comparison. Close it with × or `4` to restore your previous playhead and play/pause state. Cue sheets without a sanctuary loop open the director comparison in place.
+
+The codec row shows `IDLE` with empty measurements between uses. The film requests it during Signal Hijack, and you can also request it with the Codec A/B view or the `V` control.
+
+From the full film or the standalone sanctuary, press `4` to compare directors. Drag the divider to see how the lighting changes across the same camera view at the same instant. The GPU draws both sides. The left names the backend supplying the controls and the right follows the scripted cues. Safe quality uses scripted cues during normal playback. The dedicated comparison can request NPU inference at Safe quality while respecting the NPU setting selected with `U` or `--disable-npu`.
+
+- **Emerald `LIVE`** marks verified hardware work such as a DXR hit, CUDA particle integration, Tensor Core matrix operations, or an H.264 encode/decode round trip. The NPU runs asynchronously and updates its measurements when an inference completes.
+- **Cyan `SUB`** marks a substitute for a GPU workload, such as raster rendering, compute-shader particles, a scalar field, or the shader-based codec effect. The director row names its CPU and scripted routes separately.
 - **Amber `DEG` (`Degraded`)**: A hardware path timed out or missed verification (e.g., `--inject-npu-timeout`) and failed over smoothly without stalling the film.
-- **Slate `OFF` (`Unavailable` / Standby)**: Optional module idle or hardware absent.
+- **Slate `OFF`** marks an unavailable or disabled workload.
 
 Solid dielectric glass props and marbles evaluate 2-interface Snell refraction with ray-traced 3D internal thickness, Beer-Lambert optical absorption, total internal reflection, and colored shadow-ray caustics, while thin crystal petals and float-glass panes use thin-walled transmission. The raster substitute keeps the film visually coherent, though geometry reflections and refractions differ from DXR; neither path claims unbounded multi-bounce spectral path tracing.
 

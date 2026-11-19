@@ -2700,6 +2700,7 @@ void M1TaipeiSliceEffect::onSceneBoundary(uint32_t /*actIndex*/, double /*filmTi
 
 void M1TaipeiSliceEffect::resetTo(double /*filmTime*/) {
     if (!impl_) return;
+    if (impl_->trilogyMesh) impl_->trilogyMesh->resetTemporalHistory();
     impl_->dxrQuarantined = false;
     impl_->slotPending = {};
     impl_->nv12SlotReady = {false, false, false};
@@ -2940,6 +2941,10 @@ uint32_t M1TaipeiSliceEffect::activeDenoiseMode() const noexcept {
 
 bool M1TaipeiSliceEffect::hasAllAuthoredSceneAssets() const noexcept {
     return impl_ && impl_->trilogyMesh && impl_->trilogyMesh->hasAllAuthoredSceneAssets();
+}
+
+CityDrawStats M1TaipeiSliceEffect::lastCityDrawStats() const noexcept {
+    return impl_ && impl_->trilogyMesh ? impl_->trilogyMesh->lastCityDrawStats() : CityDrawStats{};
 }
 
 GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(

@@ -1934,6 +1934,10 @@ void AudioEngine::audioThreadMain() noexcept {
             }
         }
 
+        // Priming WASAPI with silence must not advance the film ahead of its first song.
+        // Later track switches keep the established transport running during a decode.
+        const bool awaitingOpeningTrack = waitingForPreload && playedWriteCursor == 0;
+        const bool transportHeld = isPaused || awaitingOpeningTrack;
         const bool isMuted = muted_.load(std::memory_order_relaxed) || waitingForPreload;
         const float masterVol = masterVolume_.load(std::memory_order_relaxed);
         const bool ambientPlay = isPaused && exploreAmbient_.load(std::memory_order_relaxed);
@@ -1942,14 +1946,14 @@ void AudioEngine::audioThreadMain() noexcept {
         const uint32_t synthAdvanced = synth.renderFrames(
             reinterpret_cast<float*>(rawBuf),
             availableFrames,
-            isPaused && !ambientPlay,
+            awaitingOpeningTrack || (isPaused && !ambientPlay),
             isMuted,
             masterVol,
             &bands);
         if (appliedTrack != nullptr) {
             lastSongSamplePos_.store(synth.primarySamplePosition(), std::memory_order_relaxed);
         }
-        const uint32_t timelineAdvanced = isPaused ? 0u : synthAdvanced;
+        const uint32_t timelineAdvanced = transportHeld ? 0u : synthAdvanced;
 
         rmsEnvelope_.store(bands.rms, std::memory_order_relaxed);
 
@@ -1982,7 +1986,7 @@ void AudioEngine::audioThreadMain() noexcept {
         playedWriteCursor = nextPlayedCursor;
         submittedFrames48k_.store(playedWriteCursor, std::memory_order_release);
 
-        publishPresentationClock(isPaused, padding + availableFrames);
+        publishPresentationClock(transportHeld, padding + availableFrames);
     }
 
     if (mmcssHandle) {

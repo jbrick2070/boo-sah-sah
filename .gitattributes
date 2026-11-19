@@ -2,6 +2,7 @@
 *.bmesh binary
 *.bin binary
 *.mp4 binary
+*.flac binary
 *.cso binary
 *.png binary
 *.bmp binary
