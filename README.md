@@ -37,6 +37,9 @@ All automated GUI launches must pass `--no-activate` so test windows never steal
 ### Film quality and robustness gates
 
 ```powershell
+# Nine fixed-sample city and finale shots with 1440p GPU timings and local VRAM
+./build/x64-release/boo_integration_tests.exe --city-baseline --no-activate --capture-dir diagnostics/city-baseline
+
 # 68 native 2560x1440 captures across both editions, hardware solos, and narrative cards
 ./build/x64-release/boo_integration_tests.exe --film-captures --no-activate --capture-dir diagnostics/film-quality
 
@@ -131,6 +134,7 @@ Graphics failure triggers at most one teardown/recreation attempt while preservi
 - [M2 Three-City Trilogy Visual Pipeline](docs/TRILOGY_PIPELINE.md)
 - [Engineering Upgrade Report](docs/engineering_upgrade_report.md)
 - [Film Quality & Robustness Report](docs/quality_upgrade_report.md)
+- [City architecture plan](docs/city_architecture_upgrade.md) and [Phase 0 reference frames and timings](docs/baselines/city-phase0/README.md)
 - [Historical M1 Verification Report](docs/m1_verification_report.md)
 - [Changelog (M0–M10)](CHANGELOG.md)
 - [Licenses & Asset Provenance](LICENSES.md)

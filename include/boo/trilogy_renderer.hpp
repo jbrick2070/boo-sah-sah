@@ -22,6 +22,7 @@ public:
     uint32_t verifiedHits() const;
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;
+    bool hasAllAuthoredSceneAssets() const noexcept;
     void retire(uint32_t slot);
     bool resize(uint32_t width, uint32_t height);
 private:

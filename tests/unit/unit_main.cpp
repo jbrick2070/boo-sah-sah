@@ -17,6 +17,7 @@
 #include "boo/ui_text.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -172,6 +173,38 @@ bool testInvalidCueFixturesRejected() {
         BOO_CHECK(!loadCueSheetFromFile(resolveResourcePath("tests/fixtures/invalid_duration.json"), s, r));
         BOO_CHECK(hasErrorCode(r, "FULL_FILM_DURATION_MISMATCH"));
     }
+    return true;
+}
+
+bool testManifestProvenanceAndByteIntegrity() {
+    using namespace boo;
+    const auto source = std::filesystem::absolute(resolveResourcePath("assets/manifest.json"));
+    const auto root = source.parent_path().parent_path();
+    ValidationReport report;
+    AssetManifest manifest;
+    BOO_CHECK(loadAssetManifestFromFile(source, manifest, report));
+    BOO_CHECK(manifest.schema == 2);
+    const auto cue = std::find_if(manifest.assets.begin(), manifest.assets.end(),
+        [](const AssetManifestEntry& entry) { return entry.id == "cue_film_360s"; });
+    BOO_CHECK(cue != manifest.assets.end());
+    BOO_CHECK(cue->license == "CC-BY-NC-4.0" && cue->attributionRequired);
+    AssetManifest single;
+    single.assets.push_back(*cue);
+    verifyManifestAssetFiles(single, root, report);
+    BOO_CHECK(report.valid);
+    single.assets.front().sha256.assign(64, '0');
+    verifyManifestAssetFiles(single, root, report);
+    BOO_CHECK(hasErrorCode(report, "MANIFEST_SHA256_MISMATCH"));
+
+    auto parsed = parseJsonFile(source);
+    BOO_CHECK(parsed.ok);
+    parsed.value["assets"].asArrayMut().front()["author"] = "";
+    auto invalid = std::filesystem::temp_directory_path() /
+        ("boo-invalid-provenance-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+    std::ofstream(invalid, std::ios::binary) << serializeJson(parsed.value);
+    const bool accepted = loadAssetManifestFromFile(invalid, manifest, report);
+    std::filesystem::remove(invalid);
+    BOO_CHECK(!accepted && hasErrorCode(report, "MANIFEST_PROVENANCE_ERROR"));
     return true;
 }
 
@@ -1315,6 +1348,7 @@ int main() {
     runTest("CustomAudioTrackDecoderAndCrossfade", testCustomAudioTrackDecoderAndCrossfade);
     runTest("JsonParserAndSerializer", testJsonParserAndSerializer);
     runTest("ProductionCueSheetsAndManifest", testProductionCueSheetsAndManifest);
+    runTest("ManifestProvenanceAndByteIntegrity", testManifestProvenanceAndByteIntegrity);
     runTest("InvalidCueFixturesRejected", testInvalidCueFixturesRejected);
     runTest("TimelineClockArithmeticAndFailover", testTimelineClockArithmeticAndFailover);
     runTest("PrecisionTransport", testPrecisionTransport);
