@@ -18,6 +18,8 @@ namespace boo {
 namespace {
 constexpr const wchar_t* kWindowClassName = L"BooSahSahGlassOrchidWindowClass";
 
+constexpr UINT kTaipeiAttributionCommand = 0x1D00;
+
 std::wstring utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
     const int needed = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
@@ -63,6 +65,14 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0u) == kTaipeiAttributionCommand) {
+                std::wstring credit = L"Taipei 101 · 台北 101\nC.Y. Lee & Partners · 李祖原聯合建築師事務所\nhttps://www.cylee.com/project/Taipei-101\n\n";
+                credit += uiText(UiText::IndependentProduction);
+                MessageBoxW(hwnd, credit.c_str(), L"BOO SAH SAH · Taipei 101", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            break;
         case WM_DISPLAYCHANGE:
             if (self->isFullscreen()) self->fitFullscreenToMonitor();
             break;
@@ -290,6 +300,11 @@ bool AppWindow::create(
         this);
     if (!hwnd_) {
         return false;
+    }
+
+    if (HMENU systemMenu = GetSystemMenu(hwnd_, FALSE)) {
+        AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(systemMenu, MF_STRING, kTaipeiAttributionCommand, L"Taipei 101 · 台北 101…");
     }
 
     RECT actualClient{};

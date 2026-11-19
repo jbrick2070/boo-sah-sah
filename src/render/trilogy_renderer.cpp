@@ -1019,7 +1019,7 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
     auto& s=*impl_;if(!s.pending[slot])return;void* ptr=nullptr;D3D12_RANGE rr{0,8};
     if(SUCCEEDED(s.readbacks[slot]->Map(0,&rr,&ptr))) {s.hits=*static_cast<uint32_t*>(ptr);s.queries=static_cast<uint32_t*>(ptr)[1];s.verified=s.hits>0;D3D12_RANGE wr{0,0};s.readbacks[slot]->Unmap(0,&wr);}s.pending[slot]=false;
 }
-bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical) {
+bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
@@ -1204,11 +1204,13 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     {const uint32_t packed=(f.interactive.aovMode==0u&&!f.interactive.accumulate)?AudioReactiveFollower::pack(f.audioReactive):0u;std::memcpy(&c.pad,&packed,sizeof(packed));}
 
     const uint32_t curAov = std::min<uint32_t>(iv.aovMode, 7u);
-    const bool accumulate = canonical && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
-    const bool interactiveMotion = canonical && useRt && (curAov == 0u) && !accumulate &&
+    // Render both director lighting programs with the same spatial resolve.
+    const bool temporalAllowed = canonical && !compareDirectorLighting;
+    const bool accumulate = temporalAllowed && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
+    const bool interactiveMotion = temporalAllowed && useRt && (curAov == 0u) && !accumulate &&
                                    (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
                                    s.nrd.isAvailable();
-    const bool splitDenoise = canonical && useRt && (curAov == 0u);
+    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u);
 
     if(iv.sunOverride){std::copy_n(iv.sunDir,3,c.sunDir);c.sunScale=iv.sunScale;c.interFlags|=1u;}
     if(iv.lampsOff)c.interFlags|=4u;

@@ -2337,6 +2337,10 @@ SkyOut VSSky(uint id : SV_VertexID) {
     return o;
 }
 
+#ifdef M2_RT
+// Only visible sky pixels need to trace rays or increment the work counters.
+[earlydepthstencil]
+#endif
 Targets PSSky(SkyOut i) {
     float2 p = i.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 d = norm(forward + right * p.x * aspect * tan(fov * 0.5) + up * p.y * tan(fov * 0.5));

@@ -1282,7 +1282,7 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 72);
+    BOO_CHECK(keys.size() == 75);
 
     UiTextLayer layer;
     size_t problems = 0;
@@ -1302,7 +1302,6 @@ bool testUiStringCatalogs() {
             if (key == "hud.all") ok = keeps(L"[") && keeps(L"]");
             if (key == "hud.ost.synth") ok = keeps(L"RTX");
             if (key == "hud.ost.custom") ok = keeps(L"MP3+");
-            if (key == "hud.live_gpu") ok = keeps(L"GPU");
             if (!ok) { std::cout << "  " << tag << " " << key << " lost a protected token\n"; ++problems; }
         }
         if (layer.ready()) {

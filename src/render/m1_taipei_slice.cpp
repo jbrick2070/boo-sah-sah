@@ -1286,7 +1286,8 @@ struct M1TaipeiSliceEffect::Impl {
         uint32_t targetRtvIndex,
         uint32_t slot,
         bool isCanonicalPass,
-        bool recordTimestamps);
+        bool recordTimestamps,
+        bool compareDirectorLighting = false);
 
     void recordNv12PackAndReadback(
         ID3D12GraphicsCommandList* cmd,
@@ -3110,7 +3111,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
 void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     D3D12Context& d3d,
     ID3D12GraphicsCommandList* cmd,
-    const FrameContext& ctx,
+    const FrameContext& frame,
     bool useDxr,
     bool useCuda,
     bool useTensor,
@@ -3120,7 +3121,17 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     uint32_t targetRtvIndex,
     uint32_t slot,
     bool isCanonicalPass,
-    bool recordTimestamps) {
+    bool recordTimestamps,
+    bool compareDirectorLighting) {
+    FrameContext ctx = frame;
+    if (compareDirectorLighting && !isCanonicalPass) {
+        // Keep the live camera (including its iris offset), geometry, audio and time registered.
+        const auto& scripted = frame.scriptedDirectorComparison;
+        ctx.moodIntensity = scripted.lightTension;
+        ctx.moodPaletteAccent = scripted.spectralShift;
+        ctx.moodBloomStrength = scripted.bloomStrength;
+        ctx.moodCutAccent = scripted.cutAccent;
+    }
     if (isCanonicalPass) {
         if (slot < kFrameSlots) {
             retireVerifySlot(slot);
@@ -3215,7 +3226,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     }
 
     if(trilogyMesh) {
-        trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass);
+        trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass,compareDirectorLighting);
         ID3D12DescriptorHeap* m1Heaps[] = {srvUavHeap.Get()};
         cmd->SetDescriptorHeaps(1, m1Heaps);
     } else {
@@ -3585,6 +3596,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     case AbCompareEngine::CUDA:   abLeftHwVerified = livePillars[1].hardwareVerified; break;
     case AbCompareEngine::Tensor: abLeftHwVerified = livePillars[2].hardwareVerified; break;
     case AbCompareEngine::Codec:  abLeftHwVerified = livePillars[3].hardwareVerified && codecHwTexValid; break;
+    case AbCompareEngine::NPU:    abLeftHwVerified = hud.directorBackend == DirectorHudBackend::Npu &&
+                                                      !hud.mood.isScriptedFallback && hud.npuCompletedInferences > 0; break;
     default: break;
     }
 
@@ -3617,6 +3630,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (hud.benchHasResults)              flags |= (1u << 7u);
     flags |= ((ctx.hudMode & 3u) << 8u);
     flags |= (abIdx << 10u);
+    if (abEngine == AbCompareEngine::NPU) flags |= (1u << 19u);
+    if (!hud.mood.isScriptedFallback)     flags |= (1u << 20u);
     if (codecHijackActive)                flags |= (1u << 12u);
     if (codecHwTexValid && livePillars[3].hardwareVerified) flags |= (1u << 13u);
     if (abLeftHwVerified)                 flags |= (1u << 14u);
@@ -3625,6 +3640,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
 
     std::copy(hud.recentGpuMs.begin(), hud.recentGpuMs.end(), pc.recentGpuMs);
     pc.volumeAndPadding[0] = hud.volumePercent;
+    pc.volumeAndPadding[1] = hud.npuInferMs;
+    pc.volumeAndPadding[2] = hud.directorRateHz;
 
     const std::array<BackendStatus, kEngineKindCount> liveEngineStatuses = {
         liveRtStatus.status,
@@ -3679,7 +3696,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     for (uint32_t p = 0; p < 4u; ++p) {
         uint32_t nib = 2u; // OFF / STANDBY
         if (p == 3u && !codecViewActive) {
-            nib = 2u;
+            nib = 4u; // IDLE: no codec work was requested for this frame.
         } else if (livePillars[p].status == BackendStatus::Faulted) {
             nib = 3u;
         } else if (livePillars[p].hardwareVerified) {
@@ -3690,6 +3707,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
         modePacked |= ((nib & 0xFu) << (p * 4u));
     }
     pc.livePillarMeta[0] = modePacked;
+    pc.livePillarMeta[1] = static_cast<uint32_t>(hud.directorBackend);
+    pc.livePillarMeta[2] = static_cast<uint32_t>(std::min<uint64_t>(hud.npuCompletedInferences, UINT32_MAX));
 
     const CaptionLine cap = evaluateFilmCaption(
         visualMode, ctx.samplePosition, ctx.sampleRate, ctx.edition, ctx.showCaptions);
@@ -3752,8 +3771,6 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (ctx.interactive.customAudioActive)       interFlags |= (1u << 28u);
     if (ctx.interactive.audioMuted)              interFlags |= (1u << 29u);
     pc.interactiveMeta[0] = interFlags;
-    pc.interactiveMeta[1] = static_cast<uint32_t>(hud.npuCompletedInferences & 0xFFFFu) |
-                            (static_cast<uint32_t>(std::clamp(hud.npuInferMs * 10.0f, 0.0f, 9999.0f) + 0.5f) << 16u);
     const uint32_t trkSlot = std::min<uint32_t>(ctx.interactive.audioTrackSlot, 5u);
     const uint32_t toastA8 = static_cast<uint32_t>(std::clamp(ctx.interactive.audioToastAlpha, 0.0f, 1.0f) * 255.0f + 0.5f);
     pc.interactiveMeta[2] = (trkSlot & 0xFFu) | ((toastA8 & 0xFFu) << 8u);
@@ -3810,7 +3827,7 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         canonDxr, canonCuda, canonTensor,
         false, false,
         impl_->canvasClean.Get(), 5u,
-        slot, true, true);
+        slot, true, true, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
 
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
 
@@ -3869,7 +3886,11 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
 
     // 3. Single-variable A/B Split-Screen comparison pass into isolated canvasAbCompare (never touches CanvasClean!)
     if (abSplitActive) {
-        if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
+        if (abCompareEngine_ == AbCompareEngine::NPU) {
+            impl_->recordScenePipelineToCanvas(
+                d3d_, cmd, ctx, canonDxr, canonCuda, canonTensor, true, true,
+                impl_->canvasAbCompare.Get(), 6u, slot, false, false, true);
+        } else if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx,
                 false, canonCuda, canonTensor,
@@ -3963,7 +3984,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, wantAbSplice && abCompareEngine_ == AbCompareEngine::NPU);
 
         if (wantAbSplice) {
             const bool abDxr    = (abCompareEngine_ == AbCompareEngine::RT)     ? false : canonDxr;
@@ -3974,7 +3995,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
-                kHeadlessSlot, false, false);
+                kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
         }
 
         transitionResource(cmd, impl_->canvasClean.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -4030,7 +4051,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
         else if (abCompareEngine_ == AbCompareEngine::CUDA)   hwLeftVerified = impl_->livePillars[1].hardwareVerified;
         else if (abCompareEngine_ == AbCompareEngine::Tensor) hwLeftVerified = impl_->livePillars[2].hardwareVerified;
 
-        if (hwLeftVerified) {
+        if (hwLeftVerified || abCompareEngine_ == AbCompareEngine::NPU) {
             std::vector<uint8_t> abRgba;
             std::vector<uint32_t> abRgb10;
             if (!unpackRgb10ReadbackBuffer(
@@ -4038,7 +4059,8 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
                     abRgba, outRgb10 ? &abRgb10 : nullptr, outError)) {
                 return false;
             }
-            const uint32_t splitX = outWidth / 2u;
+            const float split = std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
+            const uint32_t splitX = static_cast<uint32_t>(std::ceil(static_cast<float>(outWidth) * split - 0.5f));
             for (uint32_t y = 0; y < outHeight; ++y) {
                 const size_t rowStart = (static_cast<size_t>(y) * outWidth + splitX) * 4u;
                 const size_t copyBytes = static_cast<size_t>(outWidth - splitX) * 4u;
@@ -4233,14 +4255,14 @@ bool M1TaipeiSliceEffect::renderHeadlessAbCompareForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, abCompareEngine_ == AbCompareEngine::NPU);
 
         impl_->recordScenePipelineToCanvas(
             d3d_, cmd, ctx,
             abDxr, abCuda, abTensor,
             abCuda == canonCuda, abTensor == canonTensor,
             impl_->canvasAbCompare.Get(), 6u,
-            kHeadlessSlot, false, false);
+            kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
 
         transitionResource(cmd, impl_->canvasClean.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         transitionResource(cmd, impl_->canvasAbCompare.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -4330,7 +4352,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
 
         if (abSplitActive && abCompareEngine_ != AbCompareEngine::Codec) {
             const bool abDxr    = (abCompareEngine_ == AbCompareEngine::RT)     ? false : canonDxr;
@@ -4341,7 +4363,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
-                kHeadlessSlot, false, false);
+                kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
         }
 
         if (codecViewActive && !impl_->externalNv12Active && !disableCodec_ && !d3d_.isWarp() && impl_->liveAccel.codecHardwareAvailable()) {

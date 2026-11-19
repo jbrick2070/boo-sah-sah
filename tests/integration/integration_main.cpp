@@ -25,6 +25,7 @@
 #include <psapi.h>
 #include <charconv>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 #include <algorithm>
@@ -1192,12 +1193,42 @@ bool testStandaloneHardwareSolosRtCudaTensor() {
     return true;
 }
 
+void reportDirectorFrameDifference(const char* label, const std::vector<uint32_t>& live10,
+                                   const std::vector<uint32_t>& script10, uint32_t w, uint32_t h) {
+    std::array<uint32_t, 1024> channelDifference{};
+    uint64_t totalDifference = 0;
+    uint32_t changedPixels = 0;
+    for (size_t i = 0; i < live10.size(); ++i) {
+        changedPixels += (live10[i] & 0x3fffffffu) != (script10[i] & 0x3fffffffu);
+        for (int shift : {0, 10, 20}) {
+            const int delta = std::abs(int((live10[i] >> shift) & 1023u) - int((script10[i] >> shift) & 1023u));
+            ++channelDifference[delta];
+            totalDifference += delta;
+        }
+    }
+    const double channels = 3.0 * live10.size();
+    uint32_t below = 0;
+    size_t p95 = 0;
+    while (p95 + 1 < channelDifference.size() && below + channelDifference[p95] < channels * 0.95)
+        below += channelDifference[p95++];
+    std::cout << "  " << label << ", " << w << "x" << h << ": "
+              << 100.0 * changedPixels / live10.size() << "% pixels changed, mean absolute RGB delta "
+              << totalDifference / channels << "/1023, p95 " << p95 << "/1023.\n";
+}
+
 bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
     using namespace boo;
 
     ProbeFlags pf{};
     const auto caps = probeSystemCapabilities(pf);
     const auto xmlPath = resolveResourcePath("assets/models/madame_n_director.xml");
+    auto sanctuaryFrame = makeM1TestContext(1056000, 0);
+    sanctuaryFrame.actIndex = 3;
+    sanctuaryFrame.actProgress = 22.0f / 45.0f;
+    ScriptedDirector sanctuaryDirector;
+    sanctuaryDirector.reset(266203);
+    const auto sanctuaryBaseline = sanctuaryDirector.evaluate(sanctuaryFrame, nullptr);
+    std::optional<NeuralInferenceSample> sanctuaryInference;
 
     if (isOpenVinoRuntimeAvailable(true)) {
         // 1. Explicit OpenVINO NPU compile + actual inference verification (or CPU if host has no NPU)
@@ -1235,6 +1266,8 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
                 BOO_CHECK(sSusp.controls[i] >= 0.0f && sSusp.controls[i] <= 1.0f);
                 BOO_CHECK(sComic.controls[i] >= 0.0f && sComic.controls[i] <= 1.0f);
             }
+            sanctuaryInference.emplace();
+            BOO_CHECK(dir.infer(sanctuaryDirector.buildFeatures(sanctuaryFrame, nullptr), *sanctuaryInference));
             dir.shutdown();
         }
 
@@ -1278,6 +1311,8 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             }
             const auto liveTel = asyncCtrl.telemetry();
             BOO_CHECK(liveTel.completedInferences >= 1);
+            BOO_CHECK(liveTel.completedRateHz >= 1.0f && liveTel.completedRateHz <= 5.0f);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
             if (!caps.npuDevices.empty()) {
                 BOO_CHECK(liveTel.hardwareResult.status == BackendStatus::Accelerated);
             }
@@ -1291,8 +1326,32 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             fctx.actProgress = 0.72f;
             fctx.audioEnvelope = 0.52f;
 
-            const DirectorMoodState neuralMood = asyncCtrl.evaluateFrame(fctx, nullptr);
+            DirectorMoodState baseline{};
+            const DirectorMoodState neuralMood = asyncCtrl.evaluateFrame(fctx, nullptr, &baseline);
             BOO_CHECK(!neuralMood.isScriptedFallback);
+            ScriptedDirector reference;
+            reference.reset(266203);
+            const auto expected = reference.evaluate(fctx, nullptr);
+            BOO_CHECK(baseline.isScriptedFallback && baseline.category == expected.category);
+            BOO_CHECK(baseline.irisAngle == expected.irisAngle && baseline.spectralShift == expected.spectralShift);
+
+            // A seek must draw the current scripted baseline before fresh model output arrives.
+            fctx.samplePosition = 8064000;
+            fctx.filmTimeSeconds = 168.0;
+            fctx.seeking = true;
+            const auto atSeek = asyncCtrl.evaluateFrame(fctx, nullptr, &baseline);
+            BOO_CHECK(atSeek.isScriptedFallback && atSeek.irisAngle == baseline.irisAngle);
+            fctx.seeking = false;
+            bool resumedNeural = false;
+            for (int retry = 0; retry < 120; ++retry) {
+                if (!asyncCtrl.evaluateFrame(fctx, nullptr).isScriptedFallback) {
+                    resumedNeural = true;
+                    break;
+                }
+                Sleep(25);
+            }
+            BOO_CHECK(resumedNeural);
+            BOO_CHECK(asyncCtrl.telemetry().completedInferences > liveTel.completedInferences);
 
             // Inject mid-film NPU inference timeout -> verify smooth continuation and Degraded failover
             asyncCtrl.setInjectTimeout(true);
@@ -1308,8 +1367,41 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             BOO_CHECK(failTel.timeoutCount >= 1);
             BOO_CHECK(failTel.hardwareResult.status == BackendStatus::Degraded);
             BOO_CHECK(failTel.hardwareResult.diagnosticCode == "NPU_INFERENCE_TIMEOUT_FAILOVER");
+            BOO_CHECK(failTel.hardwareResult.humanReadableReason.find("Injected inference timeout") != std::string::npos);
+            BOO_CHECK(failTel.completedInferences == 0 && failTel.completedRateHz == 0.0f && failTel.lastInferMs == 0.0f);
             const DirectorMoodState fallbackMood = asyncCtrl.evaluateFrame(fctx, nullptr);
             BOO_CHECK(fallbackMood.isScriptedFallback);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            asyncCtrl.setInjectTimeout(false);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+
+            // A real bad-input failure must report its cause and leave the watchdog count alone.
+            // A rapid disable/enable pair starts a new route even between two worker ticks.
+            asyncCtrl.setDisableNpu(true);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            asyncCtrl.setDisableNpu(false);
+            for (int retry = 0; retry < 160 && asyncCtrl.telemetry().completedInferences == 0; ++retry) Sleep(25);
+            BOO_CHECK(asyncCtrl.telemetry().completedInferences > 0);
+            auto invalid = fctx;
+            invalid.audioEnvelope = std::nanf("");
+            asyncCtrl.evaluateFrame(invalid, nullptr);
+            for (int retry = 0; retry < 80 && asyncCtrl.telemetry().hardwareResult.status != BackendStatus::Degraded; ++retry) Sleep(25);
+            const auto badInput = asyncCtrl.telemetry();
+            BOO_CHECK(badInput.hardwareResult.diagnosticCode == "NPU_INFERENCE_ERROR_FAILOVER");
+            BOO_CHECK(badInput.hardwareResult.humanReadableReason.find("non-finite feature") != std::string::npos);
+            BOO_CHECK(badInput.timeoutCount == failTel.timeoutCount);
+            BOO_CHECK(badInput.completedRateHz == 0.0f && badInput.completedInferences == 0);
+            asyncCtrl.reset(266203);
+            asyncCtrl.evaluateFrame(fctx, nullptr);
+            const bool hardwareNpu = liveTel.hardwareResult.status == BackendStatus::Accelerated;
+            BOO_CHECK(asyncCtrl.retryIfDegraded() == hardwareNpu);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            if (hardwareNpu) {
+                for (int retry = 0; retry < 160 && asyncCtrl.telemetry().completedInferences == 0; ++retry) Sleep(25);
+                const auto recovered = asyncCtrl.telemetry();
+                BOO_CHECK(recovered.hardwareResult.status == BackendStatus::Accelerated);
+                BOO_CHECK(recovered.completedInferences > 0 && recovered.completedRateHz > 0.0f);
+            }
             asyncCtrl.shutdown();
         }
     }
@@ -1342,6 +1434,37 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
         ctxB.moodPaletteAccent = 0.85f;
         BOO_CHECK(fxNpu.renderHeadlessCanvasForTest(ctxB, imgBloom, w, h, &err));
         BOO_CHECK(imgCalm != imgBloom);
+
+        // Compare two complete sanctuary renders at the same sample. With matching lighting
+        // the two 10-bit canvases must agree, even when the scripted iris would move the camera.
+        fxNpu.setAbCompareEngine(AbCompareEngine::NPU);
+        ctxB.scriptedDirectorComparison = {
+            ctxB.moodBloomStrength, 0.1f, ctxB.moodIntensity, ctxB.moodPaletteAccent, ctxB.moodCutAccent};
+        std::vector<uint32_t> live10, script10;
+        BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(ctxB, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+        BOO_CHECK(live10 == script10);
+        const auto sameFrame = live10;
+        ctxB.scriptedDirectorComparison.lightTension = 0.02f;
+        ctxB.scriptedDirectorComparison.bloomStrength = 0.04f;
+        ctxB.scriptedDirectorComparison.spectralShift = 0.05f;
+        BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(ctxB, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+        BOO_CHECK(live10 == sameFrame);
+        BOO_CHECK(live10 != script10);
+
+        if (sanctuaryInference) {
+            const auto& controls = sanctuaryInference->controls;
+            sanctuaryFrame.moodBloomStrength = controls[0];
+            sanctuaryFrame.moodIrisAngle = controls[1];
+            sanctuaryFrame.moodIntensity = controls[2];
+            sanctuaryFrame.moodPaletteAccent = controls[3];
+            sanctuaryFrame.moodCutAccent = controls[4];
+            sanctuaryFrame.scriptedDirectorComparison = {
+                sanctuaryBaseline.bloomStrength, sanctuaryBaseline.irisAngle, sanctuaryBaseline.lightTension,
+                sanctuaryBaseline.spectralShift, sanctuaryBaseline.cutAccent};
+            BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(sanctuaryFrame, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+            BOO_CHECK(live10 != script10);
+            reportDirectorFrameDifference("Sanctuary at 22 s", live10, script10, w, h);
+        }
 
         fxNpu.shutdown();
         d3d.waitForGpu();

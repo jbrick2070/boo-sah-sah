@@ -20,6 +20,10 @@ Jeffrey A Brick authored the film, soundtrack, original project code and procedu
 
 The seven distributed mesh assets are `shanghai_trestle`, `shenzhen_evtol`, `taipei_101_hero`, `glass_orchid_hero`, `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove`. The four distributed GPU texture-array assets are `pbr_albedo_alpha.btex` (`BC7_UNORM_SRGB`), `pbr_normal.btex` (`BC5_UNORM`), `pbr_ormt.btex` (`BC7_UNORM`), and `pbr_ibl_env.btex` (`RGBA16F`). The limited Chinese title glyphs do not constitute a general Chinese font.
 
+### Taipei 101
+
+C.Y. Lee & Partners (李祖原聯合建築師事務所) designed Taipei 101. BOO SAH SAH is an independent production. [Architect’s project page](https://www.cylee.com/project/Taipei-101)
+
 ### Manifest fields
 
 Schema 2 records a stable `id`, repository-relative `path`, `kind`, human-readable `provenance`, HTTPS `source_url`, `author`, `license`, `attribution_required`, and the lowercase SHA-256 digest of the exact file bytes. For generated artifacts, the source URL identifies the generator. Packed works that include external material also list its `upstream_sources`. The Poly Haven receipt below records each input file's URL and digest. License expressions describe the packaged artifact, including third-party portions. The attribution flag includes the MIT copyright and permission notice.

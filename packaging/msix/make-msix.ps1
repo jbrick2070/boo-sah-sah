@@ -13,6 +13,7 @@ param(
   [string]$Version = '1.0.0.0',
   [string]$Stage,
   [string]$OutDir,
+  [switch]$RequireHardwareSidecars,
   [switch]$Register,
   [switch]$Overwrite
 )
@@ -30,6 +31,104 @@ $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Directory |
   Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
 if (-not $sdk) { throw 'The Windows SDK (makeappx.exe, makepri.exe) is needed.' }
 $makeappx = Join-Path $sdk.FullName 'x64\makeappx.exe'; $makepri = Join-Path $sdk.FullName 'x64\makepri.exe'
+
+function Assert-SameSet([string]$label, [string[]]$expected, [string[]]$found) {
+  $missing = @($expected | Where-Object { $found -cnotcontains $_ })
+  $extra = @($found | Where-Object { $expected -cnotcontains $_ })
+  if ($missing.Count -or $extra.Count -or $expected.Count -ne $found.Count) {
+    throw "$label differs (expected $($expected.Count), found $($found.Count)). Missing: $($missing -join ', '). Extra: $($extra -join ', ')."
+  }
+}
+function Read-PackedText($entry) {
+  $reader = [IO.StreamReader]::new($entry.Open())
+  try { $reader.ReadToEnd() } finally { $reader.Dispose() }
+}
+function Assert-StorePackage([string]$path) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [IO.Compression.ZipFile]::OpenRead($path)
+  try {
+    $entries = @{}
+    foreach ($entry in $archive.Entries) { $entries[$entry.FullName] = $entry }
+    $required = @(
+      'AppxManifest.xml', 'resources.pri', 'boo_sah_sah.exe', 'assets/manifest.json', 'config/default.toml',
+      'LICENSE', 'LICENSE-ASSETS.md', 'LICENSES.md',
+      'config/quality_presets.json', 'assets/cues/film_360s.json', 'assets/models/madame_n_director.xml',
+      'assets/models/madame_n_director.bin', 'assets/meshes/shenzhen_evtol.bmesh',
+      'assets/shaders/m1_present_hud.cso', 'assets/shaders/m1_composite.cso', 'assets/shaders/m1_particles_vs.cso',
+      'assets/shaders/m1_particles_ps.cso', 'assets/shaders/m2_mesh_vs.cso', 'assets/shaders/m2_mesh_ps.cso',
+      'assets/shaders/m2_mesh_rt_ps.cso', 'assets/shaders/m1_nv12_pack_cs.cso'
+    )
+    if ($RequireHardwareSidecars) {
+      $required += @('openvino/openvino.dll', 'openvino/openvino_c.dll', 'openvino/openvino_ir_frontend.dll',
+                     'openvino/openvino_intel_npu_plugin.dll', 'openvino/openvino_intel_npu_compiler_loader.dll',
+                     'openvino/openvino_intel_npu_vm_runtime.dll', 'openvino/tbb12.dll',
+                     'openvino/tbbbind_2_5.dll', 'openvino/tbbmalloc.dll', 'nrd/NRD.dll',
+                     'openvino/LICENSE-OpenVINO-Apache-2.0.txt', 'nrd/LICENSE-NVIDIA-NRD.txt',
+                     'openvino/licensing/runtime-third-party-programs.txt', 'openvino/licensing/onednn_third-party-programs.txt',
+                     'openvino/licensing/onetbb_third-party-programs.txt')
+    }
+    foreach ($name in $required) {
+      if ($entries[$name].Length -le 0) { throw "Missing or empty Store payload: $name" }
+    }
+    [xml]$appManifest = Read-PackedText $entries['AppxManifest.xml']
+    $identity = $appManifest.Package.Identity
+    if ($identity.Name -cne $IdentityName -or $identity.Publisher -cne $Publisher -or
+        $identity.Version -ne $Version -or $identity.ProcessorArchitecture -ne 'x64') {
+      throw 'The packed manifest differs from the requested x64 Store identity or version.'
+    }
+    $sourceTags = @(Get-ChildItem -LiteralPath (Join-Path $repo 'assets/strings') -File -Filter '*.json' |
+                    ForEach-Object { $_.BaseName })
+    Assert-SameSet 'Store descriptions and supported runtime languages' $sourceTags $languages
+    $manifestTags = @($appManifest.Package.Resources.Resource | ForEach-Object { $_.Language.ToLowerInvariant() })
+    Assert-SameSet 'MSIX manifest languages' @($languages | ForEach-Object { $_.ToLowerInvariant() }) $manifestTags
+    $tags = @($entries.Keys | Where-Object { $_ -match '^assets/strings/[^/]+\.json$' } |
+              ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) })
+    Assert-SameSet 'Runtime catalog languages' $languages $tags
+    $listings = [IO.File]::ReadAllText((Join-Path $repo 'packaging/store-listing.md'))
+    $listingTags = @([regex]::Matches($listings, '(?m)^## ([a-z]{2}-[A-Z]{2})[ \t]*\r?$') |
+                     ForEach-Object { $_.Groups[1].Value })
+    Assert-SameSet 'Store listing languages' $languages $listingTags
+
+    $english = [IO.File]::ReadAllText((Join-Path $repo 'assets/strings/en-US.json')) | ConvertFrom-Json
+    $keys = @($english.strings.PSObject.Properties.Name)
+    foreach ($tag in $tags) {
+      $catalog = (Read-PackedText $entries["assets/strings/$tag.json"]) | ConvertFrom-Json
+      if ($catalog.language -cne $tag) { throw "Catalog $tag declares language '$($catalog.language)'." }
+      Assert-SameSet "$tag string keys" $keys @($catalog.strings.PSObject.Properties.Name)
+      foreach ($item in $catalog.strings.PSObject.Properties) {
+        $value = if ($tag -ceq 'en-US') { $item.Value.text } else { $item.Value }
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "$tag has no translation for $($item.Name)." }
+      }
+    }
+    $exeStream = $entries['boo_sah_sah.exe'].Open()
+    try { $exeHash = (Get-FileHash -InputStream $exeStream -Algorithm SHA256).Hash } finally { $exeStream.Dispose() }
+    if ($exeHash -ne (Get-FileHash -LiteralPath (Join-Path $Stage 'boo_sah_sah.exe')).Hash) {
+      throw 'The Store executable differs from the staged Release executable.'
+    }
+    $stageShaders = @(Get-ChildItem -LiteralPath (Join-Path $Stage 'assets/shaders') -File -Filter '*.cso')
+    $packedShaders = @($entries.Keys | Where-Object { $_ -match '^assets/shaders/[^/]+\.cso$' })
+    Assert-SameSet 'Compiled renderer shaders' @($stageShaders | ForEach-Object { 'assets/shaders/' + $_.Name }) $packedShaders
+    foreach ($shader in $stageShaders) {
+      $entry = $entries['assets/shaders/' + $shader.Name]
+      if ($entry.Length -le 0) { throw "Empty compiled renderer shader: $($shader.Name)" }
+      $stream = $entry.Open()
+      try { $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash } finally { $stream.Dispose() }
+      if ($hash -ne (Get-FileHash -LiteralPath $shader.FullName).Hash) {
+        throw "Store shader differs from the staged build: $($shader.Name)"
+      }
+    }
+    $assets = (Read-PackedText $entries['assets/manifest.json']) | ConvertFrom-Json
+    $soundtrack = @($assets.assets | Where-Object { $_.kind -eq 'audio' } | ForEach-Object { $_.path })
+    Assert-SameSet 'Packaged soundtrack files' $soundtrack @($entries.Keys | Where-Object { $_ -match '^assets/audio/[^/]+$' })
+    foreach ($asset in $assets.assets) {
+      $entry = $entries[$asset.path]
+      if ($entry.Length -le 0) { throw "Missing or empty registered asset: $($asset.path)" }
+      $stream = $entry.Open()
+      try { $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash } finally { $stream.Dispose() }
+      if ($hash -ne $asset.sha256) { throw "Store asset SHA-256 mismatch: $($asset.path)" }
+    }
+  } finally { $archive.Dispose() }
+}
 
 $out = [IO.Path]::GetFullPath($OutDir); New-Item -ItemType Directory -Force -Path $out | Out-Null
 $msix = Join-Path $out "BooSahSah_${Version}_x64.msix"
@@ -75,8 +174,15 @@ $extra = Get-ChildItem -LiteralPath $layout -Filter '*.pri' | Where-Object Name 
 if ($extra) { throw "makepri split the resources ($($extra.Name -join ', ')); the package needs one resources.pri." }
 Remove-Item -LiteralPath (Join-Path $layout 'Strings') -Recurse -Force   # compiled into resources.pri; not needed in the package
 
-& $makeappx pack /d $layout /p $msix /o /h SHA256 | Out-Null
-if ($LASTEXITCODE) { throw 'makeappx pack failed (run it by hand to see why).' }
+$pending = Join-Path $out ("candidate-{0}.msix" -f [Guid]::NewGuid())
+try {
+  & $makeappx pack /d $layout /p $pending /o /h SHA256 | Out-Null
+  if ($LASTEXITCODE) { throw 'makeappx pack failed (run it by hand to see why).' }
+  Assert-StorePackage $pending
+  Move-Item -LiteralPath $pending -Destination $msix -Force:$Overwrite
+} finally {
+  if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force }
+}
 Write-Host "Package: $msix ($([math]::Round((Get-Item $msix).Length / 1MB, 1)) MB)"
 if ($Register) {
   Add-AppxPackage -Register (Join-Path $layout 'AppxManifest.xml')
