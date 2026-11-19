@@ -55,6 +55,8 @@ Texture2DArray<float4> gNormalTex      : register(t5);
 Texture2DArray<float4> gOrmtTex        : register(t6);
 Texture2DArray<float4> gEnvHdrTex      : register(t7);
 
+Texture2DArray<float4> roomFaces : register(t10);
+
 SamplerState linearClamp     : register(s0);
 SamplerState anisoWrap       : register(s1);
 SamplerState equirectSampler : register(s2);
@@ -330,6 +332,50 @@ bool isCurtainWall(uint m) { return m == 5u || m == 13u || m == 14u; }
 
 bool isDistrictGlazing(uint m, uint partId) {
     return cityExterior() && isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u || partId == 62u)));
+}
+
+// Unit-room slabs in tangent space. Face slices are back, left, right, floor and ceiling.
+float2 roomCoordinates(InstanceData data, float3 position, float3 T, float3 B, float2 authoredUv) {
+    if ((data.flags & 0xffffu) == 62u) return authoredUv;
+    float3 offset = position - float3(data.world[0].w, data.world[1].w, data.world[2].w);
+    float meters = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+    return float2(dot(offset, T), dot(offset, B)) * meters;
+}
+
+float3 roomEmission(float3 broad, uint seed, float2 meters, float2 meterWidth,
+                    float3 toEye, float3 N, float3 T, float3 B, float distanceMeters) {
+    float2 grid = meters / float2(3.0, 3.2);
+    float2 filterWidth = meterWidth / float2(3.0, 3.2);
+    float facing = saturate(dot(toEye, N));
+    float blend = (1.0 - smoothstep(160.0, 250.0, distanceMeters)) * smoothstep(0.05, 0.18, facing)
+                * (1.0 - smoothstep(0.13, 0.34, max(filterWidth.x, filterWidth.y)));
+    if (blend < 0.001) return broad;
+    float2 window = frac(grid);
+    float2 edges = min(window, 1.0 - window);
+    float2 pane = smoothstep(float2(0.09,0.11), float2(0.12,0.15) + filterWidth, edges);
+    int2 cell = (int2)floor(grid);
+    uint h = asuint(cell.x) * 0x7feb352du ^ asuint(cell.y) * 0x846ca68bu ^ seed;
+    h ^= h >> 15; h *= 0x9e3779b9u; h ^= h >> 16;
+    float3 ray = float3(-dot(toEye,T)/3.0, -dot(toEye,B)/3.2, facing/4.0);
+    float2 wall = (step(0.0, ray.xy) - window) /
+                  (lerp(-1.0.xx, 1.0.xx, step(0.0,ray.xy)) * max(abs(ray.xy), 1e-5));
+    float back = 1.0 / max(ray.z, 1e-5);
+    float3 hit = float3(window, 0) + min(back, min(wall.x, wall.y)) * ray;
+    uint face = 0u;
+    float2 uv = float2(hit.x, 1.0 - hit.y);
+    if (wall.x < back && wall.x < wall.y) {
+        face = ray.x < 0 ? 1u : 2u;
+        uv = float2(hit.z, 1.0 - hit.y);
+    } else if (wall.y < back) {
+        face = ray.y < 0 ? 3u : 4u;
+        uv = float2(hit.x, hit.z);
+    }
+    float mip = log2(max(1.0, 64.0 * max(filterWidth.x, filterWidth.y) / max(facing, 0.15)));
+    float3 room = roomFaces.SampleLevel(linearClamp, float3(saturate(uv), (h % 6u)*5u + face), mip).rgb;
+    float occupancy = ((h >> 8) & 7u) < 3u ? 0.13 : 1.0;
+    float trim = (1.0 - pane.x*pane.y);
+    float3 behindGlass = room * occupancy * (0.75 + 0.25*audioBandForBuilding(float(seed & 255u)));
+    return lerp(broad, behindGlass * (1.0 - trim) + 0.08*broad*trim, blend);
 }
 
 // Exact coverage of a repeated stripe, including its average when several stripes fit in one pixel.
@@ -940,6 +986,13 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             }
             facadeLight = shadeDistrictFacade(hm, sceneInstances[q.CommittedInstanceID()].buildingSeed,
                                              facadePos, hitNGeom, -direction, hitWidth.xxx, hBase, hRough, hMetal);
+            InstanceData roomInstance = sceneInstances[q.CommittedInstanceID()];
+            if ((roomInstance.flags & (1u << 24)) && hitPart >= 60u && hitPart <= 62u && abs(hitNGeom.y) < 0.55) {
+                float metersPerUnit = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+                float2 meters = roomCoordinates(roomInstance, p, T, B, hitUv);
+                facadeLight = roomEmission(facadeLight, roomInstance.buildingSeed, meters, (hitWidth/0.08).xx,
+                                           -direction, hitNGeom, T, B, length(p-eye)*metersPerUnit);
+            }
         } else if (isCurtainWall(hm)) {
             float floorH = (hm == 5u) ? 0.34 : 0.38;
             float bayW   = (hm == 5u) ? 0.25 : 0.32;
@@ -1246,6 +1299,7 @@ struct VOut {
     nointerpolation uint flags : TEXCOORD5;
     nointerpolation uint seed : TEXCOORD6;
     float localY : TEXCOORD7;
+    float2 roomMeters : TEXCOORD8;
 };
 
 VOut VSMain(uint id : SV_VertexID, uint instanceId : SV_InstanceID) {
@@ -1263,6 +1317,11 @@ VOut VSMain(uint id : SV_VertexID, uint instanceId : SV_InstanceID) {
     o.seed = data.buildingSeed;
     o.localY = v.p.y;
     o.tangentSign = float4(norm(mul(worldBasis,v.tangent.xyz)), v.tangent.w);
+    o.roomMeters = 0.0.xx;
+    if ((data.flags & (1u << 24)) && (o.mat == 5u || o.mat == 13u || o.mat == 14u)) {
+        o.roomMeters = roomCoordinates(data, o.world, o.tangentSign.xyz,
+            cross(o.normal, o.tangentSign.xyz) * o.tangentSign.w, o.uv.xy);
+    }
     float3 d = o.world - eye;
     float z = dot(d, forward);
     float fy = 1.0 / tan(fov * 0.5);
@@ -1312,6 +1371,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     bool aircraft = act == 1u && partId >= 100u && partId <= 125u;
     bool districtFacade = isDistrictGlazing(matId, partId);
     float3 worldFootprint = fwidth(i.world);
+    float2 roomWidth = fwidth(i.roomMeters);
     float3 texCoord = float3(i.uv.xy, (float)matId);
 
     // Unconditional anisotropic texture-array fetches (strictly uniform before any cutout discard)
@@ -1407,6 +1467,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             facadeFootprint *= districtScale;
         }
         facadeLight = shadeDistrictFacade(matId, i.seed, facadePos, nGeom, v, facadeFootprint, base, rough, metallic);
+        if ((i.flags & (1u << 24)) && partId >= 60u && partId <= 62u && abs(nGeom.y) < 0.55) {
+            float metersPerUnit = (act == 2u ? taipeiKit.w : 1.0) / 0.08;
+            facadeLight = roomEmission(facadeLight, i.seed, i.roomMeters, roomWidth, v, nGeom, T, B, dist * metersPerUnit);
+        }
     } else if (isCurtainWall(matId)) {
         float floorH = (matId == 5u) ? 0.34 : 0.38;
         float bayW   = (matId == 5u) ? 0.25 : 0.32;

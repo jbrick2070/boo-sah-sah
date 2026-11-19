@@ -1,11 +1,13 @@
 // Included by integration_main.cpp after film_capture_gate.hpp for the verified WIC
 // PNG writer and deterministic film context. This suite never shows its swapchain HWND.
 bool gCityForceRaster = false;
+bool gRoomBaseline = false;
 
 struct CityBaselineShot {
     int seconds;
     const char* sceneId;
     const char* name;
+    bool oblique = false;
 };
 
 bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& fx,
@@ -24,6 +26,18 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
 
     auto context = [&](int offset) {
         auto ctx = makeFilmGateContext(cue, anchor + offset * step, Edition::Family);
+        if (gRoomBaseline) {
+            auto& view = ctx.interactive;
+            view.exploreActive = true;
+            view.blendWeight = 1.0f;
+            view.eye[0] = shot.oblique ? -1.50f : -0.45f;
+            view.eye[1] = 0.16f;
+            view.eye[2] = shot.oblique ? 18.30f : 18.64f;
+            view.target[0] = shot.oblique ? -0.22f : -0.30f;
+            view.target[1] = shot.oblique ? 0.35f : 0.15f;
+            view.target[2] = shot.oblique ? 20.55f : 20.245f;
+            view.fovYRadians = 0.67f;
+        }
         ctx.presentationFrame = uint64_t(ctx.samplePosition / step);
         return ctx;
     };
@@ -99,7 +113,9 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
     BOO_CHECK(stats.visibleCityPlacements <= stats.cityPlacements);
     BOO_CHECK(stats.cityDrawBatches <= stats.visibleCityInstances);
     if (gCityForceRaster) BOO_CHECK(stats.rayInstances == 0);
-    if (std::string_view(shot.sceneId) == "signal_hijack" || std::string_view(shot.sceneId) == "taipei_sanctuary") {
+    if (gRoomBaseline) {
+        BOO_CHECK(stats.lodPlacements[0] > 0 && stats.visibleCityInstances > 0);
+    } else if (std::string_view(shot.sceneId) == "signal_hijack" || std::string_view(shot.sceneId) == "taipei_sanctuary") {
         BOO_CHECK(stats.cityDrawBatches > 0 && stats.visibleCityInstances >= 5u * stats.cityDrawBatches);
     }
     auto& city = entry["geometry"];
@@ -200,7 +216,7 @@ bool testCityBaseline() {
             << "shot,frame,sample,gpu_ms,scene_ms,bloom_ms,composite_ms,presentation_pass_ms,process_local_bytes\n";
 
     struct Sequence { const char* file; std::vector<CityBaselineShot> shots; };
-    const Sequence sequences[] = {
+    Sequence sequences[] = {
         {"film_360s", {{8, "taipei_intro", "film_taipei_8s"},
                        {168, "madame_n", "film_sanctuary_168s"},
                        {176, "madame_n", "film_sanctuary_176s"},
@@ -211,7 +227,12 @@ bool testCityBaseline() {
                              {168, "taipei_sanctuary", "trilogy_taipei_168s"},
                              {176, "taipei_sanctuary", "trilogy_taipei_176s"}}}
     };
+    if (gRoomBaseline) {
+        sequences[0].shots.clear();
+        sequences[1].shots = {{176, "taipei_sanctuary", "arcade_front"}, {176, "taipei_sanctuary", "arcade_oblique", true}};
+    }
     for (const auto& sequence : sequences) {
+        if (sequence.shots.empty()) continue;
         CueSheet cue;
         ValidationReport validation;
         const auto cuePath = std::string("assets/cues/") + sequence.file + ".json";
