@@ -3,9 +3,9 @@
   "assets": [
     {
       "name": "shanghai_trestle",
-      "vertices": 131436,
-      "triangles": 43812,
-      "submeshes": 36,
+      "vertices": 155532,
+      "triangles": 51844,
+      "submeshes": 40,
       "nonmanifold_edges": 0,
       "aabb": [
         [
@@ -19,7 +19,7 @@
           157.0
         ]
       ],
-      "sha256": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15"
+      "sha256": "4269b834e07ccd80a138f0f2d0346b800e117306ecd6407ce42a350e69520e92"
     },
     {
       "name": "shenzhen_evtol",

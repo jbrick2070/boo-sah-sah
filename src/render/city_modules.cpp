@@ -187,25 +187,60 @@ Bmesh makeModule(uint32_t kit, uint32_t style, uint32_t glazing, uint32_t lod) {
     if (kit==2 && (style==kWalkup || style==kShop)) return streetFront(style,lod);
     ModuleBuilder b{kit==1 ? 60u : 61u, {}};
     const uint32_t trim = kit==1 ? (style==1 ? 6u : 16u) : 15u;
-    if (style == 4) {
+    if (style == 9) {
+        // A folded clerestory sits over each pair of beams on the existing
+        // elevated platform. The open front looks directly onto the guideway.
+        for(int bay=0;bay<5;++bay) {
+            const float x=-.4f+.2f*bay;
+            b.box(11,x,.44f,.016f,.07f,0,.60f);
+            b.loft(11,{x,.41f,.017f,.07f,.08f},{x+.055f,-.32f,.017f,.07f,.60f});
+            const Point a{x-.095f,.56f,-.47f},c{x+.095f,1.0f,.48f};
+            const Point p{x+.095f,.94f,-.47f},q{x-.095f,.62f,.48f};
+            const auto above=[](Point v) {v[1]+=.055f;return v;};
+            b.quad(11,a,p,c,q); b.quad(11,above(q),above(c),above(p),above(a));
+            for(const auto& edge:std::array<std::array<Point,2>,4>{{{a,p},{p,c},{c,q},{q,a}}})
+                b.quad(11,edge[1],edge[0],above(edge[0]),above(edge[1]));
+            b.box(15,x+.09f,0,.012f,.86f,.62f,.93f);
+        }
+        return b.finish();
+    } else if (style == 4) {
         // Ground extension under the outlying blocks of the original compact set.
         b.box(2,0,0,1,1,0,1);
         return b.finish();
     } else if (style == 7) {
-        // An inhabited service stair and a pair of steel water cisterns on
-        // the shared roof. The tank profiles survive the distant skyline.
-        b.box(2,0,0,.80f,.77f,0,.16f);
-        b.box(glazing,-.22f,.08f,.31f,.58f,.14f,.78f);
-        b.box(2,-.22f,.08f,.35f,.61f,.77f,.84f);
-        b.tank(11,.16f,-.14f,.24f,.28f,.15f,.62f);
-        b.tank(11,.18f,.19f,.23f,.26f,.15f,.51f);
+        if(kit==2) {
+            // An inhabited service stair and a pair of steel water cisterns on
+            // the shared roof. The tank profiles survive the distant skyline.
+            b.box(2,0,0,.80f,.77f,0,.16f);
+            b.box(glazing,-.22f,.08f,.31f,.58f,.14f,.78f);
+            b.box(2,-.22f,.08f,.35f,.61f,.77f,.84f);
+            b.tank(11,.16f,-.14f,.24f,.28f,.15f,.62f);
+            b.tank(11,.18f,.19f,.23f,.26f,.15f,.51f);
+        } else {
+            // Open transfer truss tying together two high-rise cores. Sky and
+            // neighboring towers remain visible through the top of the frame.
+            for(float x:{-.29f,.29f}) {
+                b.loft(glazing,{x,-.02f,.24f,.74f,0},{x,.08f,.18f,.57f,1});
+            }
+            b.box(glazing,0,.08f,.76f,.57f,.74f,.97f);
+            b.box(trim,0,-.21f,.74f,.035f,.73f,.78f);
+        }
     } else if (style == 8) {
-        // Narrow parapet blades and a shadowed mechanical floor below a
-        // warm top slab distinguish commercial offices from the walk-ups.
-        b.box(glazing,0,0,.76f,.71f,0,.34f);
-        for(float x:{-.30f,-.11f,.11f,.30f})
-            b.loft(11,{x,.02f,.07f,.62f,.33f},{x,.11f,.065f,.38f,1.02f});
-        b.box(trim,0,.11f,.72f,.40f,.91f,.97f);
+        if(kit==2) {
+            // Narrow parapet blades and a shadowed mechanical floor below a
+            // warm top slab distinguish commercial offices from the walk-ups.
+            b.box(glazing,0,0,.76f,.71f,0,.34f);
+            for(float x:{-.30f,-.11f,.11f,.30f})
+                b.loft(11,{x,.02f,.07f,.62f,.33f},{x,.11f,.065f,.38f,1.02f});
+            b.box(trim,0,.11f,.72f,.40f,.91f,.97f);
+        } else {
+            // Sloped plant screens step towards the bay in three distinct fins.
+            for(int i=0;i<3;++i) {
+                const float x=-.26f+.26f*i, top=.62f+.18f*i;
+                b.loft(glazing,{x,0,.24f,.80f,0},{x,.16f,.20f,.42f,top});
+                b.box(11,x,.16f,.21f,.43f,top,top+.035f);
+            }
+        }
     } else if (style == 3) {
         // A raised mechanical lantern. The open middle retains sky between the fins.
         b.box(glazing,0,.09f,.86f,.62f,0,.43f);
@@ -478,7 +513,7 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
                 site.bottom=top-.025f/scale;
                 site.height=std::clamp(.23f*height,1.7f/scale,5.5f/scale);
                 constexpr uint32_t profiles[]{3,7,8};
-                site.style=taipei ? profiles[seed%3u] : 3u;
+                site.style=profiles[seed%3u];
                 const std::array<int32_t,2> cell{int32_t(std::floor(wx/7.f)),int32_t(std::floor(wz/7.f))};
                 auto [it,inserted]=crowns.try_emplace(cell,site);
                 if(!inserted && site.bottom>it->second.bottom) it->second=site;
@@ -487,6 +522,11 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
     }
     if(legacy) addLegacyDistricts(sites,kit);
     if(taipei) addXinyiStreetFronts(sites);
+    else if(basinKit) {
+        // This platform is present only in the expanded Shenzhen mesh. Its five
+        // original supports are 3.72 scene units apart, north of the moving train.
+        sites.push_back({{-9.56f,41.90f,18.60f,1.70f,1,0},6.12f,1.28f,2,11,9,mixBits(697u)});
+    }
     if(sites.empty()) return;
     for(const auto& [cell,crown]:crowns) sites.push_back(crown);
 
