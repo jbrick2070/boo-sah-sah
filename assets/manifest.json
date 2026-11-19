@@ -583,6 +583,17 @@
       "license": "MIT",
       "attribution_required": true,
       "sha256": "40d0fad55b20ed293c3e27832bf8d179c0acb5e19a9dbcf5df4411cbb0c0902f"
+    },
+    {
+      "id": "tool_encode_taipei_slice",
+      "path": "tools/encode_taipei_slice.py",
+      "kind": "tool",
+      "provenance": "Original matched 10-bit review clip encoder",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "23cf6ba53f2b9eb271d669896c9147189fd1352a76c7d4bc2b5ff93bb9c65dd3"
     }
   ]
 }
