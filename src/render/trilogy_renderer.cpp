@@ -1215,6 +1215,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     if(iv.exploreActive)c.interFlags|=8u;
     if(splitDenoise)c.interFlags|=16u;
     c.interFlags |= (curAov << 8u);
+    if (f.qualityPreset == QualityPresetId::Safe || f.reducedFlash || f.motionScale < 0.99f)
+        c.interFlags |= 1u << 14u;
 
     float reblurJitterPx[2]{0.0f, 0.0f};
     if(accumulate){
