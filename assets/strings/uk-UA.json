@@ -31,13 +31,16 @@
     "hud.next": "ДАЛІ",
     "hud.mode_film": "F:ФІЛЬМ",
     "hud.mode_free": "F:ОГЛЯД",
-    "hud.live_gpu": "GPU ЗАРАЗ",
+    "hud.hardware": "ОБЛАДНАННЯ",
     "hud.col_size": "РОЗМІР",
     "hud.col_rate": "ШВИДКІСТЬ",
     "hud.state_live": "ПРАЦЮЄ",
     "hud.state_sub": "ЗАМІНА",
     "hud.state_off": "ВИМК",
     "hud.state_fault": "ЗБІЙ",
+    "hud.state_script": "СКРИПТ",
+    "hud.state_warming": "ЗАПУСК",
+    "hud.state_idle": "ПРОСТІЙ",
     "hud.bench": "ТЕСТ [B]",
     "hud.cam_free": "ОГЛЯД",
     "hud.cam_film": "ФІЛЬМ",
@@ -73,6 +76,7 @@
     "win.act": "Дія",
     "win.explore": "Огляд",
     "win.wipe": "Шторка",
-    "win.lamp": "Лампи"
+    "win.lamp": "Лампи",
+    "win.effects_detail": "Деталізація ефектів"
   }
 }

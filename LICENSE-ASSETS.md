@@ -4,7 +4,7 @@ The following original creative works are licensed under
 **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**,
 https://creativecommons.org/licenses/by-nc/4.0/legalcode
 
-- `assets/audio/01_neon_orchid.mp3` to `assets/audio/04_glass_dragon.mp3` (the original soundtrack)
+- `assets/audio/01_neon_orchid.flac` to `assets/audio/04_glass_dragon.flac` (the original soundtrack)
 - `assets/cues/*.json` (the film's timeline and choreography)
 
 Copyright (c) 2026 Jeffrey A Brick.

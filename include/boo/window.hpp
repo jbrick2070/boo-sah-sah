@@ -21,6 +21,7 @@ enum class TransportCommand : uint8_t {
     ToggleLoop,
     ToggleMute,
     CycleQualityPreset,
+    CycleEffectsDetail,
     ToggleEdition,
     ToggleCaptions,
     ToggleOverlay,

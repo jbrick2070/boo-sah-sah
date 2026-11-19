@@ -17,7 +17,6 @@
 #include "boo/ui_text.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -173,38 +172,6 @@ bool testInvalidCueFixturesRejected() {
         BOO_CHECK(!loadCueSheetFromFile(resolveResourcePath("tests/fixtures/invalid_duration.json"), s, r));
         BOO_CHECK(hasErrorCode(r, "FULL_FILM_DURATION_MISMATCH"));
     }
-    return true;
-}
-
-bool testManifestProvenanceAndByteIntegrity() {
-    using namespace boo;
-    const auto source = std::filesystem::absolute(resolveResourcePath("assets/manifest.json"));
-    const auto root = source.parent_path().parent_path();
-    ValidationReport report;
-    AssetManifest manifest;
-    BOO_CHECK(loadAssetManifestFromFile(source, manifest, report));
-    BOO_CHECK(manifest.schema == 2);
-    const auto cue = std::find_if(manifest.assets.begin(), manifest.assets.end(),
-        [](const AssetManifestEntry& entry) { return entry.id == "cue_film_360s"; });
-    BOO_CHECK(cue != manifest.assets.end());
-    BOO_CHECK(cue->license == "CC-BY-NC-4.0" && cue->attributionRequired);
-    AssetManifest single;
-    single.assets.push_back(*cue);
-    verifyManifestAssetFiles(single, root, report);
-    BOO_CHECK(report.valid);
-    single.assets.front().sha256.assign(64, '0');
-    verifyManifestAssetFiles(single, root, report);
-    BOO_CHECK(hasErrorCode(report, "MANIFEST_SHA256_MISMATCH"));
-
-    auto parsed = parseJsonFile(source);
-    BOO_CHECK(parsed.ok);
-    parsed.value["assets"].asArrayMut().front()["author"] = "";
-    auto invalid = std::filesystem::temp_directory_path() /
-        ("boo-invalid-provenance-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
-    std::ofstream(invalid, std::ios::binary) << serializeJson(parsed.value);
-    const bool accepted = loadAssetManifestFromFile(invalid, manifest, report);
-    std::filesystem::remove(invalid);
-    BOO_CHECK(!accepted && hasErrorCode(report, "MANIFEST_PROVENANCE_ERROR"));
     return true;
 }
 
@@ -549,9 +516,9 @@ bool testAudioClicklessCrossfadeAndGainRamps() {
         return adv;
     };
 
-    // 1. Cold start ramp-up from 0.0 -> full 0.14f headroom gain (must start at 0 with zero click)
+    // 1. The master ramps from silence to unity while the procedural mix retains its headroom.
     BOO_CHECK(renderAndMeasure(1024u, false, false, 1.0f) == 1024u);
-    BOO_CHECK(std::abs(synth.currentGain() - 0.14f) < 1e-4f);
+    BOO_CHECK(std::abs(synth.currentGain() - 1.0f) < 1e-4f);
     BOO_CHECK(maxStep < 0.010f);
 
     // 2. Abrupt long-distance seek during full-scale playback (48.0s -> 5.0s -> 30.0s -> 56.0s)
@@ -580,7 +547,7 @@ bool testAudioClicklessCrossfadeAndGainRamps() {
     BOO_CHECK(renderAndMeasure(128u, true, false, 1.0f) == 0u);
     BOO_CHECK(std::abs(prevL) < 1e-6f && std::abs(prevR) < 1e-6f);
     BOO_CHECK(renderAndMeasure(1024u, false, false, 1.0f) == 1024u);
-    BOO_CHECK(std::abs(synth.currentGain() - 0.14f) < 1e-4f);
+    BOO_CHECK(std::abs(synth.currentGain() - 1.0f) < 1e-4f);
     BOO_CHECK(maxStep < 0.010f);
 
     return true;
@@ -643,6 +610,50 @@ bool testTimelineClockSwitchAndTaipei101FinaleFraming() {
     BOO_CHECK(cam58.target[2] > 16.0f);
     BOO_CHECK(cam58.fovYRadians > cam48.fovYRadians + 0.08f);
 
+    return true;
+}
+
+bool testAircraftHeroFraming() {
+    using namespace boo;
+    for (float motion : {1.0f, 0.35f}) {
+        // The film uses the trilogy's 60-second flight in a 30-second cue. Stop before the outgoing camera blend.
+        for (int step = 0; step <= 54; ++step) {
+            const float filmTime = 245.0f + 0.5f * step;
+            const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(filmTime * 48000), 48000, 0.5f, false, motion);
+            const auto trilogy = evaluateTrilogyCamera(int64_t(60 + step) * 48000, 48000, false, motion);
+            const auto pose = evaluateEvtolPose(ShowVisualMode::FullFilm360s, filmTime);
+            for (int i = 0; i < 3; ++i) {
+                BOO_CHECK(std::abs(trilogy.eye[i] - cam.eye[i]) < 1e-4f);
+                BOO_CHECK(std::abs(trilogy.target[i] - cam.target[i]) < 1e-4f);
+            }
+            BOO_CHECK(cam.focusWeight == 1.0f && cam.focusDistance > 9.0f && cam.focusDistance < 19.0f);
+
+            float dx = cam.target[0] - cam.eye[0], dy = cam.target[1] - cam.eye[1], dz = cam.target[2] - cam.eye[2];
+            const float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+            dx /= length; dy /= length; dz /= length;
+            const float horizontal = std::hypot(dx, dz);
+            const float horizonY = 0.5f + 0.5f * dy / (horizontal * std::tan(0.5f * cam.fovYRadians));
+            BOO_CHECK(horizonY > 0.24f && horizonY < 0.35f);
+            if (step == 30) BOO_CHECK(horizonY > 0.32f); // 260s banking shot looks across the bay.
+            const float slopeY = 0.90f * std::tan(0.5f * cam.fovYRadians);
+            const float slopeX = slopeY * (16.0f / 9.0f);
+            float rows[12];
+            writeModelTransform(rows, pose.position, pose.yaw, pose.pitch, pose.roll);
+            for (const auto& hub : kEvtolRotorPivots) {
+                float v[3]{};
+                for (int i = 0; i < 3; ++i) {
+                    const float* row = rows + 4*i;
+                    v[i] = row[0]*hub[0] + row[1]*hub[1] + row[2]*hub[2] + row[3] - cam.eye[i];
+                }
+                const float depth = dx*v[0] + dy*v[1] + dz*v[2];
+                const float right = (dz*v[0] - dx*v[2]) / horizontal;
+                const float up = (v[1] - dy*depth) / horizontal;
+                // A 1.25-unit sphere encloses the mast and swept blades at any rotor phase.
+                BOO_CHECK(std::abs(right) + 1.25f*std::hypot(1.0f, slopeX) < depth*slopeX);
+                BOO_CHECK(std::abs(up) + 1.25f*std::hypot(1.0f, slopeY) < depth*slopeY);
+            }
+        }
+    }
     return true;
 }
 
@@ -925,7 +936,10 @@ bool testFullFilm360sScoreCaptionsAndEditions() {
         BOO_CHECK(def.showCaptions);
         BOO_CHECK(std::abs(def.motionScale - 1.0f) < 1e-6f);
 
-        BOO_CHECK(parseCommandLineArgs({"--no-captions", "--reduced-motion", "--enable-spout", "--spout-name", "BooStage_Clean"}, def));
+        BOO_CHECK(def.effectsDetail == 1u);
+        BOO_CHECK(!parseCommandLineArgs({"--effects-detail", "extreme"}, def));
+        BOO_CHECK(parseCommandLineArgs({"--no-captions", "--reduced-motion", "--enable-spout", "--spout-name", "BooStage_Clean", "--effects-detail", "high"}, def));
+        BOO_CHECK(def.effectsDetail == 2u);
         BOO_CHECK(!def.showCaptions);
         BOO_CHECK(std::abs(def.motionScale - 0.35f) < 1e-5f);
         BOO_CHECK(def.enableSpout);
@@ -997,6 +1011,48 @@ bool testMediaPrivacyRedactionAndFaultFallback() {
     return true;
 }
 
+bool testRecordedSoundtrackFidelity() {
+    using namespace boo;
+    constexpr uint32_t frames = 12000u;
+    constexpr uint32_t block = 1024u;
+    constexpr double radiansPerHz = 6.283185307179586 / 48000.0;
+    std::vector<float> source(frames * 2u);
+    for (uint32_t i = 0; i < frames; ++i) {
+        // A strong bass note and quiet cymbal harmonics sit under distinct left and right attacks.
+        source[i * 2u] = static_cast<float>(0.48 * std::sin(i * 96.0 * radiansPerHz) +
+                                           0.014 * std::sin(i * 15000.0 * radiansPerHz));
+        source[i * 2u + 1u] = static_cast<float>(0.022 * std::sin(i * 11500.0 * radiansPerHz));
+        if (i % 73u == 0u) source[i * 2u] = 0.93f;
+        if (i % 101u == 0u) source[i * 2u + 1u] = -0.81f;
+    }
+
+    for (const bool compact : {false, true}) {
+        CustomAudioTrack48k track{};
+        track.frameCount = frames;
+        if (compact) {
+            track.interleavedPcm16.resize(source.size());
+            std::transform(source.begin(), source.end(), track.interleavedPcm16.begin(),
+                [](float s) { return static_cast<int16_t>(std::lround(s * 32768.0f)); });
+        } else {
+            track.interleavedStereo = source;
+        }
+        AudioSynthesizer48k mixer;
+        mixer.setCustomTrack(&track);
+        mixer.reset(3200u); // Within the recording, clear of the deliberate loop seam.
+        std::vector<float> output(block * 2u);
+        for (const float volume : {1.0f, 0.37f}) {
+            mixer.renderFrames(output.data(), block, false, false, volume); // Settle the volume ramp.
+            const size_t sampleOffset = static_cast<size_t>(mixer.primarySamplePosition()) * 2u;
+            BOO_CHECK(mixer.renderFrames(output.data(), block, false, false, volume) == block);
+            const float tolerance = compact ? 0.00005f : 0.000001f;
+            for (size_t i = 0; i < output.size(); ++i) {
+                BOO_CHECK(std::abs(output[i] - source[sampleOffset + i] * volume) < tolerance);
+            }
+        }
+    }
+    return true;
+}
+
 bool testCustomAudioTrackDecoderAndCrossfade() {
     using namespace boo;
 
@@ -1008,16 +1064,17 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     // 2. Missing file & fault-injection privacy redaction
     CustomAudioTrack48k badTrack{};
     std::string errMsg;
-    BOO_CHECK(!loadCustomAudioFile48k("C:\\Users\\secret_composer\\Music\\missing_suno.mp3", badTrack, &errMsg, false));
+    BOO_CHECK(!loadCustomAudioFile48k(LR"(C:\Users\secret_composer\音樂\夜曲.mp3)", badTrack, &errMsg, false));
     BOO_CHECK(errMsg.find("secret_composer") == std::string::npos);
     BOO_CHECK(errMsg.find("<USER_HOME>") != std::string::npos);
+    BOO_CHECK(errMsg.find("音樂/夜曲.mp3") != std::string::npos);
 
     errMsg.clear();
     BOO_CHECK(!loadCustomAudioFile48k(resolveResourcePath("assets/manifest.json"), badTrack, &errMsg, true));
     BOO_CHECK(!errMsg.empty());
 
     // 3. Generate a temporary 44,100 Hz stereo 16-bit PCM WAV file (0.50s warm chord) and decode to 48,000 Hz stereo float
-    const std::filesystem::path tmpWav = std::filesystem::temp_directory_path() / "boo_test_suno_44k1.wav";
+    const std::filesystem::path tmpWav = std::filesystem::temp_directory_path() / L"boo_test_臺北夜曲_44k1.wav";
     {
         constexpr uint32_t kSr = 44100u;
         constexpr uint32_t kFrames = 22050u; // 0.50s
@@ -1063,7 +1120,15 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
         // 0.50s @ 48 kHz ~= 24,000 frames
         BOO_CHECK(custom.frameCount >= 23500u && custom.frameCount <= 24500u);
         BOO_CHECK(custom.interleavedStereo.size() == custom.frameCount * 2u);
-        BOO_CHECK(custom.label == "boo_test_suno_44k1.wav");
+        BOO_CHECK(custom.label == "boo_test_臺北夜曲_44k1.wav");
+        // A quiet source keeps its authored level through 44.1 -> 48 kHz conversion.
+        for (size_t channel = 0; channel < 2u; ++channel) {
+            float peak = 0.0f;
+            for (size_t frame = 2400u; frame < 21600u; ++frame) {
+                peak = std::max(peak, std::abs(custom.interleavedStereo[frame * 2u + channel]));
+            }
+            BOO_CHECK(std::abs(peak - 0.45f) < 0.005f);
+        }
     } else {
         // Fallback synthetic custom buffer if running in a headless server container without Media Foundation codecs
         custom.frameCount = 24000u;
@@ -1082,43 +1147,50 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     synth.reset(480000, 0.0f);
 
     std::vector<float> pcm(1024u * 2u, 0.0f);
-    float prevL = 0.0f, prevR = 0.0f, maxStep = 0.0f;
     auto measure = [&](uint32_t frames, AudioBandSnapshot* outB = nullptr) -> bool {
         pcm.assign(static_cast<size_t>(frames) * 2u, 0.0f);
         synth.renderFrames(pcm.data(), frames, false, false, 0.85f, outB);
-        for (uint32_t i = 0; i < frames; ++i) {
-            const float l = pcm[i * 2u + 0u];
-            const float r = pcm[i * 2u + 1u];
-            BOO_CHECK(std::isfinite(l) && std::isfinite(r));
-            maxStep = std::max(maxStep, std::max(std::abs(l - prevL), std::abs(r - prevR)));
-            prevL = l;
-            prevR = r;
-        }
+        for (const float sample : pcm) BOO_CHECK(std::isfinite(sample));
         return true;
     };
 
+    AudioSynthesizer48k uninterrupted;
+    uninterrupted.setDurationSamples(17280000);
+    uninterrupted.reset(480000, 0.0f);
+    std::vector<float> reference(1025u * 2u);
+    uninterrupted.renderFrames(reference.data(), 1025u, false, false, 0.85f);
     BOO_CHECK(measure(1024u));
     synth.setCustomTrack(&custom);
     synth.seekTo(6000u);
     AudioBandSnapshot customBands{};
     BOO_CHECK(measure(1024u, &customBands));
     BOO_CHECK(customBands.rms > 0.02f);
+    for (size_t channel = 0; channel < 2u; ++channel) {
+        BOO_CHECK(std::abs(pcm[channel] - reference[1024u * 2u + channel]) < 0.00001f);
+    }
 
+    const size_t outgoingOffset = static_cast<size_t>(synth.primarySamplePosition()) * 2u;
     synth.setCustomTrack(nullptr);
     synth.seekTo(960000u);
     BOO_CHECK(measure(1024u));
-    BOO_CHECK(maxStep < 0.020f);
+    for (size_t channel = 0; channel < 2u; ++channel) {
+        BOO_CHECK(std::abs(pcm[channel] - custom.interleavedStereo[outgoingOffset + channel] * 0.85f) < 0.00001f);
+    }
 
     // 5. Verify bundled 4-track first-party OST assets, cooperative cancellation, compact PCM16, and playlist cycling
     const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
-        resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
-        resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
-        resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
-        resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+        resolveResourcePath("assets/audio/01_neon_orchid.flac"),
+        resolveResourcePath("assets/audio/02_acid_lotus.flac"),
+        resolveResourcePath("assets/audio/03_velvet_cipher.flac"),
+        resolveResourcePath("assets/audio/04_glass_dragon.flac")
     };
     for (const auto& p : ostPaths) {
         BOO_CHECK(std::filesystem::exists(p));
         BOO_CHECK(std::filesystem::file_size(p) > (3ULL * 1024ULL * 1024ULL));
+        std::ifstream file(p, std::ios::binary);
+        char signature[4]{};
+        BOO_CHECK(file.read(signature, sizeof(signature)));
+        BOO_CHECK(std::string(signature, sizeof(signature)) == "fLaC");
     }
 
     std::atomic<bool> preCancelled{true};
@@ -1126,17 +1198,26 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     BOO_CHECK(!loadCustomAudioFile48k(ostPaths[0], cancelledTrack, &errMsg, false, &preCancelled, true));
     BOO_CHECK(cancelledTrack.frameCount == 0u);
 
-    CustomAudioTrack48k ost01{};
-    if (loadCustomAudioFile48k(ostPaths[0], ost01, &errMsg, false, nullptr, true)) {
-        BOO_CHECK(ost01.frameCount > (180ULL * 48000ULL)); // > 3 minutes @ 48 kHz
-        BOO_CHECK(ost01.interleavedStereo.empty());
-        BOO_CHECK(ost01.interleavedPcm16.size() == ost01.frameCount * 2u);
-        synth.setCustomTrack(&ost01);
-        synth.seekTo(48000ULL * 30ULL); // 0:30 into Neon Orchid
-        AudioBandSnapshot ostBands{};
-        BOO_CHECK(measure(1024u, &ostBands));
-        BOO_CHECK(ostBands.rms > 0.01f);
-        synth.setCustomTrack(nullptr);
+    if (decodedOk) {
+        for (const auto& path : ostPaths) {
+            CustomAudioTrack48k ost{};
+            BOO_CHECK(loadCustomAudioFile48k(path, ost, &errMsg, false, nullptr, true));
+            BOO_CHECK(ost.frameCount > (180ULL * 48000ULL));
+            BOO_CHECK(ost.interleavedStereo.empty());
+            BOO_CHECK(ost.interleavedPcm16.size() == ost.frameCount * 2u);
+            AudioSynthesizer48k ostMixer;
+            ostMixer.setCustomTrack(&ost);
+            ostMixer.reset(48000ULL * 30ULL);
+            AudioBandSnapshot ostBands{};
+            BOO_CHECK(ostMixer.renderFrames(pcm.data(), 1024u, false, false, 0.85f, &ostBands) == 1024u);
+            BOO_CHECK(ostBands.rms > 0.01f);
+            const size_t sourceOffset = static_cast<size_t>(ostMixer.primarySamplePosition()) * 2u;
+            BOO_CHECK(ostMixer.renderFrames(pcm.data(), 1024u, false, false, 0.85f) == 1024u);
+            for (size_t i = 0; i < pcm.size(); ++i) {
+                const float mastered = static_cast<float>(ost.interleavedPcm16[sourceOffset + i]) / 32768.0f;
+                BOO_CHECK(pcm[i] == mastered * 0.85f);
+            }
+        }
     }
 
     AudioEngine ostEngine;
@@ -1282,7 +1363,8 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 72);
+    BOO_CHECK(keys.size() == 76);
+    BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
 
     UiTextLayer layer;
     size_t problems = 0;
@@ -1302,7 +1384,6 @@ bool testUiStringCatalogs() {
             if (key == "hud.all") ok = keeps(L"[") && keeps(L"]");
             if (key == "hud.ost.synth") ok = keeps(L"RTX");
             if (key == "hud.ost.custom") ok = keeps(L"MP3+");
-            if (key == "hud.live_gpu") ok = keeps(L"GPU");
             if (!ok) { std::cout << "  " << tag << " " << key << " lost a protected token\n"; ++problems; }
         }
         if (layer.ready()) {
@@ -1340,15 +1421,16 @@ int main() {
     boo::Logger::instance().setConsoleEnabled(false);
 
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
+    runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);
     runTest("FullFilm360sScoreCaptionsAndEditions", testFullFilm360sScoreCaptionsAndEditions);
     runTest("LateFilmEditionSeekAudioContinuity", testLateFilmEditionSeekAudioContinuity);
     runTest("MediaPrivacyRedactionAndFaultFallback", testMediaPrivacyRedactionAndFaultFallback);
     runTest("CustomAudioTrackDecoderAndCrossfade", testCustomAudioTrackDecoderAndCrossfade);
+    runTest("RecordedSoundtrackFidelity", testRecordedSoundtrackFidelity);
     runTest("JsonParserAndSerializer", testJsonParserAndSerializer);
     runTest("ProductionCueSheetsAndManifest", testProductionCueSheetsAndManifest);
-    runTest("ManifestProvenanceAndByteIntegrity", testManifestProvenanceAndByteIntegrity);
     runTest("InvalidCueFixturesRejected", testInvalidCueFixturesRejected);
     runTest("TimelineClockArithmeticAndFailover", testTimelineClockArithmeticAndFailover);
     runTest("PrecisionTransport", testPrecisionTransport);

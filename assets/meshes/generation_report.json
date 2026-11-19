@@ -23,43 +23,43 @@
     },
     {
       "name": "shenzhen_evtol",
-      "vertices": 128418,
-      "triangles": 42806,
-      "submeshes": 76,
+      "vertices": 285960,
+      "triangles": 95320,
+      "submeshes": 97,
       "nonmanifold_edges": 0,
       "aabb": [
         [
-          -130.0,
-          -2.1500000953674316,
+          -756.0,
+          -2.200000047683716,
           -80.0
         ],
         [
-          130.0,
-          37.29999923706055,
-          155.0
+          756.0,
+          85.30463409423828,
+          817.1320190429688
         ]
       ],
-      "sha256": "9ea67989fd467beb75f93949fbfd8ea2f68b98c63f8db06888a2a205acffa1ac"
+      "sha256": "6fb8a8998ebb3dece0ab0282e723070dc482d1d6aeb77652849bded8efcb01ab"
     },
     {
       "name": "taipei_101_hero",
-      "vertices": 471384,
-      "triangles": 157128,
-      "submeshes": 41,
+      "vertices": 603222,
+      "triangles": 201074,
+      "submeshes": 58,
       "nonmanifold_edges": 0,
       "aabb": [
         [
-          -1893.75,
-          -11.25,
+          -9681.25,
+          -22.375,
           -1725.0
         ],
         [
-          1731.25,
-          508.6800231933594,
-          1775.0
+          9218.75,
+          1179.353759765625,
+          9464.859375
         ]
       ],
-      "sha256": "d1be86b40522ae31497b3f3c1142ee432d65ac14e29d7e5d58f8867ff97f475f"
+      "sha256": "ddbb4fcf5c62aa8fad845679fd4088e03b5c7233aa8c9fc8517476563c70ac01"
     },
     {
       "name": "glass_orchid_hero",

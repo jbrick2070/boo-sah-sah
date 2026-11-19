@@ -95,6 +95,7 @@ const char* toString(AbCompareEngine engine) noexcept {
         case AbCompareEngine::CUDA:   return "CUDA";
         case AbCompareEngine::Tensor: return "Tensor";
         case AbCompareEngine::Codec:  return "Codec";
+        case AbCompareEngine::NPU:    return "NPU";
     }
     return "RT";
 }

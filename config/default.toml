@@ -16,6 +16,7 @@ height = 1080
 fullscreen = false
 vsync = true
 quality_preset = "balanced"
+effects_detail = "normal"
 show_overlay = true
 captions = true
 reduced_flash = false

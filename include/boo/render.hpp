@@ -29,6 +29,20 @@ struct GpuPassTimingsMs {
     double presentPassMs = 0.0;
 };
 
+enum class DirectorHudBackend : uint32_t { Off, Warming, Npu, Cpu, Scripted, Faulted };
+
+inline DirectorHudBackend classifyDirectorHudBackend(const HardwareResult& result) noexcept {
+    if (result.health == HealthState::Probing) return DirectorHudBackend::Warming;
+    if (result.status == BackendStatus::Faulted) return DirectorHudBackend::Faulted;
+    if (result.status == BackendStatus::Unavailable || result.diagnosticCode == "DISABLED_BY_FLAG")
+        return DirectorHudBackend::Off;
+    if (result.successfullyExecutedTestWork) {
+        if (result.status == BackendStatus::Accelerated) return DirectorHudBackend::Npu;
+        if (result.activeBackend.starts_with("OpenVINO_CPU")) return DirectorHudBackend::Cpu;
+    }
+    return DirectorHudBackend::Scripted;
+}
+
 // Telemetry packet uploaded each frame to the procedural D3D12 HUD shader
 // to render crisp on-screen numbers, progress bars, engine badges, audio spectrum, and benchmark gauges.
 struct HudTelemetrySnapshot {
@@ -65,6 +79,8 @@ struct HudTelemetrySnapshot {
     bool codecSignalHijackActive = false;
     bool liveCameraActive = false;
     std::array<LivePillarTelemetry, 4> livePillars{};
+    DirectorHudBackend directorBackend = DirectorHudBackend::Off;
+    float directorRateHz = 0.0f;
     float npuInferMs = 0.0f;
     float npuResultAgeMs = 0.0f;
     uint64_t npuCompletedInferences = 0;
@@ -162,7 +178,10 @@ public:
     M0TestVisualEffect(D3D12Context& d3d, bool forceEmbeddedFallbackShader, bool simulateInitFailure = false);
     ~M0TestVisualEffect() override;
 
-    const char* name() const noexcept override { return fallbackMode_ ? "M0_SafeFallbackVisual" : "M0_GlassOrchidTestVisual"; }
+    const char* name() const noexcept override {
+        if (d3d_.isWarp() && !fallbackMode_) return "WARP_ProceduralDiagnostic";
+        return fallbackMode_ ? "M0_SafeFallbackVisual" : "M0_GlassOrchidTestVisual";
+    }
     HardwareResult probeAndInitialize() override;
     void preload(double atFilmTime) override;
     void resetTo(double filmTime) override;
@@ -171,6 +190,8 @@ public:
 
     void setHudTelemetry(const HudTelemetrySnapshot& snapshot) noexcept override { hud_ = snapshot; }
     bool isUsingEmbeddedFallbackShader() const noexcept override { return usingEmbeddedBytecode_; }
+    bool ownsLiveEngineStatus(EngineKind kind) const noexcept override { return kind == EngineKind::RT && d3d_.isWarp(); }
+    bool queryLiveEngineStatus(EngineKind kind, HardwareResult& outStatus) const noexcept override;
 
 private:
     struct Impl;

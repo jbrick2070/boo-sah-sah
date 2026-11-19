@@ -86,10 +86,10 @@ void buildColumnMajorCameraMatrices(
     outWorldToView[8]  = right[2]; outWorldToView[9]  = up[2]; outWorldToView[10] = forward[2]; outWorldToView[11] = 0.0f;
     outWorldToView[12] = tx;       outWorldToView[13] = ty;    outWorldToView[14] = tz;         outWorldToView[15] = 1.0f;
 
-    // Column-major un-jittered LH D3D projection [0.1 .. 1000.0] matching VSMain o.pos
+    // Column-major un-jittered LH D3D projection matching VSMain o.pos.
     const float fy = 1.0f / std::tan(std::max(fovY * 0.5f, 0.05f));
     constexpr float zNear = 0.1f;
-    constexpr float zFar = 1000.0f;
+    constexpr float zFar = 3200.0f;
     std::memset(outViewToClip, 0, sizeof(float) * 16);
     outViewToClip[0]  = fy / std::max(aspect, 1e-4f);
     outViewToClip[5]  = fy;
@@ -293,20 +293,26 @@ struct TrilogyMeshRenderer::Impl {
         DrawConstants dc{};float scale=1,x=0,y=0,z=0,yaw=0,pitch=0,roll=0;
         auto smoother=[](float v){v=std::clamp(v,0.f,1.f);return v*v*v*(v*(v*6.f-15.f)+10.f);};
         const float time=static_cast<float>(double(f.samplePosition)/f.sampleRate);
-        float sHover=0.f;
+        float rotorTilt = 0.0f;
+        if (p.kit == 1 && p.sub.part >= 20u && p.sub.part <= 24u) {
+            // Centre of the inner track on the curved Houhai viaduct. Measure
+            // each car along the rail so couplings stay together through the turn.
+            constexpr float radius = 12.f - 0.67f;
+            constexpr float halfPi = 1.57079632679f;
+            const float routeTime = visualMode == ShowVisualMode::FullFilm360s
+                ? 2.f * (time - 245.f) : time - 60.f;
+            const float along = -23.f + 1.1f * std::clamp(routeTime, 0.f, 60.f)
+                + 4.25f * float(p.sub.part - 20u);
+            const float turn = std::clamp(along / radius, 0.f, halfPi);
+            x = -19.4f - radius * std::cos(turn) + std::max(0.f, along - radius * halfPi);
+            z = 27.6f + radius * std::sin(turn) + std::min(0.f, along);
+            yaw = turn - halfPi;
+        }
         if(p.kit==1 && p.sub.part>=100) {
-            const float u=(visualMode==ShowVisualMode::FullFilm360s)
-                ? std::clamp((time-245.f)*2.f,0.f,60.f)
-                : std::clamp(time-60.f,0.f,60.f);
-            sHover=smoother((u-21.f)/19.f);
-            const float sTouch=smoother((u-43.f)/15.f);
-            // Cruise sweep across Shenzhen Bay channel -> decelerating transition -> precision VTOL hover over Hero Pad (0, 3.64, -2)
-            const float cx=3.4f-0.28f*u, cy=9.6f-0.05f*u+0.16f*std::sin(u*0.24f), cz=18.2f-0.78f*u;
-            const float hx=0.55f, hy=5.45f-1.15f*sTouch+0.05f*std::sin(u*1.5f), hz=-2.0f;
-            x=cx+(hx-cx)*sHover; y=cy+(hy-cy)*sHover; z=cz+(hz-cz)*sHover;
-            yaw=0.88f*(1.f-sHover)-0.92f*sHover;
-            pitch=-0.05f*(1.f-sHover)+0.02f*sHover;
-            roll=-0.24f*(1.f-sHover);
+            const auto pose = evaluateEvtolPose(visualMode, time);
+            x = pose.position[0]; y = pose.position[1]; z = pose.position[2];
+            yaw = pose.yaw; pitch = pose.pitch; roll = pose.roll;
+            rotorTilt = pose.rotorTilt();
         }
         if(p.kit==2) {
             scale=.080f;x=18.5f;z=60.0f;
@@ -368,27 +374,18 @@ struct TrilogyMeshRenderer::Impl {
                 y=-4.8f*(1.f-rise);
             }
         }
-        // Airframe transform: R_y(yaw) * R_x(pitch) * R_z(roll) * scale + translation
-        const float cy=std::cos(yaw),sy=std::sin(yaw),cp=std::cos(pitch),sp=std::sin(pitch),cr=std::cos(roll),sr=std::sin(roll);
-        const float rows[12]={
-            (cy*cr+sy*sp*sr)*scale, (-cy*sr+sy*sp*cr)*scale, (sy*cp)*scale, x,
-            (cp*sr)*scale,          (cp*cr)*scale,           (-sp)*scale,   y,
-            (-sy*cr+cy*sp*sr)*scale,(sy*sr+cy*sp*cr)*scale,  (cy*cp)*scale, z
-        };
+        const float position[3] = {x, y, z};
+        float rows[12];
+        writeModelTransform(rows, position, yaw, pitch, roll, scale);
         std::copy_n(rows,12,dc.rows);
         if(p.kit==1 && p.sub.part>=110 && p.sub.part<126) {
-            static constexpr float kPivots[6][3]={
-                {-3.05f,0.36f,-1.65f},{3.05f,0.36f,-1.65f},
-                {-4.10f,0.40f, 0.15f},{4.10f,0.40f, 0.15f},
-                {-2.60f,0.46f, 1.95f},{2.60f,0.46f, 1.95f}
-            };
             const uint32_t rotor=std::min<uint32_t>(5u,p.sub.part>=120?p.sub.part-120:p.sub.part-110);
-            const float px=kPivots[rotor][0],py=kPivots[rotor][1],pz=kPivots[rotor][2];
+            const auto& pivot = kEvtolRotorPivots[rotor];
+            const float px = pivot[0], py = pivot[1], pz = pivot[2];
             const float dir=(rotor&1u)?-1.f:1.f;
             const float spin=p.sub.part>=120?(dir*time*38.f+float(rotor)*1.05f):0.f;
             // Forward cruise tilt (49 deg) articulating smoothly upright (2.3 deg) for vertical hover
-            const float tilt=0.86f*(1.f-sHover)+0.04f*sHover;
-            const float cs=std::cos(spin),ss=std::sin(spin),ct=std::cos(tilt),st=std::sin(tilt);
+            const float cs=std::cos(spin),ss=std::sin(spin),ct=std::cos(rotorTilt),st=std::sin(rotorTilt);
             // Exact R_x(tilt) * R_y(spin) around pivot (px, py, pz): blades spin strictly within tilted rotor plane
             const float local[12]={
                 cs,     0.f, -ss,   px-cs*px+ss*pz,
@@ -734,7 +731,7 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
     auto& s=*impl_;if(!s.pending[slot])return;void* ptr=nullptr;D3D12_RANGE rr{0,8};
     if(SUCCEEDED(s.readbacks[slot]->Map(0,&rr,&ptr))) {s.hits=*static_cast<uint32_t*>(ptr);s.queries=static_cast<uint32_t*>(ptr)[1];s.verified=s.hits>0;D3D12_RANGE wr{0,0};s.readbacks[slot]->Unmap(0,&wr);}s.pending[slot]=false;
 }
-bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical) {
+bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
@@ -840,21 +837,33 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         c.day=(s.visualMode==ShowVisualMode::FullFilm360s&&c.time>=335.5f)?(0.84f*sm((c.time-335.5f)/12.5f)):0.0f;
         const bool isHijack=(s.visualMode==ShowVisualMode::FullFilm360s&&c.time>=245.f&&c.time<275.f);
         c.showFlags=1u|((f.edition==Edition::Midnight)?2u:0u)|(std::min<uint32_t>(camera.shotIndex,7u)<<2u);
+        if (s.visualMode == ShowVisualMode::FullFilm360s && (filmTime < 45.f || isHijack))
+            c.showFlags |= 64u;
+        if (s.visualMode == ShowVisualMode::SoloNPU ||
+            (s.visualMode == ShowVisualMode::FullFilm360s && filmTime >= 150.f && filmTime < 195.f))
+            c.showFlags |= 32u;
         c.moodAccent=isHijack?0.5f:std::clamp(f.moodPaletteAccent,0.0f,1.0f);
         c.moodBloom=isHijack?0.35f:std::clamp(f.moodBloomStrength,0.f,1.f);
         c.moodLight=isHijack?0.35f:std::clamp(f.moodIntensity,0.f,1.f);
         c.moodCut=isHijack?0.f:std::clamp(f.moodCutAccent,0.f,1.f);
     }
     c.pulse=camera.emissivePulse;
+    c.interFlags |= effectiveEffectsDetail(f) << 12u;
+    if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
     // Audio drive packed as RGBA8 into the one spare scene DWORD (low, mid, high, beat). Debug AOVs and progressive accumulation stay static.
-    {const uint32_t packed=(f.interactive.aovMode==0u&&!f.interactive.accumulate)?AudioReactiveFollower::pack(f.audioReactive):0u;std::memcpy(&c.pad,&packed,sizeof(packed));}
+    uint32_t packedAudio = (f.interactive.aovMode == 0u && !f.interactive.accumulate)
+        ? AudioReactiveFollower::pack(f.audioReactive) : 0u;
+    if (f.reducedFlash) packedAudio &= 0x00ffffffu; // A held or injected beat cannot retrigger a flash.
+    std::memcpy(&c.pad, &packedAudio, sizeof(packedAudio));
 
     const uint32_t curAov = std::min<uint32_t>(iv.aovMode, 7u);
-    const bool accumulate = canonical && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
-    const bool interactiveMotion = canonical && useRt && (curAov == 0u) && !accumulate &&
+    // A synchronized lighting comparison must use the same spatial resolve on both sides.
+    const bool temporalAllowed = canonical && !compareDirectorLighting;
+    const bool accumulate = temporalAllowed && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
+    const bool interactiveMotion = temporalAllowed && useRt && (curAov == 0u) && !accumulate &&
                                    (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
                                    s.nrd.isAvailable();
-    const bool splitDenoise = canonical && useRt && (curAov == 0u);
+    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u);
 
     if(iv.sunOverride){std::copy_n(iv.sunDir,3,c.sunDir);c.sunScale=iv.sunScale;c.interFlags|=1u;}
     if(iv.lampsOff)c.interFlags|=4u;

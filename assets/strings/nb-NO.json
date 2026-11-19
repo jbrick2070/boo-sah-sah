@@ -31,13 +31,16 @@
     "hud.next": "NESTE",
     "hud.mode_film": "F:FILM",
     "hud.mode_free": "F:FRI",
-    "hud.live_gpu": "GPU I SANNTID",
+    "hud.hardware": "MASKINVARE",
     "hud.col_size": "STØRRELSE",
     "hud.col_rate": "HASTIGHET",
     "hud.state_live": "AKTIV",
     "hud.state_sub": "ERST",
     "hud.state_off": "AV",
     "hud.state_fault": "FEIL",
+    "hud.state_script": "SKRIPT",
+    "hud.state_warming": "OPPSTART",
+    "hud.state_idle": "HVILE",
     "hud.bench": "BENCHMARK [B]",
     "hud.cam_free": "FRI",
     "hud.cam_film": "FILM",
@@ -73,6 +76,7 @@
     "win.act": "Akt",
     "win.explore": "Utforsk",
     "win.wipe": "Delt skjerm",
-    "win.lamp": "Lampe"
+    "win.lamp": "Lampe",
+    "win.effects_detail": "Effektdetaljer"
   }
 }

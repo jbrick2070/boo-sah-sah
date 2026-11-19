@@ -31,13 +31,16 @@
     "hud.next": "ถัดไป",
     "hud.mode_film": "F:ภาพยนตร์",
     "hud.mode_free": "F:อิสระ",
-    "hud.live_gpu": "GPU ขณะนี้",
+    "hud.hardware": "ฮาร์ดแวร์",
     "hud.col_size": "ขนาด",
     "hud.col_rate": "อัตรา",
     "hud.state_live": "ทำงาน",
     "hud.state_sub": "แทน",
     "hud.state_off": "ปิด",
     "hud.state_fault": "ขัดข้อง",
+    "hud.state_script": "สคริปต์",
+    "hud.state_warming": "เตรียม",
+    "hud.state_idle": "ว่าง",
     "hud.bench": "เบนช์มาร์ก [B]",
     "hud.cam_free": "อิสระ",
     "hud.cam_film": "ภาพยนตร์",
@@ -73,6 +76,7 @@
     "win.act": "องก์",
     "win.explore": "สำรวจ",
     "win.wipe": "เทียบ",
-    "win.lamp": "โคมไฟ"
+    "win.lamp": "โคมไฟ",
+    "win.effects_detail": "ระดับรายละเอียดเอฟเฟกต์"
   }
 }

@@ -3,13 +3,16 @@ Combines precision procedural construction, architectural bevels/FWN normals,
 metric PBR UV projection, MikkTSpace-equivalent float64 UV-derivative tangents,
 and watertight solidified CC0 scanned botanical models.
 """
-import bpy, bmesh, math, struct, zlib, hashlib, json, os, sys
+import bpy, bmesh, math, random, struct, zlib, hashlib, json, os, sys
 import numpy as np
 from pathlib import Path
 from mathutils import Vector, Matrix, Euler
 from collections import defaultdict
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+from taipei_relief import taipei_relief_height, taipei_relief_mesh
+from taipei_city_mesh import city_mesh as taipei_city_mesh
 OUT = ROOT / 'assets' / 'meshes'
 CC0_MODELS = ROOT / 'third_party' / 'polyhaven_cc0' / 'models'
 OUT.mkdir(parents=True, exist_ok=True)
@@ -656,6 +659,277 @@ def shanghai():
         box('pudong_pavilion', (pv_x, 70.5, 1.45), (9.5, 4.2, 2.3), 14, part=5, bevel=.12, rough=.22)
         box('pudong_pavilion_glow', (pv_x, 68.5, 1.05), (7.6, 0.20, 0.95), 15, part=5, rough=.22)
 
+def avenue(tag, to_asset, x, depth, surface, length, width, east_west):
+    # Keep local metric UVs on both axes so distant vehicle lights stay on the asphalt
+    # when a district moves or changes scale for the final interior shot.
+    verts, top_uv = [], []
+    for z in (surface - .08, surface):
+        for dx, dz in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+            world_x = dx * .5 * (length if east_west else width)
+            world_z = dz * .5 * (width if east_west else length)
+            verts.append(to_asset(x + world_x, z, depth + world_z))
+            run, cross = (world_x, world_z) if east_west else (world_z, world_x)
+            top_uv.append((run / 2.8, cross / 2.8))
+    faces = [(3, 2, 1, 0), (4, 5, 6, 7)] + [(i, (i+1)%4, (i+1)%4+4, i+4) for i in range(4)]
+    road = mesh(tag, verts, faces, 1, part=7 if east_west else 8, rough=.15, preserve_uv=True)
+    uv = road.data.uv_layers.new(name='RoadUV')
+    for poly in road.data.polygons:
+        for k, li in enumerate(poly.loop_indices):
+            vi = road.data.loops[li].vertex_index
+            uv.data[li].uv = top_uv[vi] if poly.index < 2 else ((0, 0), (1, 0), (1, .03), (0, .03))[k]
+
+
+def district_towers(city, to_asset, parcels):
+    """Occupied apartments, offices and atrium towers. Dimensions are in the film's world units."""
+    batches = defaultdict(lambda: ([], []))
+    square = [(-.5, -.5), (.5, -.5), (.5, .5), (-.5, .5)]
+    clipped = [(-.36,-.5), (.35,-.5), (.5,-.34), (.5,.37),
+               (.36,.5), (-.39,.5), (-.5,.37), (-.5,-.35)]
+    oval = [(.5 * math.cos(i * TAU / 12), .5 * math.sin(i * TAU / 12)) for i in range(12)]
+    for x, z, width, depth, height, glazing, angle, part, style in parcels:
+        ca, sa = math.cos(angle), math.sin(angle)
+
+        # Profiles can shift, turn, taper and slope independently. Each piece ends in a
+        # real roof/soffit, so setbacks, through-openings and canopies survive reflections.
+        def loft(material, outline, sections, slope=0):
+            verts, faces = batches[part, material]
+            base, n = len(verts), len(outline)
+            for level, (y, u, v, sx, sz, twist) in enumerate(sections):
+                ct, st = math.cos(twist), math.sin(twist)
+                for a, b in outline:
+                    du = width * (u + a * sx * ct - b * sz * st)
+                    dv = depth * (v + a * sx * st + b * sz * ct)
+                    roof = y + (a * slope if level == len(sections) - 1 else 0)
+                    verts.append(to_asset(x + ca * du - sa * dv, -.68 + roof * height, z + sa * du + ca * dv))
+            faces.append(tuple(base+i for i in reversed(range(n))))
+            for j in range(len(sections) - 1):
+                s = base + j*n
+                faces.extend((s+i, s+(i+1)%n, s+n+(i+1)%n, s+n+i) for i in range(n))
+            cap = base + (len(sections)-1) * n
+            faces.append(tuple(cap+i for i in range(n)))
+
+        def slab(mat, u, v, y0, y1, sx, sz):
+            loft(mat, square, [(y0,u,v,sx,sz,0), (y1,u,v,sx,sz,0)])
+
+        # A continuous plinth with a setback at the entrance reads as an occupied block
+        # from the high Taiwan camera and gives the Shenzhen pilot a strong street wall.
+        loft(13 if city == 'taipei' else 5, clipped,
+             [(0,0,0,1.12,1.13,0), (.13,0,0,1.12,1.13,0), (.17,0,.03,1.04,1.01,0)])
+        slab(2, 0, -.08, .12, .15, 1.16, 1.17)
+
+        if style == 0:
+            # Two inhabited blades carry sky lobbies over a completely open slot.
+            for side in (-1, 1):
+                crown = .93 if side < 0 else 1.08
+                loft(glazing, clipped, [(.15,side*.32,0,.31,.89,0),
+                    (.58,side*.36,.015,.34,.86,0), (crown,side*.25,.04,.29,.68,0)])
+                slab(11, side*.25, .04, crown, crown+.022, .30, .69)
+            for y, span in ((.48,.50), (.82,.38)):
+                slab(13, 0, .03, y, y+.071, span, .42)
+                slab(11, 0, .03, y-.013, y, span+.02, .45)
+                slab(15, 0, -.185, y+.009, y+.018, span*.84, .018)
+        elif style == 1:
+            # Residential floor plates turn the corner round a lower garden wing.
+            slab(14, -.22, .07, .15, 1, .43, .76)
+            slab(13, .21, .20, .15, .84, .43, .47)
+            for j in range(5):
+                y = .29 + j*.13
+                slab(2, -.22, -.285, y, y+.019, .48, .22)
+                if j < 4:
+                    slab(2, .20, .025, y, y+.019, .46, .21)
+            slab(2, -.22, .07, 1, 1.029, .47, .80)
+            slab(0, -.26, .24, 1.029, 1.087, .20, .27)
+            slab(39, .21, .16, .84, .875, .38, .33)
+        elif style == 2:
+            # A faceted civic office changes bearing above a recessed mechanical storey.
+            loft(glazing, oval, [(.15,0,0,.95,.87,0), (.54,0,0,.98,.84,.13),
+                (.65,.015,0,.83,.76,.20), (.88,.03,0,.71,.71,.35),
+                (1.04,.05,0,.66,.63,.42)], slope=.13)
+            for y, sx, sz, twist in ((.53,1,.88,.13), (.87,.73,.75,.35)):
+                loft(11, oval, [(y,0,0,sx,sz,twist), (y+.014,0,0,sx,sz,twist)])
+            slab(0, -.13, .12, .97, 1.11, .15, .19)
+        elif style == 3:
+            # Deep, planted terrace cuts face the camera; the service spine continues up the back.
+            for u, v, y0, y1, sx, sz in ((0,0,.15,.42,.91,.98), (-.03,.06,.42,.66,.84,.76),
+                (-.08,.15,.66,.85,.70,.55), (-.14,.21,.85,1,.51,.36)):
+                slab(glazing, u, v, y0, y1, sx, sz)
+                slab(2, u, v, y1, y1+.014, sx+.045, sz+.04)
+                slab(39, u+.06, v-sz*.43, y1+.014, y1+.035, sx*.65, sz*.09)
+            slab(11, -.25, .34, .16, 1.075, .14, .21)
+        else:
+            # Steelwork follows a sheared glass sail. The diagonals are solids outside
+            # the glass and the high corner breaks the roofline in profile.
+            loft(glazing, clipped, [(.15,0,0,.96,.86,0), (.55,.02,0,.90,.86,0),
+                (.95,.09,0,.67,.82,0)], slope=.30)
+            for side in (-1, 1):
+                for j in range(3):
+                    ya, yb = .21 + j*.22, .43 + j*.22
+                    ua = side * (.34 if j%2 == 0 else .05)
+                    ub = side * (.05 if j%2 == 0 else .34)
+                    loft(11, square, [(ya,ua,-.434,.036,.053,0), (yb,ub,-.434,.036,.053,0)])
+            slab(0, -.13,.02,.88,.99,.22,.38)
+
+    for (part, mat), (verts, faces) in sorted(batches.items()):
+        mesh(city + '_district_architecture', verts, faces, mat, part, rough=.40 if mat == 2 else .25)
+
+
+def basin_foothills(city, to_asset, part):
+    """Two receding mountain spurs behind the last commuter districts."""
+    taipei = city == 'taipei'
+    for layer, (distance, relief) in enumerate(((646, 53), (757, 105))):
+        verts, faces = [], []
+        for i in range(109):
+            x = (i - 54) * 14
+            s = x + layer * 41 + (0 if taipei else 92)
+            main = .52 + .17*math.cos(s/104) + .14*math.sin(s/61) + .095*math.cos(s/29)
+            detail = .043*math.sin(s/13) + .024*math.cos(s/7) + .01*math.sin(s/3.6)
+            h = relief*(main + detail) * (1 if taipei else .77)
+            z = distance + 12*math.sin(s/88) + 5*math.cos(s/42)
+            verts.extend(to_asset(x, y, d) for y,d in
+                         [(-1.79,z-52), (h*.40,z-19), (h,z+3), (h*.67,z+21), (-1.79,z+48)])
+        n = 5
+        faces.append(tuple(range(n)))
+        for j in range(108):
+            a = j*n
+            faces.extend((a+i,a+n+i,a+n+(i+1)%n,a+(i+1)%n) for i in range(n))
+        faces.append(tuple(reversed(range(108*n,109*n))))
+        mesh(city + '_outer_foothills', verts, faces, 19, part=part, smooth=True, rough=.96)
+
+
+def basin_districts(city, to_asset):
+    """Build receding street blocks in world units, batching closed silhouettes by district and material."""
+    taiwan = city == 'taipei'
+    rng = random.Random(101 if taiwan else 755)
+    groups = defaultdict(lambda: ([], []))
+    # Centers and heights of the business districts. Their intervening lower neighborhoods
+    # leave distinctive saddles in the skyline, including a sight line to Taipei 101.
+    centers = [(-83, 120, 21), (92, 158, 20), (-145, 220, 30), (165, 326, 38)] if taiwan else [
+        (-77, 105, 31), (88, 134, 30), (-172, 195, 46), (110, 255, 54), (-286, 379, 65)]
+    streets_ns = (-201, -143, -94, -57, -26, 0, 26, 57, 94, 143, 201)
+    streets_ew = [(88, 285), (108, 340), (132, 380), (161, 420), (195, 480),
+                  (235, 560), (285, 660), (346, 755), (418, 865)]
+    square = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    chamfered = [(-.76, -1), (.76, -1), (1, -.76), (1, .76),
+                 (.76, 1), (-.76, 1), (-1, .76), (-1, -.76)]
+    sites = []
+    # Streets converge in perspective. Stagger whole rows to form avenues running
+    # into the basin while leaving cross streets between the individual parcels.
+    for row, (distance, spacing, reach) in enumerate([
+            (98, 14, 145), (117, 16, 175), (145, 19, 210), (177, 22, 255),
+            (214, 23, 302), (258, 27, 370), (312, 31, 430), (378, 37, 490), (454, 42, 560)]):
+        for col in range(-int(reach / spacing), int(reach / spacing) + 1):
+            x = (col + .44 * (row % 2)) * spacing + rng.uniform(-.11, .11) * spacing
+            depth = distance + rng.uniform(-.17, .17) * spacing
+            if abs(x + .19 * depth - 8) < spacing * .39 or rng.random() < .085:
+                continue
+            sites.append((x, depth, spacing))
+    # The oblique bank above the vertiport and the Taipei rooftop panorama both
+    # see past the sides of the original town before looking toward the far hills.
+    for side in (-1, 1):
+        for belt, spacing in [(79, 15), (104, 17), (138, 20), (185, 24)]:
+            for depth in range(-51, 87, spacing):
+                sites.append((side * (belt + rng.uniform(-2, 2)), depth + rng.uniform(-3, 3), spacing))
+    # Distant commuter towns are denser, with many narrow buildings per high rise.
+    # They lap the foothills in adjoining valleys rather than ending at a single wall.
+    outer = random.Random(797 if taiwan else 551)
+    for row, (distance, spacing) in enumerate([(500, 22), (544, 19), (595, 20), (642, 24)]):
+        for col in range(-30, 31):
+            x = (col + .46 * (row % 2)) * spacing + outer.uniform(-3, 3)
+            depth = distance + 8*math.cos(x/72) + outer.uniform(-6, 6)
+            if outer.random() < .13:
+                continue
+            sites.append((x, depth, spacing))
+    centers += [(-215, 526, 51), (46, 588, 58), (254, 561, 55)] if taiwan else [
+        (-119, 565, 54), (97, 527, 62), (294, 606, 75)]
+    featured = []
+    for index, (x, depth, spacing) in enumerate(sites):
+        density = max(peak * math.exp(-((x - cx) ** 2 + (depth - cz) ** 2) / 3500)
+                      for cx, cz, peak in centers)
+        height = (.55 * spacing + density) * rng.uniform(.68, 1.40)
+        # Keep the silhouette of 101 legible against the lower eastern basin.
+        if taiwan and abs(x - 18.5) < 27 and depth < 220:
+            height *= .60
+        width = spacing * rng.uniform(.44, .75)
+        length = spacing * rng.uniform(.43, .68)
+        nearest_x = min(streets_ns, key=lambda value: abs(value - x))
+        if depth > 84 + .21 * abs(nearest_x):
+            clearance = 2.8 + width * .52
+            if abs(x - nearest_x) < clearance:
+                x = nearest_x + math.copysign(clearance, x - nearest_x)
+        nearest_z, reach = min(streets_ew, key=lambda street: abs(street[0] - depth))
+        if abs(x) < reach * .5:
+            clearance = 2.4 + length * .52
+            if abs(depth - nearest_z) < clearance:
+                depth = nearest_z + math.copysign(clearance, depth - nearest_z)
+        style = rng.randrange(5)
+        if 88 < depth < 250 and index % 4 == 1:
+            featured.append((x, depth, width, length, height, (5,13,14)[index%3],
+                             .08*math.sin(x), 3 if x<0 else 4, (index//4 + int(taiwan))%5))
+            continue
+        outline = chamfered if style in (1, 3) else square
+        shelves = [(0, 1, 0), (.70, 1, 0), (.71, .75, .09), (1, .75, .09)]
+        if style == 1:
+            shelves = [(0, 1, 0), (.72, .96, 0), (1, .57, .16)]
+        elif style == 2:
+            shelves = [(0, 1, 0), (.85, 1, 0), (.86, .57, -.19), (1, .57, -.19)]
+        elif style == 3:
+            shelves = [(0, 1, 0), (.85, .83, .08), (1, .78, .12)]
+        elif style == 4:
+            shelves = [(0, 1, 0), (1, 1, 0)]
+        angle = rng.uniform(-.18, .18)
+        ca, sa = math.cos(angle), math.sin(angle)
+        verts, faces = groups[(3 if x < 0 else 4, rng.choice([5, 13, 14]))]
+        base, n = len(verts), len(outline)
+        for h, scale, shift in shelves:
+            for dx, dz in outline:
+                u = width * (.5 * dx * scale + shift)
+                v = length * .5 * dz * scale
+                roof_cut = .14 * (dx + 1) * .5 if style == 3 and h == 1 else 0
+                verts.append(to_asset(x + ca * u - sa * v, -.9 + (h - roof_cut) * height,
+                                      depth + sa * u + ca * v))
+        faces.append(tuple(reversed(range(base, base + n))))
+        for floor in range(len(shelves) - 1):
+            a = base + floor * n
+            for j in range(n):
+                k = (j + 1) % n
+                faces.append((a + j, a + k, a + n + k, a + n + j))
+        cap = base + (len(shelves) - 1) * n
+        faces.append(tuple(range(cap, cap + n)))
+        # Readable at neighborhood scale: roof access housings, an occasional
+        # stacked lantern crown and a narrow, continuous illuminated elevation.
+        if depth < 265 and style in (0, 2, 4):
+            def fixture(material, along, across, w, d, z0, z1):
+                fv, ff = groups[(3 if x < 0 else 4, material)]
+                first = len(fv)
+                for height_z in (z0, z1):
+                    for ix, iz in square:
+                        u, v = along + ix * w / 2, across + iz * d / 2
+                        fv.append(to_asset(x + ca*u - sa*v, height_z, depth + sa*u + ca*v))
+                ff.extend(tuple(first + i for i in f) for f in [
+                    (3, 2, 1, 0), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+                    (2, 3, 7, 6), (3, 0, 4, 7)])
+            roof = height - .9
+            offset = shelves[-1][2] * width
+            fixture(0, offset, -.07 * length, .38 * width, .32 * length, roof - .12, roof + 1.5)
+            if style == 2:
+                fixture(15 if taiwan else 6, offset, -.07 * length, .34 * width,
+                        .28 * length, roof + 1.52, roof + 1.84)
+            if style == 4 and abs(x) > 39:
+                fixture(6 if taiwan else 16, -.31 * width, -.503 * length,
+                        .19, .19, height * .45, height * .91)
+    for (part, material), (verts, faces) in groups.items():
+        mesh(city + '_basin_blocks', verts, faces, material, part=part, rough=.31)
+    district_towers(city, to_asset, featured)
+    surface = .065 if taiwan else -.48
+    # Long boulevards lead the eye inland. Cross streets follow gaps between successive rows.
+    for depth, width in streets_ew:
+        avenue(city + '_cross_street', to_asset, 0, depth, surface, width, 3.1, True)
+    for x in streets_ns:
+        start = 84 + .21 * abs(x)
+        avenue(city + '_basin_artery', to_asset, x, (start + 468) * .5,
+               surface + .035, 468 - start, 3.6, False)
+
+
 def shenzhen():
     """Shenzhen Bay / Houhai waterfront civic vertiport & varied urban skyline + winged 6-tilt-rotor eVTOL.
     Blender (+X right, +Y forward/away, +Z up) -> Engine (+X right, +Y up, +Z forward/away).
@@ -697,9 +971,10 @@ def shenzhen():
 
     # Part 1: Connected Civic Vertiport Peninsula — Arterial Boulevard, Stepped Landscape Terraces, Terminal & Pads
     # Coastal arterial boulevard + vehicular drop-off loop + median planting
-    box('coastal_boulevard_ew', (-2.0, -17.5, -0.68), (132.0, 7.6, 0.12), 1, part=1, rough=.14)
+    world_to_sz = lambda x, height, depth: (x, depth, height)
+    avenue('coastal_boulevard_ew', world_to_sz, -2, -17.5, -.62, 132, 7.6, True)
     box('boulevard_median', (-2.0, -17.5, -0.58), (126.0, 0.9, 0.16), 2, part=1, rough=.48)
-    box('west_avenue_ns', (-25.5, -18.0, -0.66), (6.8, 56.0, 0.12), 1, part=1, rough=.14)
+    avenue('west_avenue_ns', world_to_sz, -25.5, -18, -.60, 56, 6.8, False)
     box('terminal_dropoff_apron', (-3.5, -11.8, -0.64), (30.0, 4.4, 0.12), 1, part=1, rough=.16)
     for s_i in range(12):
         lx = -44.0 + s_i * 7.8
@@ -816,64 +1091,315 @@ def shenzhen():
         ( 48.0, -4.0, 11.5, 9.2, 10.5, 14, 0.00, -0.04, 4),
         ( 58.0, 32.0,  9.8, 8.4, 16.0, 14, 0.72,  0.00, 4),
     ]
-    for u_i, (ux, uy, usx, usy, uh, umat, usb, urot, upt) in enumerate(urban_masses):
-        box('sz_podium_%d' % u_i, (ux, uy, 1.6), (usx * 1.24, usy * 1.24, 3.8), 2 if (u_i % 2 == 0) else 13, part=upt, bevel=.22, rough=.38, rot_z=urot)
-        box('sz_tower_%d' % u_i, (ux, uy, uh * 0.5 - 0.3), (usx, usy, uh), umat, part=upt, bevel=.26, rough=.20, rot_z=urot)
-        if usb > 0.1:
-            top_h = uh * 0.24
-            box('sz_setback_%d' % u_i, (ux, uy, uh + top_h * 0.42 - 0.3), (usx * usb, usy * usb, top_h), umat, part=upt, bevel=.20, rough=.20, rot_z=urot)
-            box('sz_crown_%d' % u_i, (ux, uy, uh + top_h * 0.88), (usx * usb * 0.55, usy * usb * 0.55, 0.9), 0, part=upt, rough=.36, rot_z=urot)
+    # Individual waterfront parcels keep their real street frontages, but their crowns
+    # break at different heights. Preserve the quay-side midrises below the flight route.
+    typologies = [3, 2, 1, 4, 0, 2, 1, 4, 0, 3, 3, 1, 4, 0, 1, 2]
+    waterfront = [(x, z, sx, sz, h * (1.16 if setback else 1), mat, rot, part, style)
+                  for (x,z,sx,sz,h,mat,setback,rot,part), style in zip(urban_masses, typologies)]
+    district_towers('shenzhen', world_to_sz, waterfront)
+    avenue('houhai_station_road', world_to_sz, 6, 42.8, -.48, 163, 2.9, True)
+    basin_districts('shenzhen', world_to_sz)
+    box('outer_houhai_basin', (0, 448, -1.7), (1512, 702, 1.0), 2, part=5, rough=.75)
+    basin_foothills('shenzhen', world_to_sz, 5)
 
-    # Part 5: Distant Nanshan / Tanglang Coastal Hills on Horizon
-    sz_ridges = [(-58.0, 128.0, 74.0, 26.0, 13.0), (8.0, 136.0, 82.0, 30.0, 15.5), (66.0, 126.0, 72.0, 26.0, 12.0)]
-    for hr_i, (hx, hy, hsx, hsy, hsz) in enumerate(sz_ridges):
-        n_seg = 6
-        mv = []
-        for si in range(n_seg + 1):
-            t_r = si / n_seg * 2.0 - 1.0
-            px = hx + t_r * hsx * 0.5
-            hp = (math.sin(math.pi * si / n_seg) ** 0.85) * (0.80 + 0.20 * math.cos(si * 2.1 + hr_i))
-            mv.extend([(px, hy - hsy * 0.5, -2.0), (px, hy + hsy * 0.5, -2.0), (px, hy, max(1.5, hsz * hp))])
-        mf = [(0, 2, 1), (3 * n_seg, 3 * n_seg + 1, 3 * n_seg + 2)]
-        for si in range(n_seg):
-            b0, b1 = 3 * si, 3 * (si + 1)
-            mf.extend([(b0, b1, b1 + 2, b0 + 2), (b0 + 2, b1 + 2, b1 + 1, b0 + 1), (b0 + 1, b1 + 1, b1, b0)])
-        mesh('nanshan_ridge_%d' % hr_i, mv, mf, 19, part=5, smooth=False, rough=.94)
+    shenzhen_waterfront_architecture()
+    shenzhen_aircraft()
 
-    # Winged 6-Tilt-Rotor Aerospace eVTOL Hero (part = 100 airframe, 110..115 tilt nacelles, 120..125 spinning rotors)
-    # Sleek flattened chine fuselage (nose at -Y, tailcone at +Y) — reads from above, side, and three-quarter angles
-    fus_pts = []
-    fus_rad = []
-    for k in range(25):
-        tf = k / 24.0
-        fy = -2.95 + 6.15 * tf
-        fz = -0.04 + 0.22 * (tf ** 1.7) + 0.05 * math.sin(math.pi * tf)
-        prof = (math.sin(math.pi * (tf ** 0.68)) ** 0.56) * (1.0 - 0.42 * (tf ** 2.2))
-        fus_pts.append((0.0, fy, fz))
-        fus_rad.append(max(0.035, 0.68 * prof))
-    o_fus = closed_tube('evtol_fuselage', fus_pts, fus_rad, 11, 100, n_ring=36, rough=.12, thick=.06)
-    o_fus.scale = (1.12, 1.0, 0.72)
-    bpy.ops.object.select_all(action='DESELECT')
-    o_fus.select_set(True)
-    bpy.context.view_layer.objects.active = o_fus
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
-    # Twill carbon-fiber lower fuselage chine + wrap-around tinted panoramic canopy + nose landing lights
-    box('evtol_carbon_chine', (0.0, -0.35, -0.22), (1.28, 3.60, 0.16), 37, part=100, bevel=.06, rough=.18)
-    sphere('evtol_canopy_glass', (0.0, -0.92, 0.24), (0.62, 1.58, 0.38), 18, part=100, seg=36, rings=18, rough=.035)
-    box('evtol_cabin_glow', (0.0, -0.78, 0.16), (0.68, 1.30, 0.18), 15, part=100, bevel=.04, rough=.24)
-    for sx_n in [-0.24, 0.24]:
-        sphere('evtol_nose_lamp', (sx_n, -2.62, -0.06), (.065, .08, .045), 16, part=100, seg=10, rings=6, rough=.12)
+def shenzhen_waterfront_architecture():
+    """West-bank street wall, elevated coastal line and the split quay tower, in Blender coordinates."""
+    # Batch the small architectural solids by material so the repeated train windows,
+    # columns and storefronts stay inexpensive to generate and share draw calls.
+    batches = defaultdict(lambda: ([], []))
+    def loft(part, material, rings):
+        vertices, faces = batches[part, material]
+        base, n = len(vertices), len(rings[0])
+        vertices.extend(point for ring in rings for point in ring)
+        faces.append(tuple(base + i for i in reversed(range(n))))
+        for j in range(len(rings) - 1):
+            a = base + j * n
+            for i in range(n):
+                k = (i + 1) % n
+                faces.append((a + i, a + k, a + n + k, a + n + i))
+        faces.append(tuple(base + n * (len(rings) - 1) + i for i in range(n)))
 
-    # High swept main wing + twin longitudinal twill-carbon boom rails + V-tail stabilizers + carbon landing skids
+    def block(part, material, center, size, angle=0.0):
+        x, y, z = center
+        hx, hy, hz = (v * .5 for v in size)
+        ca, sa = math.cos(angle), math.sin(angle)
+        footprint = [(x + u * ca - v * sa, y + u * sa + v * ca)
+                     for u, v in [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]]
+        loft(part, material, [[(px, py, z + dz) for px, py in footprint] for dz in [-hz, hz]])
+
+    def beam(part, material, first, last, width, depth):
+        a, b = Vector(first), Vector(last)
+        axis = (b - a).normalized()
+        across = axis.cross(Vector((0, 0, 1))).normalized() * (depth * .5)
+        up = axis.cross(across).normalized() * (width * .5)
+        loft(part, material, [[tuple(p + s * across + t * up) for s, t in
+                              [(-1, -1), (1, -1), (1, 1), (-1, 1)]] for p in [a, b]])
+
+    # Two guideways follow the west causeway, taking a twelve-unit radius bend
+    # onto the north quay. Distance along the rail drives the bearings of the cars.
+    west_x, start_y, turn_y, radius = -31.4, -77.0, 27.6, 12.0
+    straight = turn_y - start_y
+    turn_end = straight + radius * math.pi / 2
+    end = turn_end + 144.0
+    def rail_pose(s):
+        if s <= straight:
+            return west_x, start_y + s, math.pi / 2
+        if s < turn_end:
+            a = (s - straight) / radius
+            return west_x + radius * (1.0 - math.cos(a)), turn_y + radius * math.sin(a), math.pi / 2 - a
+        return west_x + radius + s - turn_end, turn_y + radius, 0.0
+
+    def rail_point(s, side, z):
+        x, y, a = rail_pose(s)
+        return x - math.sin(a) * side, y + math.cos(a) * side, z
+
+    stations = [0.0] + [straight + (turn_end - straight) * j / 16 for j in range(17)] + [end]
+    # The profiled soffit narrows into the hammerhead piers. Four separate rail
+    # bars sit on top and the parapet stops below passenger-window height.
+    for mat, profile in [
+        (2, [(-1.48, 3.93), (-.82, 3.57), (.82, 3.57), (1.48, 3.93), (1.48, 4.11), (-1.48, 4.11)]),
+        *[(0, [(v-.05, 4.10), (v+.05, 4.10), (v+.05, 4.25), (v-.05, 4.25)]) for v in [-.98,-.36,.36,.98]],
+        *[(11, [(v-.05, 4.09), (v+.05, 4.09), (v+.05, 4.34), (v-.05, 4.34)]) for v in [-1.37,1.37]],
+    ]:
+        loft(0, mat, [[rail_point(s, side, z) for side, z in profile] for s in stations])
+    for s in range(5, int(end), 8):
+        px, py, angle = rail_pose(s)
+        block(0, 2, (px, py, 1.01), (.68, .65, 4.20), angle)
+        for side in [-1, 1]:
+            beam(0, 2, rail_point(s, side * .12, 2.42), rail_point(s, side * 1.08, 3.75), .35, .55)
+
+    # Each carriage is a rigid shell. Facing ends meet at a narrower bellows so
+    # the consist can actually follow the bend; the outer cabs taper to a nose.
+    for car in range(5):
+        # One rigid part per car. The renderer positions local +X along the two
+        # straights and the inner rail of the bend using the film sample clock.
+        car_part = 20 + car
+        def carriage_block(mat, u, v, z, size):
+            block(car_part, mat, (u, v, z), size)
+        profile = [(-.40,4.38), (.40,4.38), (.52,4.60), (.52,5.30),
+                   (.41,5.53), (.26,5.60), (-.26,5.60), (-.41,5.53), (-.52,5.30), (-.52,4.60)]
+        sections = []
+        for u in [-2.05, -1.57, 1.57, 2.05]:
+            cab = (car == 0 and u < -2) or (car == 4 and u > 2)
+            sections.append([(u, v * (.69 if cab else 1.0),
+                              4.4 + (z-4.4) * (.61 if cab else 1.0)) for v,z in profile])
+        loft(car_part, 11, sections)
+        carriage_block(0, 0, 0, 4.34, (3.4, .67, .19))
+        for side in [-1, 1]:
+            carriage_block(6, 0, side * .525, 4.68, (3.18, .027, .052))
+            for seat in range(6):
+                carriage_block(15 if (seat + car) % 4 else 38, (seat - 2.5) * .52,
+                               side * .522, 5.04, (.40, .032, .39))
+        if car in (0, 4):
+            direction = -1 if car == 0 else 1
+            # Set the windscreen directly onto the raked nose; its longitudinal
+            # sections track the same roof profile as the shell underneath.
+            loft(car_part, 38, [[(direction * u, direction * v, z + dz) for v,dz in
+                          [(-w, 0), (w, 0), (w, .034), (-w, .034)]]
+                         for u,w,z in [(1.65, .32, 5.52), (1.96, .23, 5.19)]])
+            for side in [-1, 1]:
+                carriage_block(16, direction * 2.056, side * .20, 4.72, (.025, .16, .055))
+        if car < 4:
+            carriage_block(38, 2.125, 0.0, 4.94, (.66, .74, .91))
+
+    # A shallow platform shares the viaduct structure and faces the existing
+    # north-bank shopping arcade. Sawtooth canopies alternate with open bays.
+    block(2, 2, (-9.3, 42.0, 4.10), (18.0, 2.12, .38))
+    for i in range(5):
+        x = -17.0 + 3.72 * i
+        block(2, 0, (x, 42.7, 4.85), (.17, .18, 3.02))
+        beam(2, 11, (x, 42.77, 6.14), (x, 40.98, 6.46), .15, 3.28)
+        block(2, 15, (x, 41.60, 6.23), (2.72, .13, .09))
+    block(2, 13, (-.9, 43.8, 2.04), (2.6, 2.4, 5.30))
+    block(2, 0, (-.9, 42.72, 4.18), (2.5, 1.52, .28))
+
+    # Recessed shops face the water. Upper apartments step away from the
+    # awnings, leaving terraces and rooftop services visible from the aircraft.
+    for i, (cx, cy, width, a) in enumerate([
+        (-35.5,-3.7,10.3,math.pi/2), (-35.8,8.5,11.2,math.pi/2),
+        (-35.7,18.0,6.1,math.pi/2), (-61.5,46.0,15.4,0), (-47.0,46.5,11.8,0),
+    ]):
+        ca, sa = math.cos(a), math.sin(a)
+        def shop(mat, u, v, z, size):
+            block(2, mat, (cx + u*ca - v*sa, cy + u*sa + v*ca, z), size, a)
+        h = [4.3, 5.8, 3.5, 6.3, 4.9][i]
+        shop(2, 0, 0, .60, (width, 4.5, 2.55))
+        shop(13 if i % 2 else 14, -.36, .5, 1.8+h/2, (width*.82, 2.9, h))
+        shop(2, -.36, .5, 1.8+h, (width*.87, 3.16, .22))
+        shop(0, width*.19, .8, 2.13+h, (width*.20, 1.46, .57))
+        for j in range(5):
+            u = width * (j - 2) * .185
+            shop(15 if (i+j)%3 else 38, u, -2.27, .87, (width*.15, .12, .95))
+            shop(11, u, -2.56, 1.56 + (j%2)*.18, (width*.183, .87, .15))
+            shop(2, u, -.99, 2.20 + h*.44, (width*.16, .55, .14))
+
+    # Market lanes between the north-bank podiums and on the narrow east bank.
+    # The latter address the canal; their sawtooth roofs are visible over the rail.
+    for row, (ox, oy, width, count, angle) in enumerate([
+        (-22.35,44.45,2.1,2,0), (-3.8,44.55,2.2,2,0),
+        (17.05,44.45,2.7,2,0), (35.85,44.85,2.2,2,0),
+        (34.3,1.7,3.2,4,-math.pi/2), (34.3,19.8,2.45,5,-math.pi/2),
+        (36.0,33.4,2.55,4,-math.pi/2),
+    ]):
+        ca, sa = math.cos(angle), math.sin(angle)
+        def store_point(u, v, z):
+            return ox + ca*u - sa*v, oy + sa*u + ca*v, z
+        def store(mat, u, v, z, dimensions):
+            block(2, mat, store_point(u, v, z), dimensions, angle)
+        for i in range(count):
+            # Share party walls but leave one break for the service entrance.
+            u = (i - (count - 1)*.5)*width
+            h = 2.15 + .25*((row*2+i)%4)
+            length = 3.2 + .32*((row+i)%3)
+            store(2,u,length*.5,h*.5-.56, (width-.035,length,h))
+            store(13,u,-.025,.32, (width*.86,.09,1.39))
+            for side in (-1,1):
+                store(15 if (row+i+(side==1))%4 else 38, u+side*width*.22,-.085,.46,
+                      (width*.30,.075,.72))
+            store(11,u,-.33,1.08, (width*.96,.72,.14))
+            store(6 if (row+i)%7==0 else 15,u,-.70,1.08,(width*.72,.06,.075))
+            # Clerestory glass under a shed roof, rising toward the party wall.
+            x0, x1 = u-width*.47, u+width*.47
+            loft(2,11, [[store_point(x,v,z) for x,z in
+                         [(x0,h-.56),(x0,h-.41),(x1,h+.10),(x1,h-.56)]]
+                        for v in (.08,length-.08)])
+            store(15,u+width*.46,length*.52,h-.26,(.08,length*.72,.25))
+            if (row+i)%3==0:
+                store(38,u-width*.36,-.25,1.9,(width*.22,.20,1.37))
+                for j in range(3):
+                    store(6 if row%3==0 else 16,u-width*.36,-.37,1.50+j*.32,
+                          (width*(.13 if j!=1 else .075),.065,.12))
+
+    # Two skewed glazed legs form a narrow portal between the old west campuses.
+    # Its middle is open to the sky; the bridges and braced edges cast real shadows.
+    tower_y = 17.45
+    def tower_x(side, z):
+        return -45.2 + side * (4.15 - z * .068) - z * .115
+    for side, height, mat in [(-1, 18.8, 5), (1, 21.2, 14)]:
+        levels = [-.68, 4.2, 10.0, 15.5, height]
+        def tower_ring(z):
+            x = tower_x(side,z)
+            hw = 1.40 - z * .012
+            return [(x+dx,tower_y+dy,z) for dx,dy in
+                    [(-hw,-2.08), (hw-.32,-2.08), (hw,-1.75), (hw,2.08), (-hw,2.08)]]
+        loft(3, mat, [tower_ring(z) for z in levels])
+        for front in [-2.13, 2.13]:
+            for j in range(len(levels)-1):
+                z0, z1 = levels[j:j+2]
+                off = 1.13 if j%2 else -1.13
+                beam(3, 11, (tower_x(side,z0)+off,tower_y+front,z0),
+                     (tower_x(side,z1)-off,tower_y+front,z1), .27, .20)
+        x = tower_x(side,height)
+        block(3, 0, (x,tower_y,height+.18), (2.60,4.32,.36))
+    for z in [8.5, 16.7]:
+        left, right = tower_x(-1,z), tower_x(1,z)
+        block(3,13, ((left+right)/2,tower_y,z), (right-left,2.48,1.50))
+        block(3,11, ((left+right)/2,tower_y,z-.76), (right-left,2.66,.18))
+        block(3,15, ((left+right)/2,tower_y-1.27,z-.60), ((right-left)*.75,.07,.085))
+
+    # Two backlit quay numbers provide wayfinding at different scales. Individual
+    # strokes leave the dark enamel backing visible in daylight and at night.
+    digits = {'0': 'abcedf', '2': 'abged', '5': 'afgcd'}
+    strokes = {'a':(0,1,1,.15),'g':(0,0,1,.15),'d':(0,-1,1,.15),
+               'f':(-.48,.50,.15,.86),'b':(.48,.50,.15,.86),
+               'e':(-.48,-.50,.15,.86),'c':(.48,-.50,.15,.86)}
+    for part, x, y, z, scale, number, mat in [
+        (3,tower_x(1,10.4),tower_y-2.17,10.4,1.02,'05',6), (2,-11.0,40.91,5.59,.37,'02',16)
+    ]:
+        block(part, 38, (x,y,z), (2.88*scale,.18,2.62*scale))
+        for j, digit in enumerate(number):
+            for segment in digits[digit]:
+                px, pz, w, h = strokes[segment]
+                block(part, mat, (x+(px+(j-.5)*1.36)*scale, y-.104, z+pz*scale),
+                      (w*scale,.035,h*scale))
+
+    for (part, mat), (vertices, faces) in sorted(batches.items()):
+        mesh('waterfront_%d_%d' % (part, mat), vertices, faces, mat, part,
+             rough=.38 if mat == 2 else .23)
+
+
+def shenzhen_aircraft():
+    # Loft a closed hull with an inset cockpit deck. The canopy, instrument
+    # binnacle and seats occupy the space above that deck.
+    ring_count, ring_size = 44, 48
+    verts = [(0.0, -2.95, 0.045)]
+    for k in range(1, ring_count):
+        angle = math.pi * k / ring_count
+        along = 0.5 - 0.5 * math.cos(angle)
+        y = -2.95 + 6.15 * along
+        width = math.sin(angle) * (.90 - .29 * along)
+        height = width * .66
+        center_z = .045 + .16 * along * along
+        deck = min(1.0, max(0.0, (y + 2.64) / .55), max(0.0, (.97 - y) / .50))
+        deck = deck * deck * (3.0 - 2.0 * deck)
+        for j in range(ring_size):
+            phi = TAU * j / ring_size
+            s = math.sin(phi)
+            z = height * (s - .90 * deck * max(s, 0.0) ** 2)
+            verts.append((width * math.cos(phi), y, center_z + z))
+    verts.append((0.0, 3.20, .205))
+    faces = []
+    for j in range(ring_size):
+        nj = (j + 1) % ring_size
+        faces.append((0, 1 + j, 1 + nj))
+        for k in range(ring_count - 2):
+            a = 1 + k * ring_size
+            faces.append((a + nj, a + j, a + j + ring_size, a + nj + ring_size))
+        a = 1 + (ring_count - 2) * ring_size
+        faces.append((a + nj, a + j, len(verts) - 1))
+    mesh('evtol_pressure_hull', verts, faces, 11, part=100, smooth=True, smooth_angle=160, rough=.12)
+
+    def glazing(u, v):
+        bulge = math.sin(math.pi * u) ** .68
+        half_width = .045 + .62 * bulge
+        arch = .5 * math.pi * v
+        pos = (half_width * math.sin(arch), -2.47 + 3.32*u,
+               .14 + .05*bulge + (.025 + .52*bulge)*math.cos(arch))
+        return pos, .012
+
+    closed_blade('panoramic_canopy', 34, 24, glazing, 18, 100, rough=.035)
+    for side in (-1, 1):
+        sill = [glazing(k/32, side)[0] for k in range(33)]
+        closed_tube('canopy_sill', sill, [.028]*33, 37, 100, n_ring=10)
+        stripe = [(x*1.012, y, z - .019) for x,y,z in sill]
+        closed_tube('sill_trim', stripe, [.011]*33, 8, 100, n_ring=8)
+        seat_x = side * .235
+        box('seat_cushion', (seat_x, -.40, .24), (.32, .47, .16), 37, 100, bevel=.052)
+        box('seat_back', (seat_x, -.15, .36), (.33, .14, .29), 37, 100, bevel=.050, rot_euler=(-.19, 0, 0))
+        box('seat_headrest', (seat_x, -.10, .51), (.19, .12, .10), 37, 100, bevel=.033)
+        box('instrument_binnacle', (seat_x, -1.39, .255), (.38, .29, .13), 37, 100, bevel=.036)
+        box('instrument_display', (seat_x, -1.36, .326), (.22, .12, .010), 6, 100, bevel=.003)
+        box('instrument_status', (seat_x, -1.48, .325), (.16, .022, .010), 16, 100, bevel=.003)
+        sphere('nose_lamp_recess', (side*.22, -2.70, .072), (.105, .14, .064), 37, 100, seg=16, rings=10)
+        sphere('nose_lamp', (side*.22, -2.765, .084), (.078, .10, .043), 16, 100, seg=16, rings=10)
+    for u, width in ((.53, .023), (.86, .033)):
+        bow = [glazing(u, k/12 - 1)[0] for k in range(25)]
+        closed_tube('canopy_bow', bow, [width]*25, 38, 100, n_ring=10)
+
+    # Cambered lifting surfaces with a broad swept root and a rising tip.
+    # Use the same opposing rotors and pivot locations as the runtime rig.
     for sign_w in [-1.0, 1.0]:
-        rod('evtol_main_wing', (0.0, -0.15, 0.24), (sign_w * 4.10, 0.15, 0.36), .11, 11, part=100, verts=16, rough=.13)
-        box('evtol_wing_chord', (sign_w * 2.05, 0.0, 0.30), (3.95, 0.56, 0.07), 11, part=100, bevel=.025, rough=.13, rot_z=sign_w * 0.07)
+        def wing(u, v):
+            chord = .37 + .52*(1-u) + .40*(1-u)**4
+            along = .5 + .5*v
+            camber = math.sin(math.pi * along) * (1.12 - .40*along)
+            pos = (sign_w*(.43 + 3.70*u), -.35 + .66*u + v*.5*chord,
+                   .16 + .20*u + .055*chord*camber + .08*u**5)
+            return pos, .012 + .115*chord*camber
+        closed_blade('cambered_wing', 20, 14, wing, 11, 100, rough=.16)
+        rod('wing_root_fairing', (sign_w*.52, -.28, .19), (sign_w*1.15, -.18, .23),
+            .13, 11, part=100, verts=20, rough=.15, bevel=.04)
         rod('evtol_boom_rail', (sign_w * 3.00, -1.65, 0.36), (sign_w * 2.65, 1.95, 0.46), .075, 37, part=100, verts=16, rough=.18, preserve_uv=True)
         rod('evtol_boom_brace', (sign_w * 0.62, -0.95, 0.12), (sign_w * 3.00, -1.55, 0.34), .055, 37, part=100, verts=12, rough=.18, preserve_uv=True)
-        # Sculpted V-tail fins (proper chorded aerodynamic surfaces, not thin sticks!)
-        o_vt = box('evtol_vtail_fin', (sign_w * 0.68, 2.92, 0.62), (0.06, 0.72, 1.18), 11, part=100, bevel=.02, rough=.13)
-        o_vt.rotation_euler = (-0.22, sign_w * 0.62, 0.0)
+        def tail(u, v):
+            chord = 1.12 - .79*u
+            return (sign_w*(.22 + .84*u), 2.16 + .77*u + v*chord*.5,
+                    .24 + .92*u), .014 + .105*chord*(1-v*v)
+        closed_blade('swept_v_tail', 10, 8, tail, 11, 100, rough=.14)
         rod('evtol_skid_tube', (sign_w * 0.78, -1.45, -0.66), (sign_w * 0.78, 1.25, -0.66), .044, 37, part=100, verts=14, rough=.20, preserve_uv=True)
         for sy_s in [-0.88, 0.72]:
             rod('evtol_skid_strut', (sign_w * 0.48, sy_s, -0.16), (sign_w * 0.78, sy_s, -0.66), .036, 23, part=100, verts=12, rough=.20)
@@ -888,7 +1414,13 @@ def shenzhen():
         ( 2.60,  1.95, 0.46),
     ]
     for i, (bx, by, bz) in enumerate(rotor_pivots):
-        sphere('tilt_nacelle_%d' % i, (bx, by, bz), (.18, .34, .24), 11, part=110 + i, seg=24, rings=12, rough=.13)
+        sphere('tilt_nacelle_%d' % i, (bx, by, bz), (.205, .38, .21), 11, part=110 + i, seg=24, rings=14, rough=.13)
+        rod('tilt_axle', (bx-.24, by, bz), (bx+.24, by, bz), .092, 23, 110+i, verts=20, bevel=.012)
+        for side in (-1, 1):
+            x = bx + side*.191
+            rod('tilt_fork', (x, by+.20, bz-.055), (x, by, bz), .046, 37, 100, verts=12)
+            sphere('axle_cap', (bx + side*.246, by, bz), (.013,.058,.058), 8, 110+i, seg=14, rings=8)
+        torus('mast_collar', (bx, by, bz+.18), .089, .021, 23, 110+i, seg=22, minor_seg=8)
         rod('rotor_mast_%d' % i, (bx, by, bz), (bx, by, bz + 0.32), .058, 23, part=110 + i, verts=16, rough=.19)
         sphere('rotor_spinner_%d' % i, (bx, by, bz + 0.36), (.10, .10, .13), 37, part=120 + i, seg=18, rings=10, rough=.14)
         lamp_mat = 16 if (i < 2) else 6
@@ -897,21 +1429,19 @@ def shenzhen():
         rot_dir = -1.0 if (i % 2 == 1) else 1.0
         for j in range(3):
             ang = j * TAU / 3.0
-            cx = bx + 0.49 * math.cos(ang)
-            cy = by + 0.49 * math.sin(ang)
-            o_bl = box('scimitar_blade_%d_%d' % (i, j), (cx, cy, bz + 0.32), (.92, .110, .020), 37, part=120 + i, bevel=.006, rough=.16)
-            o_bl.rotation_euler = (0.24 * rot_dir, 0.0, ang)
-            # Brushed champagne-nickel/titanium leading-edge erosion strip
-            le_off = 0.046 * rot_dir
-            lx_b = cx - le_off * math.sin(ang)
-            ly_b = cy + le_off * math.cos(ang)
-            o_le = box('blade_le_strip_%d_%d' % (i, j), (lx_b, ly_b, bz + 0.328), (.86, .022, .016), 23, part=120 + i, rough=.16)
-            o_le.rotation_euler = (0.24 * rot_dir, 0.0, ang)
-            # Safety-gold blade tip cap
-            tx_b = bx + 0.91 * math.cos(ang)
-            ty_b = by + 0.91 * math.sin(ang)
-            o_tp = box('blade_tip_cap_%d_%d' % (i, j), (tx_b, ty_b, bz + 0.32), (.08, .102, .021), 8, part=120 + i, rough=.20)
-            o_tp.rotation_euler = (0.24 * rot_dir, 0.0, ang)
+            for u0, u1, mat, steps in ((0., .84, 37, 9), (.84, 1., 8, 4)):
+                def blade(s, v):
+                    u = u0 + (u1-u0)*s
+                    radius = .074 + .92*u
+                    chord = .065 + .13*math.sin(math.pi*(.10 + .87*u))
+                    pitch = rot_dir*(.36 - .20*u)
+                    sweep = -rot_dir*(.145*u*u + .044*u**5)
+                    transverse = sweep + .5*v*chord*math.cos(pitch)
+                    pos = (bx + radius*math.cos(ang) - transverse*math.sin(ang),
+                           by + radius*math.sin(ang) + transverse*math.cos(ang),
+                           bz + .32 + .035*u*u + .5*v*chord*math.sin(pitch))
+                    return pos, .007 + .11*chord*(1-v*v)
+                closed_blade('scimitar_blade', steps, 5, blade, mat, 120+i, rough=.19)
 
 def taipei():
     # Meters, retained at 508 m in the asset. Runtime places tower at world (18.5, 0.0, 60.0) with scale 0.080.
@@ -920,17 +1450,8 @@ def taipei():
         return ((wx - 18.5) / .08, (wz - 60.0) / .08, wy / .08)
     def ws(sx, sy, sz):
         return (sx / .08, sz / .08, sy / .08)
-    def foliage_cluster(tag, wx, wy, wz, rx, ry, rz, part_id):
-        box('%s_curb' % tag, w2b(wx, wy - ry * 0.48, wz), ws(rx * 1.45, ry * 0.36, rz * 1.45), 2, part=part_id, bevel=.18, rough=.50)
-        box('%s_canopy_lo' % tag, w2b(wx, wy - ry * 0.05, wz), ws(rx * 1.32, ry * 0.72, rz * 1.28), 39, part=part_id, bevel=1.4, segments=2, rough=.84)
-        box('%s_canopy_hi' % tag, w2b(wx + 0.10 * rx, wy + ry * 0.28, wz - 0.08 * rz), ws(rx * 0.90, ry * 0.56, rz * 0.88), 39, part=part_id, bevel=1.1, segments=2, rough=.82, rot_z=0.32)
-
     # Part 0: Taipei 101 Hero Tower (0..508 m true vertical scale) + Shopping Mall Podium
     notched('battered_podium', 0, 112, 38, 29, 5, part=0)
-    box('taipei_mall_wing', (-66, -12, 14), (72, 62, 28), 13, part=0, bevel=.6, rough=.35)
-    box('taipei_mall_skylight', (-66, -12, 29.2), (52, 20, 2.4), 15, part=0, bevel=.3, rough=.22)
-    box('taipei_plaza_apron', (-18, -8, 1.0), (190, 150, 2.0), 2, part=0, rough=.42)
-
     for k in range(8):
         z = 112 + k * 35
         w = 23.0 - k * .22
@@ -952,7 +1473,8 @@ def taipei():
         o = torus('podium_coin', (math.cos(a) * 32, math.sin(a) * 32, 70), 5.0, .68, 8, part=0, seg=32, rough=.20)
         o.rotation_euler = (math.pi / 2, 0, a + math.pi / 2)
 
-    # Open 88F-91F Observatory Lantern framing the true-scale 5.5 m (r = 2.75 m) golden 41-plate TMD sphere
+    # The observation gallery is enclosed by low-iron glass, vertical pressure
+    # plates and spandrels. Its internal structure frames the 5.5 m diameter TMD.
     notched('observatory_deck_base', 392, 396.0, 20.4, 20.4, 5, part=0, rough=.20)
     notched('observatory_upper_crown', 427.2, 430.0, 17.4, 16.2, 5, part=0, rough=.20)
     torus('observatory_gallery_ring', (0, 0, 397.2), 8.2, .45, 15, part=0, seg=36, rough=.24)
@@ -966,6 +1488,17 @@ def taipei():
             rod('observatory_beam', (-17.4, y, z), (17.4, y, z), .58, 0, part=0, rough=.24)
         for x in [-17.4, 17.4]:
             rod('observatory_beam', (x, -17.4, z), (x, 17.4, z), .58, 0, part=0, rough=.24)
+    for face in range(4):
+        a = math.pi*.5*face
+        ca,sa = math.cos(a),math.sin(a)
+        def facade_piece(name, along, offset, z, width, depth, height, mat):
+            box(name, (ca*along-sa*offset,sa*along+ca*offset,z),
+                (width,depth,height), mat, part=0, rot_z=a, rough=.12 if mat==40 else .28)
+        facade_piece('observatory_clear_glass',0,-17.36,411.6,34.72,.075,31.2,40)
+        for u in (-14.2,-8.5,-2.84,2.84,8.5,14.2):
+            facade_piece('observatory_window_cap',u,-17.46,411.6,.23,.25,31.2,11)
+        for z in (396.6,400.8,405.0,413.6,417.9,422.2,426.5):
+            facade_piece('observatory_spandrel',0,-17.46,z,34.84,.29,.50,5)
 
     sphere('660_tonne_TMD', (0, 0, 409.5), (2.75, 2.75, 2.75), 8, part=0, seg=64, rings=32, rough=.12)
     for j in range(1, 41):
@@ -980,110 +1513,18 @@ def taipei():
             rod('bumper_stanchion', (4.0 * math.cos(a), 4.0 * math.sin(a), 395.8), (4.0 * math.cos(a), 4.0 * math.sin(a), 405.2), .22, 0, part=0, rough=.26)
     torus('bumper_ring', (0, 0, 405.2), 4.0, .24, 8, part=0, rough=.16)
 
-    for k in range(4):
-        notched('stepped_spire', 430 + k * 12, 442 + k * 12, 15.5 - k * 2.8, 13.5 - k * 2.8, 5, part=0, rough=.18)
-        notched('spire_collar_glow', 441.3 + k * 12, 441.9 + k * 12, 13.6 - k * 2.8, 13.6 - k * 2.8, 15, part=0, rough=.22)
-    rod('508m_pinnacle', (0, 0, 478), (0, 0, 508), .62, 8, part=0, rough=.18)
-    sphere('spire_beacon', (0, 0, 508.2), (.48, .48, .48), 16, part=0, seg=12, rings=6, rough=.15)
+    # Surveyed roof at 448 m; the architectural spire extends a further 60 m.
+    notched('upper_occupied_storeys',430,439,11.0,10.6,5,part=0,rough=.18)
+    notched('mechanical_crown',439,448,6.55,6.30,11,part=0,rough=.25)
+    notched('roof_collar',447.4,448,6.39,6.39,15,part=0,rough=.22)
+    for z0,z1,radius in [(448,462,1.78),(462,478,1.24),(478,493,.83),(493,507.55,.55)]:
+        rod('spire_mast', (0,0,z0), (0,0,z1), radius, 11, part=0, rough=.20)
+    sphere('spire_beacon', (0,0,507.52), (.48,.48,.48), 16, part=0, seg=12, rings=6, rough=.15)
 
-    # Part 6 (Basin Ground, Avenues & Mountain Ridges) + Part 5 (Street-Level Trees & Streetlamps)
-    box('taipei_basin_ground', w2b(12.0, -.45, 62.0), ws(290.0, .90, 280.0), 2, part=6, rough=.68)
-    for av_x, av_w in [(-6.0, 2.8), (6.5, 3.2), (29.5, 3.0)]:
-        box('xinyi_avenue_ns', w2b(av_x, .02, 54.0), ws(av_w, .05, 96.0), 1, part=6, rough=.10)
-        for s_i in range(9):
-            wz = 16.0 + s_i * 8.6
-            for side in [-1, 1]:
-                lx = av_x + side * (av_w * .60)
-                foliage_cluster('street_tree_%d_%d' % (s_i, 1 if side > 0 else 0), lx, .34, wz + 1.8, .48, .38, .48, 5)
-                box('street_lamp_pole', w2b(lx, .30, wz), ws(.04, .60, .04), 0, part=5, rough=.35)
-                box('street_lamp_glow', w2b(lx - side * .06, .58, wz), ws(.14, .05, .18), 16, part=5, rough=.2)
-    for av_z, av_w in [(18.5, 2.8), (36.5, 3.2), (50.5, 2.6), (74.0, 3.2)]:
-        box('xinyi_avenue_ew', w2b(12.0, .02, av_z), ws(110.0, .05, av_w), 1, part=6, rough=.10)
-
-    # Sculpted dark mountain ridge silhouettes rimming the Taipei Basin far behind the skyline
-    ridge_defs = [
-        (-48.0, 146.0, 62.0, 10.5, 24.0, 0.08),
-        (2.0,   154.0, 68.0, 13.5, 28.0, -0.05),
-        (52.0,  144.0, 64.0, 11.8, 26.0, 0.06),
-    ]
-    for r_idx, (rx, rz, rsx, rsy, rsz, rrot) in enumerate(ridge_defs):
-        # Ridged triangular-prism mountain massif (not a green UV sphere!)
-        bx, by, _ = w2b(rx, 0.0, rz)
-        bsx, bsy, bsz = ws(rsx, rsy, rsz)
-        n_seg = 6
-        mv = []
-        for si in range(n_seg + 1):
-            t_r = si / n_seg * 2.0 - 1.0
-            px = bx + t_r * bsx * 0.5
-            h_prof = math.sin(math.pi * (si / n_seg)) ** 0.85 * (0.78 + 0.22 * math.cos(si * 2.3 + r_idx))
-            mv.extend([
-                (px, by - bsy * 0.5, -8.0),
-                (px, by + bsy * 0.5, -8.0),
-                (px, by + bsy * 0.08 * math.sin(si * 1.7), max(4.0, bsz * h_prof)),
-            ])
-        mf = [(0, 2, 1), (3 * n_seg, 3 * n_seg + 1, 3 * n_seg + 2)]
-        for si in range(n_seg):
-            b0, b1 = 3 * si, 3 * (si + 1)
-            mf.extend([(b0, b1, b1 + 2, b0 + 2), (b0 + 2, b1 + 2, b1 + 1, b0 + 1), (b0 + 1, b1 + 1, b1, b0)])
-        o = mesh('basin_ridge_%d' % r_idx, mv, mf, 19, part=6, smooth=False, rough=.95)
-        o.rotation_euler.z = rrot
-
-    # Part 2: Mid-ground Xinyi Commercial Podiums & Covered Steel-and-Glass Pedestrian Skywalks
-    podium_blocks = [
-        (0.5, 25.5, 8.2, 2.4, 7.5, 13, True),
-        (12.8, 26.0, 8.8, 2.1, 8.0, 14, True),
-        (22.5, 27.0, 6.8, 2.6, 7.2, 13, True),
-        (1.0, 43.5, 7.8, 3.1, 7.8, 14, True),
-        (12.6, 43.2, 8.4, 2.5, 7.4, 13, True),
-        (22.8, 43.8, 6.6, 3.0, 7.0, 14, False),
-    ]
-    for p_i, (wx, wz, sx, sy, sz, mat, gal) in enumerate(podium_blocks):
-        box('xinyi_podium_%d' % p_i, w2b(wx, sy * .5, wz), ws(sx, sy, sz), mat, part=2, bevel=.35, rough=.32)
-        box('podium_roof_terrace_%d' % p_i, w2b(wx, sy + .08, wz), ws(sx * .84, .14, sz * .84), 2, part=2, rough=.52)
-        foliage_cluster('podium_greenery_%d' % p_i, wx - sx * .22, sy + .22, wz, sx * .16, .18, sz * .16, 2)
-        if gal:
-            box('podium_arcade_glow_%d' % p_i, w2b(wx, .34, wz - sz * .48), ws(sx * .72, .44, .18), 15, part=2, rough=.24)
-
-    skywalks = [
-        (6.6, 25.8, 4.4, .18, .82),
-        (17.8, 26.5, 3.6, .18, .82),
-        (6.8, 43.4, 4.2, .18, .82),
-        (12.7, 35.0, .86, .18, 9.8),
-        (0.8, 34.5, .82, .18, 9.5),
-    ]
-    for sw_i, (wx, wz, sx, sy, sz) in enumerate(skywalks):
-        box('xinyi_skywalk_deck_%d' % sw_i, w2b(wx, .96, wz), ws(sx, sy, sz), 0, part=2, bevel=.04, rough=.32)
-        box('xinyi_skywalk_parapet_%d' % sw_i, w2b(wx, 1.14, wz), ws(sx * .98, .22, sz * .96), 14, part=2, rough=.18)
-        box('xinyi_skywalk_canopy_%d' % sw_i, w2b(wx, 1.30, wz), ws(sx, .08, sz), 0, part=2, rough=.30)
-        box('xinyi_skywalk_soffit_%d' % sw_i, w2b(wx, .85, wz), ws(sx * .88, .04, sz * .82), 15, part=2, rough=.25)
-
-    # Part 3 (Left) & Part 4 (Right/North): Varied Xinyi District Towers (never crowding 101's silhouette)
-    district_towers = [
-        (-26.0, 34.0, 5.4, 11.5, 5.2, 14, .12, 3),
-        (-18.5, 28.0, 4.6, 8.2, 4.8, 13, .0, 3),
-        (-13.5, 39.5, 5.2, 14.8, 4.8, 14, .06, 3),
-        (-22.0, 52.0, 6.0, 17.5, 5.6, 13, -.08, 3),
-        (-11.5, 58.0, 4.8, 12.2, 5.0, 14, .0, 3),
-        (-4.2, 62.5, 4.4, 9.6, 4.4, 13, .05, 3),
-        (3.8, 68.0, 4.8, 11.4, 4.6, 14, .0, 4),
-        (34.5, 44.0, 5.0, 13.8, 4.8, 14, -.10, 4),
-        (36.0, 63.0, 5.8, 21.5, 4.6, 14, .16, 4),
-        (44.5, 54.0, 5.2, 15.2, 5.2, 13, .0, 4),
-        (48.0, 72.0, 6.2, 18.4, 5.6, 14, -.06, 4),
-        (-16.0, 80.0, 5.8, 15.5, 5.4, 14, .0, 3),
-        (-3.0, 84.0, 5.2, 13.0, 5.0, 13, .08, 3),
-        (9.5, 86.0, 5.0, 10.8, 4.8, 14, .0, 4),
-        (27.5, 84.0, 5.4, 14.6, 5.2, 13, -.05, 4),
-    ]
-    for idx_t, (wx, wz, sx, sy, sz, mat, rot, pt) in enumerate(district_towers):
-        box('district_base_%d' % idx_t, w2b(wx, 1.1, wz), ws(sx * 1.28, 2.2, sz * 1.28), 2 if idx_t % 2 else 13, part=pt, bevel=.3, rough=.38, rot_z=rot)
-        box('district_shaft_%d' % idx_t, w2b(wx, sy * .5, wz), ws(sx, sy, sz), mat, part=pt, bevel=.35, rough=.22, rot_z=rot)
-        if sy > 11.0:
-            upper_h = sy * .26
-            box('district_setback_%d' % idx_t, w2b(wx, sy + upper_h * .45, wz), ws(sx * .72, upper_h, sz * .72), mat, part=pt, bevel=.25, rough=.22, rot_z=rot)
-            box('district_mech_%d' % idx_t, w2b(wx, sy + upper_h + .35, wz), ws(sx * .42, .70, sz * .42), 0, part=pt, rough=.40, rot_z=rot)
-        else:
-            box('district_mech_%d' % idx_t, w2b(wx, sy + .35, wz), ws(sx * .52, .70, sz * .52), 0, part=pt, rough=.40, rot_z=rot)
+    # Xinyi streets and buildings are measured in this asset coordinate frame.
+    taipei_city_mesh(mesh, taipei_relief_height)
+    box('xinyi_urban_plain', (0,0,-2.6), (4040,4040,5.2), 2, part=6, rough=.68)
+    taipei_relief_mesh(mesh)
 
     # Part 1: Foreground Elevated Sanctuary Rooftop Rain-Terrace (zero tall columns, clean infinity coping)
     box('sanctuary_rooftop_mass', w2b(0.0, 1.26, 3.2), ws(16.0, 2.52, 11.6), 2, part=1, bevel=.25, rough=.45)
@@ -2282,26 +2723,57 @@ ALL_KITS = [
     ('dawn_alcove', dawn_alcove),
 ]
 
-def run_all_exports():
+def run_all_exports(selected=()):
     global objects, serial
+    known_names = {name for name, _ in ALL_KITS}
+    if set(selected) - known_names:
+        raise ValueError('Unknown mesh kits: ' + ', '.join(sorted(set(selected) - known_names)))
+    report_path = OUT / 'generation_report.json'
+    existing = {r['name']: r for r in json.loads(report_path.read_bytes())['assets']} if selected else {}
     reports = []
     for name, fn in ALL_KITS:
+        if selected and name not in selected:
+            continue
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
         objects = []
         serial = 0
         fn()
         reports.append(export(name))
-    atomic(OUT / 'generation_report.json', (json.dumps(dict(blender=bpy.app.version_string, assets=reports), indent=2) + '\n').encode())
+    existing.update((r['name'], r) for r in reports)
+    ordered = [existing[name] for name, _ in ALL_KITS]
+    atomic(report_path, (json.dumps(dict(blender=bpy.app.version_string, assets=ordered), indent=2) + '\n').encode())
     manifest_path = ROOT / 'assets/manifest.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    meshes = {a['id']: a for a in manifest['assets'] if a['kind'] == 'mesh'}
     for r in reports:
-        # Review and register the sources and license when adding a new kit.
-        # Regenerating an existing mesh only changes the digest of its bytes.
-        meshes['mesh_' + r['name']]['sha256'] = r['sha256']
+        aid = 'mesh_' + r['name']
+        previous = next((a for a in manifest['assets'] if a['id'] == aid), None)
+        if previous is not None:
+            previous['sha256'] = r['sha256']
+            continue
+        prov = (
+            'Procedural Blender geometry + solidified PolyHaven CC0 botanical scans generated by tools/gen_trilogy_meshes.py'
+            if r['name'] in ('dawn_alcove', 'microbial_sanctuary', 'taipei_101_hero')
+            else 'Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py'
+        )
+        manifest['assets'].append(dict(
+            id=aid,
+            path='assets/meshes/' + r['name'] + '.bmesh',
+            kind='mesh',
+            provenance=prov,
+            license='CC0-1.0',
+            attribution_required=False,
+            sha256=r['sha256'],
+        ))
     atomic(manifest_path, (json.dumps(manifest, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
 
 if __name__ == '__main__' and '--skip-batch' not in sys.argv:
-    run_all_exports()
+    # blender -b -P tools/gen_trilogy_meshes.py -- --only shenzhen_evtol taipei_101_hero
+    if '--only' in sys.argv:
+        names = sys.argv[sys.argv.index('--only') + 1:]
+        if not names:
+            raise ValueError('--only requires at least one mesh kit name')
+        run_all_exports(names)
+    else:
+        run_all_exports()
 

@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1192,12 +1193,42 @@ bool testStandaloneHardwareSolosRtCudaTensor() {
     return true;
 }
 
+void reportDirectorFrameDifference(const char* label, const std::vector<uint32_t>& live10,
+                                   const std::vector<uint32_t>& script10, uint32_t w, uint32_t h) {
+    std::array<uint32_t, 1024> channelDifference{};
+    uint64_t totalDifference = 0;
+    uint32_t changedPixels = 0;
+    for (size_t i = 0; i < live10.size(); ++i) {
+        changedPixels += (live10[i] & 0x3fffffffu) != (script10[i] & 0x3fffffffu);
+        for (int shift : {0, 10, 20}) {
+            const int delta = std::abs(int((live10[i] >> shift) & 1023u) - int((script10[i] >> shift) & 1023u));
+            ++channelDifference[delta];
+            totalDifference += delta;
+        }
+    }
+    const double channels = 3.0 * live10.size();
+    uint32_t below = 0;
+    size_t p95 = 0;
+    while (p95 + 1 < channelDifference.size() && below + channelDifference[p95] < channels * 0.95)
+        below += channelDifference[p95++];
+    std::cout << "  " << label << ", " << w << "x" << h << ": "
+              << 100.0 * changedPixels / live10.size() << "% pixels changed, mean absolute RGB delta "
+              << totalDifference / channels << "/1023, p95 " << p95 << "/1023.\n";
+}
+
 bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
     using namespace boo;
 
     ProbeFlags pf{};
     const auto caps = probeSystemCapabilities(pf);
     const auto xmlPath = resolveResourcePath("assets/models/madame_n_director.xml");
+    auto sanctuaryFrame = makeM1TestContext(1056000, 0);
+    sanctuaryFrame.actIndex = 3;
+    sanctuaryFrame.actProgress = 22.0f / 45.0f;
+    ScriptedDirector sanctuaryDirector;
+    sanctuaryDirector.reset(266203);
+    const auto sanctuaryBaseline = sanctuaryDirector.evaluate(sanctuaryFrame, nullptr);
+    std::optional<NeuralInferenceSample> sanctuaryInference;
 
     if (isOpenVinoRuntimeAvailable(true)) {
         // 1. Explicit OpenVINO NPU compile + actual inference verification (or CPU if host has no NPU)
@@ -1235,6 +1266,8 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
                 BOO_CHECK(sSusp.controls[i] >= 0.0f && sSusp.controls[i] <= 1.0f);
                 BOO_CHECK(sComic.controls[i] >= 0.0f && sComic.controls[i] <= 1.0f);
             }
+            sanctuaryInference.emplace();
+            BOO_CHECK(dir.infer(sanctuaryDirector.buildFeatures(sanctuaryFrame, nullptr), *sanctuaryInference));
             dir.shutdown();
         }
 
@@ -1278,6 +1311,8 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             }
             const auto liveTel = asyncCtrl.telemetry();
             BOO_CHECK(liveTel.completedInferences >= 1);
+            BOO_CHECK(liveTel.completedRateHz >= 1.0f && liveTel.completedRateHz <= 5.0f);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
             if (!caps.npuDevices.empty()) {
                 BOO_CHECK(liveTel.hardwareResult.status == BackendStatus::Accelerated);
             }
@@ -1291,8 +1326,32 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             fctx.actProgress = 0.72f;
             fctx.audioEnvelope = 0.52f;
 
-            const DirectorMoodState neuralMood = asyncCtrl.evaluateFrame(fctx, nullptr);
+            DirectorMoodState baseline{};
+            const DirectorMoodState neuralMood = asyncCtrl.evaluateFrame(fctx, nullptr, &baseline);
             BOO_CHECK(!neuralMood.isScriptedFallback);
+            ScriptedDirector reference;
+            reference.reset(266203);
+            const auto expected = reference.evaluate(fctx, nullptr);
+            BOO_CHECK(baseline.isScriptedFallback && baseline.category == expected.category);
+            BOO_CHECK(baseline.irisAngle == expected.irisAngle && baseline.spectralShift == expected.spectralShift);
+
+            // A seek must draw the current scripted baseline before fresh model output arrives.
+            fctx.samplePosition = 8064000;
+            fctx.filmTimeSeconds = 168.0;
+            fctx.seeking = true;
+            const auto atSeek = asyncCtrl.evaluateFrame(fctx, nullptr, &baseline);
+            BOO_CHECK(atSeek.isScriptedFallback && atSeek.irisAngle == baseline.irisAngle);
+            fctx.seeking = false;
+            bool resumedNeural = false;
+            for (int retry = 0; retry < 120; ++retry) {
+                if (!asyncCtrl.evaluateFrame(fctx, nullptr).isScriptedFallback) {
+                    resumedNeural = true;
+                    break;
+                }
+                Sleep(25);
+            }
+            BOO_CHECK(resumedNeural);
+            BOO_CHECK(asyncCtrl.telemetry().completedInferences > liveTel.completedInferences);
 
             // Inject mid-film NPU inference timeout -> verify smooth continuation and Degraded failover
             asyncCtrl.setInjectTimeout(true);
@@ -1308,8 +1367,41 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
             BOO_CHECK(failTel.timeoutCount >= 1);
             BOO_CHECK(failTel.hardwareResult.status == BackendStatus::Degraded);
             BOO_CHECK(failTel.hardwareResult.diagnosticCode == "NPU_INFERENCE_TIMEOUT_FAILOVER");
+            BOO_CHECK(failTel.hardwareResult.humanReadableReason.find("Injected inference timeout") != std::string::npos);
+            BOO_CHECK(failTel.completedInferences == 0 && failTel.completedRateHz == 0.0f && failTel.lastInferMs == 0.0f);
             const DirectorMoodState fallbackMood = asyncCtrl.evaluateFrame(fctx, nullptr);
             BOO_CHECK(fallbackMood.isScriptedFallback);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            asyncCtrl.setInjectTimeout(false);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+
+            // A real bad-input failure must report its cause and leave the watchdog count alone.
+            // A rapid disable/enable pair starts a new route even between two worker ticks.
+            asyncCtrl.setDisableNpu(true);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            asyncCtrl.setDisableNpu(false);
+            for (int retry = 0; retry < 160 && asyncCtrl.telemetry().completedInferences == 0; ++retry) Sleep(25);
+            BOO_CHECK(asyncCtrl.telemetry().completedInferences > 0);
+            auto invalid = fctx;
+            invalid.audioEnvelope = std::nanf("");
+            asyncCtrl.evaluateFrame(invalid, nullptr);
+            for (int retry = 0; retry < 80 && asyncCtrl.telemetry().hardwareResult.status != BackendStatus::Degraded; ++retry) Sleep(25);
+            const auto badInput = asyncCtrl.telemetry();
+            BOO_CHECK(badInput.hardwareResult.diagnosticCode == "NPU_INFERENCE_ERROR_FAILOVER");
+            BOO_CHECK(badInput.hardwareResult.humanReadableReason.find("non-finite feature") != std::string::npos);
+            BOO_CHECK(badInput.timeoutCount == failTel.timeoutCount);
+            BOO_CHECK(badInput.completedRateHz == 0.0f && badInput.completedInferences == 0);
+            asyncCtrl.reset(266203);
+            asyncCtrl.evaluateFrame(fctx, nullptr);
+            const bool hardwareNpu = liveTel.hardwareResult.status == BackendStatus::Accelerated;
+            BOO_CHECK(asyncCtrl.retryIfDegraded() == hardwareNpu);
+            BOO_CHECK(!asyncCtrl.retryIfDegraded());
+            if (hardwareNpu) {
+                for (int retry = 0; retry < 160 && asyncCtrl.telemetry().completedInferences == 0; ++retry) Sleep(25);
+                const auto recovered = asyncCtrl.telemetry();
+                BOO_CHECK(recovered.hardwareResult.status == BackendStatus::Accelerated);
+                BOO_CHECK(recovered.completedInferences > 0 && recovered.completedRateHz > 0.0f);
+            }
             asyncCtrl.shutdown();
         }
     }
@@ -1342,6 +1434,37 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
         ctxB.moodPaletteAccent = 0.85f;
         BOO_CHECK(fxNpu.renderHeadlessCanvasForTest(ctxB, imgBloom, w, h, &err));
         BOO_CHECK(imgCalm != imgBloom);
+
+        // Compare two complete sanctuary renders at the same sample. With matching lighting
+        // the two 10-bit canvases must agree, even when the scripted iris would move the camera.
+        fxNpu.setAbCompareEngine(AbCompareEngine::NPU);
+        ctxB.scriptedDirectorComparison = {
+            ctxB.moodBloomStrength, 0.1f, ctxB.moodIntensity, ctxB.moodPaletteAccent, ctxB.moodCutAccent};
+        std::vector<uint32_t> live10, script10;
+        BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(ctxB, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+        BOO_CHECK(live10 == script10);
+        const auto sameFrame = live10;
+        ctxB.scriptedDirectorComparison.lightTension = 0.02f;
+        ctxB.scriptedDirectorComparison.bloomStrength = 0.04f;
+        ctxB.scriptedDirectorComparison.spectralShift = 0.05f;
+        BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(ctxB, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+        BOO_CHECK(live10 == sameFrame);
+        BOO_CHECK(live10 != script10);
+
+        if (sanctuaryInference) {
+            const auto& controls = sanctuaryInference->controls;
+            sanctuaryFrame.moodBloomStrength = controls[0];
+            sanctuaryFrame.moodIrisAngle = controls[1];
+            sanctuaryFrame.moodIntensity = controls[2];
+            sanctuaryFrame.moodPaletteAccent = controls[3];
+            sanctuaryFrame.moodCutAccent = controls[4];
+            sanctuaryFrame.scriptedDirectorComparison = {
+                sanctuaryBaseline.bloomStrength, sanctuaryBaseline.irisAngle, sanctuaryBaseline.lightTension,
+                sanctuaryBaseline.spectralShift, sanctuaryBaseline.cutAccent};
+            BOO_CHECK(fxNpu.renderHeadlessAbCompareForTest(sanctuaryFrame, imgBloom, imgCalm, w, h, &err, &live10, &script10));
+            BOO_CHECK(live10 != script10);
+            reportDirectorFrameDifference("Sanctuary at 22 s", live10, script10, w, h);
+        }
 
         fxNpu.shutdown();
         d3d.waitForGpu();
@@ -1459,6 +1582,40 @@ bool testFullFilm360sRevealsEditionsAndM7CombinedFailover() {
         BOO_CHECK(fxFilm.renderHeadlessPresentedFrameForTest(ctxEnd, hud, 960, 540, presEnd, &err));
         BOO_CHECK(fxFilm.readLastRenderedCanvasForTest(cleanAtEnd, w, h, &err));
         BOO_CHECK(presEnd != cleanAtEnd);
+    }
+
+    // The scripted Shenzhen broadcast runs the codec but keeps Clean Cinema native.
+    // Only the telemetry corner gets a monitor. V still owns a full-screen comparison.
+    {
+        auto ctx = makeM1TestContext(12480000, 5u);
+        ctx.actIndex = 5u;
+        ctx.showOverlay = false;
+        ctx.showCaptions = false;
+        ctx.hudMode = 3u;
+        HudTelemetrySnapshot hud{};
+        hud.durationSeconds = 360;
+        fxFilm.setDisableCodec(true); // same deterministic shader substitute on any adapter
+        std::vector<uint8_t> cinema, clean, inset, manual;
+        BOO_CHECK(fxFilm.renderHeadlessPresentedFrameForTest(ctx, hud, 960, 540, cinema, &err));
+        BOO_CHECK(fxFilm.readLastRenderedCanvasForTest(clean, w, h, &err));
+        // Pass 4 applies triangular display dither at eight bits; the native image
+        // can move by one output code per component (allow two for sampler precision).
+        for (size_t i = 0; i < clean.size(); ++i) {
+            BOO_CHECK(std::abs(int(cinema[i]) - int(clean[i])) <= 2);
+        }
+        ctx.showOverlay = true;
+        ctx.hudMode = 1u;
+        BOO_CHECK(fxFilm.renderHeadlessPresentedFrameForTest(ctx, hud, 960, 540, inset, &err));
+        const auto row = 70u * 960u * 4u;
+        BOO_CHECK(std::equal(cinema.begin()+row+400u*4u, cinema.begin()+row+700u*4u, inset.begin()+row+400u*4u));
+        BOO_CHECK(!std::equal(cinema.begin()+row+800u*4u, cinema.begin()+row+900u*4u, inset.begin()+row+800u*4u));
+        ctx.showOverlay = false;
+        ctx.hudMode = 3u;
+        fxFilm.setCodecSignalHijackActive(true);
+        BOO_CHECK(fxFilm.renderHeadlessPresentedFrameForTest(ctx, hud, 960, 540, manual, &err));
+        BOO_CHECK(computeMeanAbsDiffRgb01(cinema, manual) > 0.003);
+        fxFilm.setCodecSignalHijackActive(false);
+        fxFilm.setDisableCodec(false);
     }
 
     // 3. M7 Combined Finale (Act 6 @ 300.0s = 14,400,000) multi-engine execution & mid-playback failover
@@ -2309,6 +2466,85 @@ bool testAudioReactiveDriveReachesCanvasDeterministically() {
 #include "city_baseline.hpp"
 #include "film_stress_gate.hpp"
 
+// Uses the same cue, features, frame and director implementation as film playback.
+bool testDirectorComparisonCaptures() {
+    using namespace boo;
+    CaptureComScope com;
+    BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
+    std::filesystem::create_directories(gFilmCaptureDirectory);
+    OpenVinoDirector director;
+    OpenVinoDirectorConfig config;
+    config.modelXmlPath = resolveResourcePath("assets/models/madame_n_director.xml");
+    const auto backend = director.initialize(config);
+    BOO_CHECK(director.isReady());
+    std::cout << "  " << backend.humanReadableReason << "\n";
+    D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, false, &error));
+    auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    spec.renderWidth = 960;
+    spec.renderHeight = 540;
+    for (bool fullFilm : {false, true}) {
+        CueSheet cue;
+        ValidationReport report;
+        BOO_CHECK(loadCueSheetFromFile(resolveResourcePath(fullFilm ? "assets/cues/film_360s.json" : "assets/cues/solo_npu.json"), cue, report));
+        const uint32_t sceneIndex = fullFilm ? 3u : 0u;
+        const auto& scene = cue.scenes.at(sceneIndex);
+        const char* name = fullFilm ? "film168" : "solo22";
+        const auto mode = fullFilm ? ShowVisualMode::FullFilm360s : ShowVisualMode::SoloNPU;
+        M1TaipeiSliceEffect effect(d3d, spec, false, false, false, false, false, false, false, false, mode);
+        BOO_CHECK(effect.probeAndInitialize().status != BackendStatus::Faulted);
+        effect.setAbCompareEngine(AbCompareEngine::NPU);
+        auto ctx = makeM1TestContext((fullFilm ? 168LL : 22LL) * cue.sampleRate, 0);
+        ctx.randomSeed = cue.seed;
+        ctx.qualityPreset = spec.id;
+        ctx.actIndex = sceneIndex;
+        ctx.actProgress = float(ctx.samplePosition - scene.startSample) / float(scene.endSample - scene.startSample);
+        ctx.audioEnvelope = computeAnalyticalAudioBands(ctx.samplePosition, cue.sampleRate, cue.durationSamples, ctx.edition).rms;
+        ctx.hudMode = 2;
+        ScriptedDirector script;
+        script.reset(cue.seed);
+        const auto baseline = script.evaluate(ctx, &scene);
+        NeuralInferenceSample neural;
+        BOO_CHECK(director.infer(script.buildFeatures(ctx, &scene), neural));
+        ctx.moodBloomStrength = neural.controls[0];
+        ctx.moodIrisAngle = neural.controls[1];
+        ctx.moodIntensity = neural.controls[2];
+        ctx.moodPaletteAccent = neural.controls[3];
+        ctx.moodCutAccent = neural.controls[4];
+        ctx.scriptedDirectorComparison = {baseline.bloomStrength, baseline.irisAngle, baseline.lightTension,
+                                         baseline.spectralShift, baseline.cutAccent};
+        uint32_t w = 0, h = 0;
+        std::vector<uint32_t> live10, script10;
+        std::vector<uint8_t> live8, script8, presented;
+        BOO_CHECK(effect.renderHeadlessAbCompareForTest(ctx, live8, script8, w, h, &error, &live10, &script10));
+        BOO_CHECK(live10 != script10);
+        reportDirectorFrameDifference(name, live10, script10, w, h);
+        const auto path = [&](const char* suffix) { return gFilmCaptureDirectory / (std::string(name) + suffix + ".png"); };
+        BOO_CHECK(writeCapturePng(path("_model"), live8, w, h));
+        BOO_CHECK(writeCapturePng(path("_script"), script8, w, h));
+        HudTelemetrySnapshot hud{};
+        hud.directorBackend = classifyDirectorHudBackend(backend);
+        hud.engineStatus[static_cast<size_t>(EngineKind::NPU)] = backend.status;
+        hud.npuCompletedInferences = 1;
+        hud.npuInferMs = neural.latencyMs;
+        hud.mood.isScriptedFallback = false;
+        BOO_CHECK(effect.renderHeadlessPresentedFrameForTest(ctx, hud, w, h, presented, &error));
+        BOO_CHECK(writeCapturePng(path("_comparison"), presented, w, h));
+        // Switching between two identical light programs must leave every 10-bit pixel intact.
+        ctx.scriptedDirectorComparison = {ctx.moodBloomStrength, ctx.moodIrisAngle, ctx.moodIntensity,
+                                         ctx.moodPaletteAccent, ctx.moodCutAccent};
+        BOO_CHECK(effect.renderHeadlessAbCompareForTest(ctx, live8, script8, w, h, &error, &live10, &script10));
+        BOO_CHECK(live10 == script10);
+        effect.shutdown();
+    }
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    return true;
+}
+
+
 } // namespace
 
 bool testQuarantinedGpuRetirement() {
@@ -2343,21 +2579,33 @@ bool testQuarantinedGpuRetirement() {
 int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
-    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, interactiveCaptures = false, validationCaptures = false, filmStress = false, lifecycleTests = false;
     bool cityBaseline = false;
+    bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, interactiveCaptures = false, validationCaptures = false, filmStress = false, lifecycleTests = false;
+    bool effectsCaptures = false, directorCaptures = false;
     for (int arg = 1; arg < argc; ++arg) {
         const std::string option = argv[arg];
         if (option == "--no-activate") noActivate = true;
         else if (option == "--require-debug-layer") gRequireDebugLayer = true;
         else if (option == "--trilogy-captures") trilogyCaptures = true;
-        else if (option == "--film-captures") filmCaptures = true;
         else if (option == "--city-baseline") cityBaseline = true;
+        else if (option == "--film-captures") filmCaptures = true;
         else if (option == "--hero-video-capture") heroVideoCapture = true;
         else if (option == "--interactive-captures") interactiveCaptures = true;
         else if (option == "--validation-captures") validationCaptures = true;
+        else if (option == "--director-captures") directorCaptures = true;
+        else if (option == "--effects-captures") effectsCaptures = true;
         else if (option == "--film-stress") filmStress = true;
         else if (option == "--lifecycle-tests") lifecycleTests = true;
         else if (option == "--capture-dir" && arg + 1 < argc) gFilmCaptureDirectory = argv[++arg];
+        else if (option == "--capture-start-seconds" && arg + 1 < argc) {
+            const std::string value = argv[++arg];
+            uint32_t seconds = 0;
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), seconds);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || seconds > 350) {
+                std::cerr << "--capture-start-seconds must be an integer in [0, 350].\n"; return 2;
+            }
+            gHeroCaptureStartSeconds = seconds;
+        }
         else if (option == "--stress-iterations" && arg + 1 < argc) {
             const std::string value = argv[++arg];
             const auto result = std::from_chars(value.data(), value.data() + value.size(), gFilmStressIterations);
@@ -2367,18 +2615,20 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
-    const int dedicatedSuites = int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline);
-    if (dedicatedSuites > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
-    if (dedicatedSuites && !noActivate) {
+    if (gHeroCaptureStartSeconds && !heroVideoCapture) { std::cerr << "--capture-start-seconds requires --hero-video-capture.\n"; return 2; }
+    if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(effectsCaptures) + int(directorCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
+    if ((trilogyCaptures || filmCaptures || heroVideoCapture || interactiveCaptures || validationCaptures || effectsCaptures || directorCaptures || filmStress || lifecycleTests || cityBaseline) && !noActivate) {
         std::cerr << "Automated integration gates require --no-activate.\n";
         return 2;
     }
     if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
-    if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
     if (cityBaseline) { runTest("CityBaseline", testCityBaseline); return gTestsFailed ? 1 : 0; }
+    if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
     if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", testHeroVideoCaptureGate); return gTestsFailed ? 1 : 0; }
     if (interactiveCaptures) { runTest("InteractiveShowcaseCaptures", testInteractiveShowcaseCaptureGate); return gTestsFailed ? 1 : 0; }
     if (validationCaptures) { runTest("ValidationShowcaseCaptures", testValidationShowcaseCaptures); return gTestsFailed ? 1 : 0; }
+    if (directorCaptures) { runTest("DirectorComparisonCaptures", testDirectorComparisonCaptures); return gTestsFailed ? 1 : 0; }
+    if (effectsCaptures) { runTest("EffectsDetailCaptures", testEffectsDetailCaptures); return gTestsFailed ? 1 : 0; }
     if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }
     if (lifecycleTests) {
         runTest("QuarantinedGpuRetirement", testQuarantinedGpuRetirement);

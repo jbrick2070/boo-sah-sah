@@ -17,6 +17,8 @@ namespace boo {
 
 namespace {
 constexpr const wchar_t* kWindowClassName = L"BooSahSahGlassOrchidWindowClass";
+constexpr UINT kMapAttributionCommand = 0x1D00;
+constexpr const wchar_t* kMapCredit = L"© OpenStreetMap contributors";
 
 std::wstring utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
@@ -63,6 +65,18 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0u) == kMapAttributionCommand) {
+                MessageBoxW(hwnd,
+                    L"Taipei · 臺北\n\n© OpenStreetMap contributors\n"
+                    L"https://www.openstreetmap.org/copyright\nOpen Data Commons ODbL 1.0\n\n"
+                    L"SRTM · NASA / NGA / USGS · Mapzen Terrain Tiles\n"
+                    L"https://registry.opendata.aws/terrain-tiles/\n\n"
+                    L"map-data/TAIPEI-MAP-NOTICE.txt",
+                    L"BOO SAH SAH · Taipei", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            break;
         case WM_DISPLAYCHANGE:
             if (self->isFullscreen()) self->fitFullscreenToMonitor();
             break;
@@ -119,6 +133,7 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case VK_OEM_PERIOD: self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
                     case VK_OEM_6: if (!inExplore) self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
                     case 'G': self->pushCommandFromWndProc(TransportCommand::RevealPreroll); return 0;
+                    case '7': self->pushCommandFromWndProc(TransportCommand::CycleEffectsDetail); return 0;
                     case 'F': self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
                     case VK_BACK: if (inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
                     case 'J': self->pushCommandFromWndProc(TransportCommand::TogglePracticalLamps); return 0;
@@ -291,6 +306,10 @@ bool AppWindow::create(
     if (!hwnd_) {
         return false;
     }
+    if (HMENU systemMenu = GetSystemMenu(hwnd_, FALSE)) {
+        AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(systemMenu, MF_STRING, kMapAttributionCommand, L"Taipei · © OpenStreetMap…");
+    }
 
     RECT actualClient{};
     if (GetClientRect(hwnd_, &actualClient)) {
@@ -462,6 +481,9 @@ bool AppWindow::paintLoadingFromWndProc() {
     SetTextColor(dc, RGB(150, 200, 195));
     RECT bodyRect{r.left, midY + bodyPx / 2, r.right, midY + bodyPx * 3};
     DrawTextW(dc, uiText(UiText::Loading), -1, &bodyRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | rtl);
+    RECT creditsRect{r.left, midY + bodyPx * 3, r.right, r.bottom - bodyPx};
+    SetTextColor(dc, RGB(154, 170, 173));
+    DrawTextW(dc, kMapCredit, -1, &creditsRect, DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dc, oldFont);
     if (titleFont) DeleteObject(titleFont);
     if (bodyFont) DeleteObject(bodyFont);

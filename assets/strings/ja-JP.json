@@ -31,13 +31,16 @@
     "hud.next": "次へ",
     "hud.mode_film": "F:映画",
     "hud.mode_free": "F:フリー",
-    "hud.live_gpu": "GPUライブ",
+    "hud.hardware": "ハードウェア",
     "hud.col_size": "サイズ",
     "hud.col_rate": "レート",
     "hud.state_live": "稼働中",
     "hud.state_sub": "代替",
     "hud.state_off": "オフ",
     "hud.state_fault": "障害",
+    "hud.state_script": "スクリプト",
+    "hud.state_warming": "準備中",
+    "hud.state_idle": "待機",
     "hud.bench": "ベンチ [B]",
     "hud.cam_free": "フリー",
     "hud.cam_film": "映画",
@@ -73,6 +76,7 @@
     "win.act": "幕",
     "win.explore": "探索",
     "win.wipe": "ワイプ",
-    "win.lamp": "ランプ"
+    "win.lamp": "ランプ",
+    "win.effects_detail": "エフェクトの精細度"
   }
 }

@@ -31,13 +31,16 @@
     "hud.next": "下一個",
     "hud.mode_film": "F:電影",
     "hud.mode_free": "F:自由",
-    "hud.live_gpu": "GPU 即時狀態",
+    "hud.hardware": "硬體",
     "hud.col_size": "規模",
     "hud.col_rate": "速率",
     "hud.state_live": "執行中",
     "hud.state_sub": "替代",
     "hud.state_off": "關閉",
     "hud.state_fault": "故障",
+    "hud.state_script": "腳本",
+    "hud.state_warming": "暖機中",
+    "hud.state_idle": "待命",
     "hud.bench": "效能測試 [B]",
     "hud.cam_free": "自由",
     "hud.cam_film": "電影",
@@ -73,6 +76,7 @@
     "win.act": "幕",
     "win.explore": "探索",
     "win.wipe": "對比",
-    "win.lamp": "燈光"
+    "win.lamp": "燈光",
+    "win.effects_detail": "特效細節"
   }
 }

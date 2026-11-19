@@ -66,7 +66,8 @@ enum class AbCompareEngine : uint8_t {
     RT     = 0,
     CUDA   = 1,
     Tensor = 2,
-    Codec  = 3
+    Codec  = 3,
+    NPU    = 4
 };
 
 enum class ShowVisualMode : uint8_t {
@@ -158,6 +159,14 @@ struct AudioReactiveState {
     float level = 0.0f; // overall loudness [0,1]
 };
 
+struct DirectorComparisonControls {
+    float bloomStrength = 0.35f;
+    float irisAngle = 0.5f;
+    float lightTension = 0.25f;
+    float spectralShift = 0.15f;
+    float cutAccent = 0.0f;
+};
+
 struct FrameContext {
     InteractiveView interactive{};
     uint64_t presentationFrame = 0;
@@ -177,6 +186,7 @@ struct FrameContext {
     float moodPaletteAccent = 0.5f;
     float moodBloomStrength = 0.35f;
     float moodCutAccent = 0.0f;
+    DirectorComparisonControls scriptedDirectorComparison{};
     Edition edition = Edition::Family;
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     uint32_t hudMode = 0; // Full, compact, A/B, off
@@ -184,7 +194,12 @@ struct FrameContext {
     bool showCaptions = false;
     bool reducedFlash = false;
     float motionScale = 1.0f;
+    uint32_t effectsDetail = 1; // 0 sparse, 1 standard, 2 dense
 };
+
+inline uint32_t effectiveEffectsDetail(const FrameContext& frame) noexcept {
+    return frame.qualityPreset == QualityPresetId::Safe ? 0u : frame.effectsDetail;
+}
 
 struct IEffect {
     virtual ~IEffect() = default;

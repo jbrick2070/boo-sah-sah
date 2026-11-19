@@ -408,7 +408,6 @@ boo_apply_compiler_flags(boo_core)
 
 # Link strictly against inbox Windows 11 system libraries
 target_link_libraries(boo_core PUBLIC
-    bcrypt
     d3d12
     dxgi
     dxguid
@@ -430,11 +429,10 @@ target_link_libraries(boo_core PUBLIC
 
 # Stage runtime data directories into build folder for convenient direct launch
 add_custom_target(boo_stage_assets ALL
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/shaders" "${CMAKE_BINARY_DIR}/assets/shaders"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/meshes" "${CMAKE_BINARY_DIR}/assets/meshes"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/textures" "${CMAKE_BINARY_DIR}/assets/textures"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/cues" "${CMAKE_BINARY_DIR}/assets/cues"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/strings" "${CMAKE_BINARY_DIR}/assets/strings"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/manifest.json" "${CMAKE_BINARY_DIR}/assets/manifest.json"
@@ -492,6 +490,10 @@ if(BOO_BUILD_TESTS)
 
     add_test(NAME BooCueValidation COMMAND boo_cue_validate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(BooCueValidation PROPERTIES LABELS "unit;validation")
+    add_test(NAME BooWarpPlayback
+        COMMAND "${CMAKE_COMMAND}" "-DAPP=$<TARGET_FILE:boo_sah_sah>" "-DOUT=${CMAKE_BINARY_DIR}/warp-test"
+                -P "${CMAKE_SOURCE_DIR}/tests/integration/warp_playback.cmake")
+    set_tests_properties(BooWarpPlayback PROPERTIES LABELS "integration;software" TIMEOUT 90)
 
     add_executable(boo_integration_tests tests/integration/integration_main.cpp)
     target_link_libraries(boo_integration_tests PRIVATE boo_core windowscodecs gdi32)

@@ -19,13 +19,13 @@ namespace boo {
 
 // Slot ids are shared with assets/shaders/m1_taipei_slice.hlsl (UI_LBL_*). Keep both lists in step.
 enum class UiLabel : uint32_t {
-    Prev, Play, Pause, Next, ModeFilm, ModeFree, LiveGpu, ColSize, ColRate,
+    Prev, Play, Pause, Next, ModeFilm, ModeFree, Hardware, ColSize, ColRate,
     StateLive, StateSub, StateOff, StateFault, Bench, CamFree, CamFilm, Lamp, Wipe, Marbles,
     Sun, Azimuth, Mute, Music, Reset, NextScene, Solo, All,
     Act1, Act2, Act3, Act4, Act5, Act6, Act7,
     SceneBathroom, SceneFaucet, SceneLeaves, SceneOrchid, SceneEnamel, SceneSanctuary, SceneCustom,
     AovAlbedo, AovNormal, AovRoughMetal, AovDirect, AovIndirect, AovReflect, AovRayHeat,
-    LiveCamera, OstSynth, OstCustom,
+    LiveCamera, OstSynth, OstCustom, StateScript, StateWarming, StateIdle,
     Count
 };
 

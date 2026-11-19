@@ -31,13 +31,16 @@
     "hud.next": "SUCC",
     "hud.mode_film": "F:FILM",
     "hud.mode_free": "F:LIBERA",
-    "hud.live_gpu": "GPU IN DIRETTA",
+    "hud.hardware": "HARDWARE",
     "hud.col_size": "DIMENS.",
     "hud.col_rate": "VELOCITÀ",
     "hud.state_live": "ATTIVO",
     "hud.state_sub": "SOST.",
     "hud.state_off": "SPENTO",
     "hud.state_fault": "ERRORE",
+    "hud.state_script": "SCRIPT",
+    "hud.state_warming": "AVVIO",
+    "hud.state_idle": "ATTESA",
     "hud.bench": "BENCH [B]",
     "hud.cam_free": "LIBERA",
     "hud.cam_film": "FILM",
@@ -73,6 +76,7 @@
     "win.act": "Atto",
     "win.explore": "Esplora",
     "win.wipe": "Confronto",
-    "win.lamp": "Lampada"
+    "win.lamp": "Lampada",
+    "win.effects_detail": "Dettaglio effetti"
   }
 }

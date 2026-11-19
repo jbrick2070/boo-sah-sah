@@ -1,0 +1,43 @@
+Taipei map data © OpenStreetMap contributors
+https://www.openstreetmap.org/copyright
+
+The accompanying map-data/taipei_xinyi_buildings.json is the complete
+machine-readable derived database used to generate the mapped Taipei buildings
+and arterial streets. The source map and this derived database are available
+under the Open Data Commons Open Database License (ODbL), version 1.0.
+
+License text: https://opendatacommons.org/licenses/odbl/1-0/
+Individual contents: https://opendatacommons.org/licenses/dbcl/1-0/
+This notice is included at map-data/TAIPEI-MAP-NOTICE.txt.
+
+The central Xinyi extract uses OpenStreetMap snapshots from November 19, 2026.
+It contains building outlines, building parts and major road centerlines within
+a 4 km square around the Taipei 101 spire. The separate northern skyline context
+uses a July 15, 2026 snapshot and includes mapped buildings with an explicit
+height of at least 35 m or at least 11 above-ground floors. Later central
+features take priority wherever the extracts overlap.
+
+Source data were retrieved through the public Overpass API services at
+https://overpass-api.de/api/interpreter and
+https://overpass.kumi.systems/api/interpreter. The database records the UTC
+source timestamps and SHA-256 fingerprints of the responses.
+
+The extract projects WGS84 coordinates to a local azimuthal equidistant plane
+with origin 25.033668 N, 121.564810 E. Coordinates are metres east and north.
+Polygons retain exterior and courtyard rings. Outlines are simplified by up to
+0.75 m before coordinates are rounded to decimetres. Roads are clipped to the
+central area. The compact output retains original OSM way/relation identifiers;
+a suffix identifies separate connected pieces of the same element.
+
+height_m and min_height_m preserve the mapped vertical extents in metres when
+present. levels and min_level preserve mapped above-ground storey information.
+Null means the source supplies no usable value. An OSM height tag may itself
+be an estimate, and converting floors to metres in a rendered model also
+produces an estimate. parent_id is a derived containment match between a part
+and an enclosing building. It can be absent when no outline fully contains it.
+The skyline selection, night lighting, materials and effects are artistic.
+
+OpenStreetMap tag definitions:
+https://wiki.openstreetmap.org/wiki/Key:height
+https://wiki.openstreetmap.org/wiki/Key:building:levels
+https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings

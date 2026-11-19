@@ -2,29 +2,29 @@
 
 ## 1. First-Party Source Code & Procedural Assets
 
-Jeffrey A Brick authored the film, soundtrack, original project code and procedural asset generators. The packed scenes also contain the Poly Haven contributions listed below. The M2 shader incorporates the RTXDI reservoir code identified in section 3.
+All C++20 source files (`src/`, `include/`, `tools/`, `tests/`), HLSL shaders (`assets/shaders/`), procedural bitmap glyph tables and capsule-SDF vector lettering, timeline cue sheets (`assets/cues/`), procedural audio synthesizer arrangements (`src/audio/engine.cpp`), procedural `.bmesh` geometry (`assets/meshes/`, generated via `tools/gen_trilogy_meshes.py`), compact neural stage-director IR weights (`assets/models/madame_n_director.xml` / `.bin`, generated via `tools/gen_madame_n_model.py`), and configuration files (`config/`) in this repository were authored originally for **BOO SAH SAH — The Glass Orchid Protocol**.
 
 - **No third-party font binaries**, commercial music recordings, copyrighted video clips, or scraped external model checkpoints are bundled or distributed.
-- **Asset integrity.** Both `boo_sah_sah.exe --validate-cues` and `boo_cue_validate.exe` verify the bytes of all registered runtime files before validating the cue sheets. In a source checkout, `python tools/refresh_asset_hashes.py --check` also checks the registered tools and reports omissions.
+- **Asset Integrity**: Every distributed shader, cue sheet, packed `.bmesh` mesh, and neural stage-director artifact is enumerated in `assets/manifest.json` with license metadata and SHA-256 verification checksums enforced by `boo_cue_validate.exe`.
 
 | Asset Family | Paths | Provenance | License |
 |---|---|---|---|
-| Runtime & Tools C++20 / HLSL | `src/`, `include/`, `tools/`, `assets/shaders/` | Original first-party project code | MIT (`LICENSE`). The adapted RTXDI portion of `m2_mesh.hlsl` retains the NVIDIA RTX SDKs license (section 3). |
+| Runtime & Tools C++20 / HLSL | `src/`, `include/`, `tools/`, `assets/shaders/` | Original first-party project code | MIT (`LICENSE`) |
 | Cue Schedules & Presets | `assets/cues/*.json`, `config/*` | Original first-party timeline & quality specifications | `config/*`: MIT. `assets/cues/*.json`: CC BY-NC 4.0 (`LICENSE-ASSETS.md`) |
-| Packed 3D Meshes (`.bmesh`) | `assets/meshes/*.bmesh` | Generated deterministically by `tools/gen_trilogy_meshes.py` (procedural + CC0 scans) | CC0-1.0 |
+| Packed 3D Meshes (`.bmesh`) | `assets/meshes/*.bmesh` | Original geometry and CC0 scans; Taipei also incorporates the geographic sources below | CC0-1.0 for original geometry and scans. The Taipei map database has its own terms. |
 | Packed PBR & IBL Textures (`.btex`) | `assets/textures/*.btex` | Generated deterministically by `tools/gen_pbr_textures.py` (authored + CC0 scans) | CC0-1.0 |
 | Presentation Vector Glyphs | `tools/gen_title_glyphs.py`, generated table in `assets/shaders/m1_taipei_slice.hlsl` | 60 original capsule-SDF glyphs: Latin, digits/punctuation, 台北, and 一–七; no third-party font source | MIT (`LICENSE`) |
-| Original 4-Track Soundtrack (OST) | `assets/audio/01_neon_orchid.mp3` .. `04_glass_dragon.mp3` | Original first-party soundtrack (*Neon Orchid*, *Acid Lotus*, *Velvet Cipher*, *Glass Dragon*) | CC BY-NC 4.0 (`LICENSE-ASSETS.md`) |
+| Original 4-Track Soundtrack (OST) | `assets/audio/01_neon_orchid.flac` .. `04_glass_dragon.flac` | Original soundtrack by Jeffrey A Brick (*Neon Orchid*, *Acid Lotus*, *Velvet Cipher*, *Glass Dragon*) | CC BY-NC 4.0 (`LICENSE-ASSETS.md`) |
 | Madame N Stage-Director IR | `assets/models/madame_n_director.{xml,bin,json}` | Generated deterministically by `tools/gen_madame_n_model.py` | MIT (`LICENSE`) |
 | Poly Haven Scanned PBR, Botanical & HDRI Sources | `third_party/polyhaven_cc0/` (`provenance.json`) | Public-domain CC0-1.0 scans & HDRI compiled into `.bmesh` / `.btex` | CC0-1.0 |
 
+### Taipei geographic sources
+
+Taipei map data © OpenStreetMap contributors, licensed under the Open Database License 1.0. The release includes the machine-readable geographic extract and its notice in `map-data/`. [OpenStreetMap copyright and licensing](https://www.openstreetmap.org/copyright)
+
+The Taipei basin relief uses global SRTM terrain data courtesy of the U.S. Geological Survey, distributed through Mapzen Terrain Tiles. The project sampled the N24E121 and N25E121 tiles on a coarser grid around Taipei 101 and flattened low urban surface returns beneath the building geometry. [Mapzen Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) · [Terrain data attribution](https://github.com/tilezen/joerd/blob/master/docs/attribution.md)
+
 The seven distributed mesh assets are `shanghai_trestle`, `shenzhen_evtol`, `taipei_101_hero`, `glass_orchid_hero`, `enamel_cathedral`, `microbial_sanctuary`, and `dawn_alcove`. The four distributed GPU texture-array assets are `pbr_albedo_alpha.btex` (`BC7_UNORM_SRGB`), `pbr_normal.btex` (`BC5_UNORM`), `pbr_ormt.btex` (`BC7_UNORM`), and `pbr_ibl_env.btex` (`RGBA16F`). The limited Chinese title glyphs do not constitute a general Chinese font.
-
-### Manifest fields
-
-Schema 2 records a stable `id`, repository-relative `path`, `kind`, human-readable `provenance`, HTTPS `source_url`, `author`, `license`, `attribution_required`, and the lowercase SHA-256 digest of the exact file bytes. For generated artifacts, the source URL identifies the generator. Packed works that include external material also list its `upstream_sources`. The Poly Haven receipt below records each input file's URL and digest. License expressions describe the packaged artifact, including third-party portions. The attribution flag includes the MIT copyright and permission notice.
-
-The `assets` array describes release files. The `source_tools` array covers the repository's Python and C++ tool sources. To update a digest after an intentional change, review the affected sources and license, run `python tools/refresh_asset_hashes.py`, and inspect the manifest diff.
 
 ### Bundled Public-Domain (`CC0-1.0`) Source Assets (`third_party/polyhaven_cc0/provenance.json`)
 
@@ -74,5 +74,5 @@ The application and native installer statically link the MSVC runtime. Setup use
 2. **NVIDIA Video Codec Driver API (`nvEncodeAPI64.dll`) & Hardware H.264 MFTs** — Installed by GPU drivers (not bundled). Probed on demand when Signal Hijack (`M9`) or `[B]` benchmark sweep is active. Falls back automatically to `SHADER SIGNAL` macroblock quantization when absent or disabled.
 3. **Intel OpenVINO C Runtime (`openvino_c.dll` + `openvino_intel_npu_plugin.dll`)** — Apache-2.0 (`https://github.com/openvinotoolkit/openvino`, license included at `openvino/LICENSE-OpenVINO-Apache-2.0.txt` when staged into `BooSahSah-Setup-win64.exe` via `scripts/package_release.ps1`, or omitted via `-ExcludeOpenVinoRuntime`). Dynamically probed for explicit `"NPU"` (or `"CPU"` fallback) execution of the Madame N stage-director MLP (`M5`). Falls back automatically without stalling playback to the deterministic `ScriptedDirector` when OpenVINO DLLs or Intel NPU hardware are absent.
 4. **Spout2 Receiver Applications (OBS Spout2 Plugin / Resolume)** — Interoperates via standard `SpoutSenderNames` / `SpoutSharedTextureInfo` named shared memory and DXGI shared handles (`M8`) with zero third-party Spout SDK DLLs linked or shipped.
-5. **NVIDIA Real-Time Denoisers (`nrd\NRD.dll`, v4.18.0) & RTXDI Reservoir Sampling (`RTXDI_DIReservoir`)** — Licensed under the **NVIDIA RTX SDKs License** (`https://github.com/NVIDIA-RTX/NRD`, `https://github.com/NVIDIA-RTX/RTXDI`; full license text bundled at `third_party/nvidia_nrd/LICENSE-NVIDIA-NRD.txt` and staged at `nrd/LICENSE-NVIDIA-NRD.txt` by `scripts/package_release.ps1` even when `-ExcludeNrdRuntime` omits the optional DLL). `NRD.dll` is compiled with embedded DXIL compute shaders (`NRD_EMBEDS_DXIL_SHADERS=ON`) and loaded exclusively at runtime via `LoadLibraryExW` + `GetProcAddress` (`src/render/nrd_bridge.cpp`) with zero static PE import dependencies on `boo_sah_sah.exe`, falling back automatically to the built-in D3D12 progressive HLSL accumulator when absent. *Attribution Notice:* **This software contains source code provided by NVIDIA Corporation.**
+5. **NVIDIA Real-Time Denoisers (`nrd\NRD.dll`, v4.18.0) & RTXDI Reservoir Sampling (`RTXDI_DIReservoir`)** — Licensed under the **NVIDIA RTX SDKs License** (`https://github.com/NVIDIA-RTX/NRD`, `https://github.com/NVIDIA-RTX/RTXDI`; full license text bundled at `third_party/nvidia_nrd/LICENSE-NVIDIA-NRD.txt` and staged at `nrd/LICENSE-NVIDIA-NRD.txt` by `scripts/package_release.ps1`, or omitted via `-ExcludeNrdRuntime`). `NRD.dll` is compiled with embedded DXIL compute shaders (`NRD_EMBEDS_DXIL_SHADERS=ON`) and loaded exclusively at runtime via `LoadLibraryExW` + `GetProcAddress` (`src/render/nrd_bridge.cpp`) with zero static PE import dependencies on `boo_sah_sah.exe`, falling back automatically to the built-in D3D12 progressive HLSL accumulator when absent. *Attribution Notice:* **This software contains source code provided by NVIDIA Corporation.**
 6. **Windows XInput Gamepad API (`xinput1_4.dll` / `xinput9_1_0.dll`)** — Inbox Windows library probed dynamically via `LoadLibraryExW` + `GetProcAddress` (`src/app/main.cpp`) with zero static PE import dependencies for optional 6-DOF Explore camera gamepad flight.

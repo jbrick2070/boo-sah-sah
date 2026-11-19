@@ -49,6 +49,7 @@ struct AppSettings {
     std::string language = "auto";
     std::filesystem::path stringsDir = "assets/strings";
     bool reducedFlash = false;
+    uint32_t effectsDetail = 1;
     float motionScale = 1.0f;
     bool legacyM0Visual = false;
     bool startInExploreMode = false;

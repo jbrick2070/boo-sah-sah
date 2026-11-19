@@ -6,27 +6,114 @@
 
 namespace boo {
 
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+double smootherstep01(double x) noexcept {
+    const double u = std::clamp(x, 0.0, 1.0);
+    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+}
+
+float lerpF(double a, double b, double t) noexcept {
+    return static_cast<float>(a + (b - a) * t);
+}
+} // namespace
+
+EvtolPose evaluateEvtolPose(ShowVisualMode mode, float filmSeconds) noexcept {
+    const float u = mode == ShowVisualMode::FullFilm360s
+        ? std::clamp((filmSeconds - 245.0f) * 2.0f, 0.0f, 60.0f)
+        : std::clamp(filmSeconds - 60.0f, 0.0f, 60.0f);
+    EvtolPose pose;
+    pose.hover = static_cast<float>(smootherstep01((u - 21.0f) / 19.0f));
+    pose.touchdown = static_cast<float>(smootherstep01((u - 43.0f) / 15.0f));
+    const float hoverY = 5.45f - 1.15f * pose.touchdown + 0.05f * std::sin(u * 1.5f);
+    pose.position[0] = std::lerp(3.4f - 0.28f * u, 0.55f, pose.hover);
+    pose.position[1] = std::lerp(9.6f - 0.05f * u + 0.16f * std::sin(u * 0.24f), hoverY, pose.hover);
+    pose.position[2] = std::lerp(18.2f - 0.78f * u, -2.0f, pose.hover);
+    pose.yaw = std::lerp(0.88f, -0.92f, pose.hover);
+    pose.pitch = std::lerp(-0.05f, 0.02f, pose.hover);
+    pose.roll = -0.24f * (1.0f - pose.hover);
+    return pose;
+}
+
+void writeModelTransform(float rows[12], const float pos[3], float yaw, float pitch, float roll, float scale) noexcept {
+    // Row-major 3x4: R_y(yaw) * R_x(pitch) * R_z(roll) * scale, then translation.
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cr = std::cos(roll), sr = std::sin(roll);
+    const float transform[12] = {
+        (cy*cr+sy*sp*sr)*scale, (-cy*sr+sy*sp*cr)*scale, sy*cp*scale, pos[0],
+        cp*sr*scale,            cp*cr*scale,             -sp*scale,   pos[1],
+        (-sy*cr+cy*sp*sr)*scale,(sy*sr+cy*sp*cr)*scale, cy*cp*scale, pos[2]
+    };
+    std::copy_n(transform, 12, rows);
+}
+
+namespace {
+void frameAircraft(M1CameraState& cam, ShowVisualMode mode, float seconds, float motionScale) noexcept {
+    const auto pose = evaluateEvtolPose(mode, seconds);
+    const float motion = std::clamp(motionScale, 0.15f, 1.0f);
+    // Track through the bank, cross the nose, then hold the starboard quarter while the nacelles tip upright.
+    const float orbit = static_cast<float>(smootherstep01(pose.hover * 2.0f));
+    const float side = std::lerp(-4.8f, 7.4f, orbit);
+    cam.eye[0] = pose.position[0] + std::lerp(1.6f, side, motion);
+    cam.eye[2] = pose.position[2] - 11.85f - 1.35f * pose.touchdown;
+    // A little lead room on approach. As the aircraft settles, include the touchdown circle below its skids.
+    cam.target[0] = pose.position[0] - 0.65f * (1.0f - pose.hover);
+    cam.target[1] = pose.position[1] + 0.20f - 0.45f * pose.touchdown;
+    cam.target[2] = pose.position[2];
+    cam.fovYRadians = std::lerp(0.75f, 0.70f, pose.hover);
+    // Keep the bay horizon on the upper third during the bank so the far districts remain in shot.
+    // At touchdown, tilt down gently to include the pad and the projected wake below the skids.
+    const float horizonY = std::lerp(0.335f, 0.25f, pose.touchdown);
+    const float horizontalDepth = std::hypot(cam.eye[0] - cam.target[0], cam.eye[2] - cam.target[2]);
+    cam.eye[1] = cam.target[1] + horizontalDepth * std::tan(0.5f * cam.fovYRadians) * (1.0f - 2.0f * horizonY);
+
+    float rows[12];
+    writeModelTransform(rows, pose.position, pose.yaw, pose.pitch, pose.roll);
+    float distanceSquared = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        // Center of the forward canopy in airframe space, above and ahead of the flight-path origin.
+        const float cockpit = rows[axis * 4 + 3] + 0.26f * rows[axis * 4 + 1] - 0.92f * rows[axis * 4 + 2];
+        const float delta = cockpit - cam.eye[axis];
+        distanceSquared += delta * delta;
+    }
+    cam.focusDistance = std::sqrt(distanceSquared);
+    cam.focusWeight = 1.0f;
+}
+} // namespace
+
 Bmesh buildTrilogyFallbackKit(uint32_t kit) {
     Bmesh m; m.proceduralFallback=true;
-    auto box=[&](float x,float y,float z,float sx,float sy,float sz,uint32_t mat) {
+    auto box=[&](float x,float y,float z,float sx,float sy,float sz,uint32_t mat,uint32_t part=0) {
         const uint32_t base=static_cast<uint32_t>(m.vertices.size()),first=static_cast<uint32_t>(m.indices.size());
         constexpr int faces[6][4]={{0,4,6,2},{1,3,7,5},{0,1,5,4},{2,6,7,3},{0,2,3,1},{4,5,7,6}};
         constexpr float normals[6][3]={{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
         for(int f=0;f<6;++f) {for(int j=0;j<4;++j) {int c=faces[f][j];BmeshVertex v{};
             v.positionMaterial[0]=x+((c&1)?sx:-sx);v.positionMaterial[1]=y+((c&2)?sy:-sy);v.positionMaterial[2]=z+((c&4)?sz:-sz);v.positionMaterial[3]=static_cast<float>(mat);
-            for(int a=0;a<3;++a)v.normalPart[a]=normals[f][a];v.uvThicknessRoughness[2]=.03f;v.uvThicknessRoughness[3]=.3f;v.tangentSign[0]=1;v.tangentSign[3]=1;m.vertices.push_back(v);}
+            for(int a=0;a<3;++a)v.normalPart[a]=normals[f][a];v.normalPart[3]=static_cast<float>(part);v.uvThicknessRoughness[2]=.03f;v.uvThicknessRoughness[3]=.3f;v.tangentSign[0]=1;v.tangentSign[3]=1;m.vertices.push_back(v);}
             for(uint32_t i:{0u,1u,2u,0u,2u,3u})m.indices.push_back(base+static_cast<uint32_t>(f)*4+i);}
-        m.submeshes.push_back({first,36,mat,0,base,24});
+        m.submeshes.push_back({first,36,mat,part,base,24});
     };
     if(kit==0) {box(0,-.3f,0,6,.3f,60,1);for(int i=0;i<12;++i){float z=-50+float(i)*10;box(-5,4,z,.25f,4,.3f,0);box(5,4,z,.25f,4,.3f,0);box(0,8,z,5,.2f,.3f,0);}}
-    else if(kit==1) {box(0,-1,0,25,1,25,2);box(0,10,0,2,.8f,4,3);}
+    else if(kit==1) {
+        box(0,-1,0,25,1,25,2);
+        box(0,0,0,.7f,.4f,2.5f,11,100);
+        box(0,.21f,0,4.10f,.09f,.34f,11,100);
+        box(0,.41f,-.85f,.52f,.25f,1.22f,18,100);
+        for (uint32_t i = 0; i < 6; ++i) {
+            const auto& hub = kEvtolRotorPivots[i];
+            box(hub[0],hub[1],hub[2],.18f,.24f,.34f,11,110+i);
+            box(hub[0],hub[1]+.32f,hub[2],.95f,.03f,.09f,37,120+i);
+        }
+    }
     else if(kit==2) {box(0,-4,0,900,4,900,1);for(int i=0;i<8;++i)box(0,130+float(i)*35,0,18,16,18,5);box(0,450,0,4,58,4,5);}
     else if(kit==3) {for(int i=0;i<5;++i){float a=float(i)*1.256637f;box(std::cos(a),std::sin(a),0,.65f,.5f,.08f,3);}}
     else {box(0,-.4f,10,35,.4f,65,1);for(int i=0;i<12;++i){float z=-28+float(i)*5;box(-6,5,z,.5f,5,.5f,0);box(6,5,z,.5f,5,.5f,0);}}
     return m;
 }
 
-M1CameraState evaluateTrilogyCamera(int64_t samplePosition,int32_t sampleRate,bool reducedFlash) noexcept {
+M1CameraState evaluateTrilogyCamera(int64_t samplePosition,int32_t sampleRate,bool reducedFlash,float motionScale) noexcept {
     const float t=static_cast<float>(double(samplePosition)/std::max(1,sampleRate));M1CameraState c;
     auto smooth=[](float x){x=std::clamp(x,0.f,1.f);return x*x*(3-2*x);};
     auto smoother=[](float x){x=std::clamp(x,0.f,1.f);return x*x*x*(x*(x*6-15)+10);};
@@ -47,28 +134,7 @@ M1CameraState evaluateTrilogyCamera(int64_t samplePosition,int32_t sampleRate,bo
         c.fovYRadians=.82f+(.80f-.82f)*sRev;
         c.shotIndex=0;
     } else if(t<120) {
-        // Act 2 (60..120s): Close aerial tracking of banking eVTOL in golden-hour cruise across Shenzhen Bay (75s)
-        // transitioning smoothly to a civic-terrace three-quarter hover/descent framing at night (108s)
-        const float u=t-60.f;
-        const float sHover=smoother((u-21.f)/19.f);
-        const float sTouch=smoother((u-43.f)/15.f);
-        const float acX=(3.4f-0.28f*u)*(1.f-sHover)+(0.55f)*sHover;
-        const float acY=(9.6f-0.05f*u+0.16f*std::sin(u*0.24f))*(1.f-sHover)+(5.45f-1.15f*sTouch+0.05f*std::sin(u*1.5f))*sHover;
-        const float acZ=(18.2f-0.78f*u)*(1.f-sHover)+(-2.0f)*sHover;
-
-        // Slightly elevated aerial chase framing at 75s looks across canopy, wings, forward-tilted rotors, bay canal & skyline crowns
-        const float eyeCruise[3]={acX-5.8f, acY+1.65f, acZ-10.8f};
-        const float tgtCruise[3]={acX+4.8f, acY+2.05f, acZ+22.0f};
-
-        // Elevated civic-concourse three-quarter vantage at 108s frames full unclipped aircraft, Hero Pad, canal & skyline crowns
-        const float eyeHover[3]={7.20f, 6.55f-0.35f*sTouch, -14.80f};
-        const float tgtHover[3]={-1.40f, 6.90f-0.35f*sTouch, 16.00f};
-
-        for(int i=0;i<3;++i) {
-            c.eye[i]=eyeCruise[i]+(eyeHover[i]-eyeCruise[i])*sHover;
-            c.target[i]=tgtCruise[i]+(tgtHover[i]-tgtCruise[i])*sHover;
-        }
-        c.fovYRadians=.76f+(.78f-.76f)*sHover;
+        frameAircraft(c, ShowVisualMode::M2Trilogy180s, t, motionScale);
         c.shotIndex=1;
     } else {
         // Act 3 (120..180s):
@@ -103,26 +169,14 @@ M1CameraState evaluateTrilogyCamera(int64_t samplePosition,int32_t sampleRate,bo
     }
     // Match adjacent camera endpoints with C1 smooth interpolation through cloud/mist cuts.
     if((t>58 && t<60)||(t>118 && t<120)) {
-        const int boundary=t<60?60:120;const auto next=evaluateTrilogyCamera(int64_t(boundary)*sampleRate,sampleRate,reducedFlash);
+        const int boundary=t<60?60:120;const auto next=evaluateTrilogyCamera(int64_t(boundary)*sampleRate,sampleRate,reducedFlash,motionScale);
         const float w=smooth((t-float(boundary-2))/2);
         for(int i=0;i<3;++i){c.eye[i]+=(next.eye[i]-c.eye[i])*w;c.target[i]+=(next.target[i]-c.target[i])*w;}
         c.fovYRadians+=(next.fovYRadians-c.fovYRadians)*w;
+        c.focusWeight *= 1.0f - w;
     }
     return c;
 }
-
-namespace {
-constexpr double kPi = 3.14159265358979323846;
-
-double smootherstep01(double x) noexcept {
-    const double u = std::clamp(x, 0.0, 1.0);
-    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
-}
-
-float lerpF(double a, double b, double t) noexcept {
-    return static_cast<float>(a + (b - a) * t);
-}
-} // namespace
 
 float evaluateM1MusicalEnvelope(int64_t samplePosition, int32_t sampleRate, bool reducedFlash) noexcept {
     if (reducedFlash) {
@@ -472,7 +526,7 @@ M1CameraState evaluateShowCamera(
         return evaluateM1Camera(samplePosition, sampleRate, moodIrisAngle, reducedFlash);
     }
     if (mode == ShowVisualMode::M2Trilogy180s) {
-        return evaluateTrilogyCamera(samplePosition, sampleRate, reducedFlash);
+        return evaluateTrilogyCamera(samplePosition, sampleRate, reducedFlash, motionScale);
     }
 
     const double sr = static_cast<double>(std::max<int32_t>(1, sampleRate));
@@ -567,6 +621,16 @@ M1CameraState evaluateShowCamera(
             c.target[1] = lerpF(32.55, 5.45, sDesc) + static_cast<float>(-0.20 * sScale);
             c.target[2] = lerpF(60.00, 5.50, sDesc);
             c.fovYRadians = lerpF(0.54, 0.78, sDesc) + static_cast<float>(0.05 * sScale);
+            // Ease out of the observatory, look along the basin above the rooflines,
+            // then rejoin the terrace approach before the orchid opens.
+            const float cityView = static_cast<float>(
+                smootherstep01((t - 4.0) / 9.0) * (1.0 - smootherstep01((t - 17.0) / 10.0)));
+            c.eye[0] -= 7.5f * cityView * static_cast<float>(mScale);
+            c.eye[1] += 4.8f * cityView;
+            c.target[0] -= 3.5f * cityView;
+            c.target[1] += 2.0f * cityView;
+            c.target[2] += 36.0f * cityView;
+            c.fovYRadians += .12f * cityView;
             c.revealOpen01 = static_cast<float>(smootherstep01((t - 28.0) / 10.0));
         } else if (t < 100.0) {
             // Act 1 [45..100s): Hall of Mirrors DXR orbital tracking around the 8 mirror stelae & Glass Orchid
@@ -624,19 +688,8 @@ M1CameraState evaluateShowCamera(
         } else if (t < 275.0) {
             // Act 5 [245..275s): Signal Hijack NVENC/NVDEC broadcast intercept over night-lit Shenzhen Bay & eVTOL
             // Strictly ignores moodIrisAngle because allow_director_modulation = false in film_360s.json!
-            const double u = t - 245.0;
-            const double sHover = smootherstep01((u - 8.0) / 14.0);
-            const double acX = (2.6 - 0.22 * u) * (1.0 - sHover) + 0.55 * sHover;
-            const double acY = (8.8 - 0.05 * u) * (1.0 - sHover) + 4.85 * sHover;
-            const double acZ = (14.5 - 0.65 * u) * (1.0 - sHover) + (-2.0) * sHover;
+            frameAircraft(c, mode, static_cast<float>(t), motionScale);
             c.shotIndex = 5;
-            c.eye[0] = lerpF(acX - 5.6, 6.85, sHover);
-            c.eye[1] = lerpF(acY + 1.55, 6.25, sHover);
-            c.eye[2] = lerpF(acZ - 10.2, -14.20, sHover);
-            c.target[0] = lerpF(acX + 4.4, -1.25, sHover);
-            c.target[1] = lerpF(acY + 1.85, 6.55, sHover);
-            c.target[2] = lerpF(acZ + 20.0, 15.50, sHover);
-            c.fovYRadians = 0.78f;
             c.revealOpen01 = 1.0f;
         } else {
             // Act 6 [275..360s): Silicon Rebellion 4-pillar synthesis -> final_everyday_care_reveal @ 342.000s -> 10s architectural move -> Dawn end card
@@ -688,6 +741,7 @@ M1CameraState evaluateShowCamera(
                 out.target[i] = lerpF(out.target[i], next.target[i], w);
             }
             out.fovYRadians = lerpF(out.fovYRadians, next.fovYRadians, w);
+            out.focusWeight *= static_cast<float>(1.0 - w);
             break;
         }
     }

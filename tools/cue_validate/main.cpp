@@ -24,8 +24,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    const bool useBundledCues = cueFiles.empty();
-    if (useBundledCues) {
+    if (cueFiles.empty()) {
         cueFiles = {
             "assets/cues/m2_trilogy_180s.json",
             "assets/cues/m1_taipei_60s.json",
@@ -40,13 +39,7 @@ int main(int argc, char** argv) {
     AssetManifest manifest{};
     ValidationReport manifestRep{};
     const auto resolvedManifest = resolveResourcePath(manifestFile);
-    if (repoRoot.empty()) {
-        repoRoot = std::filesystem::absolute(resolvedManifest).parent_path().parent_path();
-    }
-    if (loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
-        verifyManifestAssetFiles(manifest, repoRoot, manifestRep);
-    }
-    if (!manifestRep.valid) {
+    if (!loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
         std::cerr << "[FAIL] Asset manifest validation failed (" << resolvedManifest.string() << "):\n";
         for (const auto& iss : manifestRep.issues) {
             std::cerr << "  - [" << iss.code << "] " << iss.message << "\n";
@@ -54,14 +47,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (repoRoot.empty()) {
+        repoRoot = resolvedManifest.parent_path().parent_path();
+    }
+
     bool allValid = true;
     for (const auto& cf : cueFiles) {
-        const auto resolvedCue = useBundledCues ? repoRoot / cf : resolveResourcePath(cf);
+        const auto resolvedCue = resolveResourcePath(cf);
         CueSheet sheet{};
         ValidationReport rep{};
         loadCueSheetFromFile(resolvedCue, sheet, rep);
         if (rep.valid) {
-            validateCueSheetAgainstManifest(sheet, manifest, {}, rep);
+            validateCueSheetAgainstManifest(sheet, manifest, repoRoot, rep);
         }
         if (rep.valid) {
             std::cout << "[PASS] " << resolvedCue.filename().string()

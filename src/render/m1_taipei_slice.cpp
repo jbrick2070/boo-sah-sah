@@ -73,6 +73,39 @@ struct alignas(16) GpuM1SceneConstants {
 };
 static_assert(sizeof(GpuM1SceneConstants) == 112, "GpuM1SceneConstants must be 28 DWORDs (112 bytes)");
 
+struct GpuRotorWashConstants {
+    float hubs[6][4]{};  // World-space rotor centers and vortex radius
+    float axisAndMotion[4]{};  // Downwash direction, motion scale (zero outside Shenzhen)
+};
+static_assert(sizeof(GpuRotorWashConstants) == 28 * sizeof(float));
+
+GpuRotorWashConstants rotorWashConstants(ShowVisualMode mode, const FrameContext& ctx, float seconds) {
+    GpuRotorWashConstants wash{};
+    const bool inShenzhen = (mode == ShowVisualMode::M2Trilogy180s && seconds >= 60.0f && seconds < 120.0f) ||
+                            (mode == ShowVisualMode::FullFilm360s && seconds >= 245.0f && seconds < 275.0f);
+    if (!inShenzhen) return wash;
+
+    const EvtolPose pose = evaluateEvtolPose(mode, seconds);
+    float model[12]{};
+    writeModelTransform(model, pose.position, pose.yaw, pose.pitch, pose.roll);
+    const float tilt = pose.rotorTilt();
+    const float ct = std::cos(tilt), st = std::sin(tilt);
+    for (uint32_t row = 0; row < 3; ++row) {
+        const float* m = model + 4 * row;
+        // The articulated mast rises along local (0,cos(tilt),-sin(tilt)).
+        wash.axisAndMotion[row] = -m[1] * ct + m[2] * st;
+        for (uint32_t i = 0; i < 6; ++i) {
+            const auto& p = kEvtolRotorPivots[i];
+            wash.hubs[i][row] = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3] -
+                                0.32f * wash.axisAndMotion[row];
+        }
+    }
+    const float bass = (ctx.reducedFlash || ctx.interactive.accumulate) ? 0.0f : std::clamp(ctx.audioReactive.low, 0.f, 1.f);
+    for (auto& hub : wash.hubs) hub[3] = 0.64f + 0.10f * bass;
+    wash.axisAndMotion[3] = std::clamp(ctx.motionScale, 0.15f, 1.0f);
+    return wash;
+}
+
 struct alignas(16) GpuM1PostConstants {
     float invSize[2]{};
     float bloomThreshold = 1.35f;
@@ -81,8 +114,11 @@ struct alignas(16) GpuM1PostConstants {
     uint32_t ditherSeed = 0;
     float preExposure = 0.92f;
     float bloomIntensity = 0.22f;
+    float focusDistance = 0.0f;
+    float focusWeight = 0.0f;
+    float padding[2]{};
 };
-static_assert(sizeof(GpuM1PostConstants) == 32, "GpuM1PostConstants must be 8 DWORDs (32 bytes)");
+static_assert(sizeof(GpuM1PostConstants) == 48, "GpuM1PostConstants must match the composite shader");
 
 struct alignas(16) GpuM1TensorSubConstants {
     float filmTime = 0.0f;
@@ -1268,7 +1304,7 @@ struct M1TaipeiSliceEffect::Impl {
     void recordBloomAndCompositeToTarget(
         ID3D12GraphicsCommandList* cmd,
         const FrameContext& ctx,
-        float revealOpen01,
+        const M1CameraState& cam,
         ID3D12Resource* targetCanvas,
         uint32_t targetRtvIndex,
         D3D12Context* timestampCtx);
@@ -1286,7 +1322,8 @@ struct M1TaipeiSliceEffect::Impl {
         uint32_t targetRtvIndex,
         uint32_t slot,
         bool isCanonicalPass,
-        bool recordTimestamps);
+        bool recordTimestamps,
+        bool compareDirectorLighting = false);
 
     void recordNv12PackAndReadback(
         ID3D12GraphicsCommandList* cmd,
@@ -2059,9 +2096,7 @@ void M1TaipeiSliceEffect::Impl::updateLiveAuxiliaryStatuses(
     {
         HardwareResult c{};
         c.engine = EngineKind::CUDA;
-        c.requestedBackend = (livePillars[1].workloadItems >= LiveAcceleratorOrchestra::kSoloCudaParticleCount)
-                                 ? "CUDA_Driver_PTX_100K_Mutiny"
-                                 : "CUDA_Driver_PTX_65K_Vortex";
+        c.requestedBackend = "CUDA_Driver_PTX_Particles";
         c.capabilityDetected = !isWarp && liveAccel.cudaHardwareAvailable();
         if (!isWarp && !disableCUDA && presetAllowsCuda && livePillars[1].hardwareVerified) {
             c.status = BackendStatus::Accelerated;
@@ -2344,14 +2379,14 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         }
     }
 
-    // 3. 3D Particle graphics root signature: [0]=28 root constants (b0 ALL), [1]=Root SRV (t0 VS), [2]=1-SRV table (t0 PS)
+    // Particle graphics: shared camera, simulation SRV, scene depth, and optional rotor wake pose.
     {
         D3D12_DESCRIPTOR_RANGE depthSrvRange{};
         depthSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         depthSrvRange.NumDescriptors = 1;
         depthSrvRange.BaseShaderRegister = 0;
 
-        D3D12_ROOT_PARAMETER partParams[3]{};
+        D3D12_ROOT_PARAMETER partParams[4]{};
         partParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         partParams[0].Constants.ShaderRegister = 0;
         partParams[0].Constants.Num32BitValues = sizeof(GpuM1SceneConstants) / 4;
@@ -2366,8 +2401,13 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         partParams[2].DescriptorTable.pDescriptorRanges = &depthSrvRange;
         partParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+        partParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        partParams[3].Constants.ShaderRegister = 1;
+        partParams[3].Constants.Num32BitValues = sizeof(GpuRotorWashConstants) / 4;
+        partParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
         D3D12_ROOT_SIGNATURE_DESC rsDesc{};
-        rsDesc.NumParameters = 3;
+        rsDesc.NumParameters = 4;
         rsDesc.pParameters = partParams;
 
         ComPtr<ID3DBlob> sigBlob, errBlob;
@@ -2907,6 +2947,7 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     M1CameraState& outCam) const noexcept {
     outCam = evaluateShowCamera(visualMode, ctx.samplePosition, ctx.sampleRate, ctx.moodIrisAngle, ctx.reducedFlash, ctx.motionScale);
     const float wCam = std::clamp(ctx.interactive.blendWeight, 0.0f, 1.0f);
+    outCam.focusWeight *= 1.0f - wCam;
     if (wCam > 1e-4f) {
         if (wCam >= 0.9999f) {
             std::memcpy(outCam.eye, ctx.interactive.eye, sizeof(outCam.eye));
@@ -2976,7 +3017,7 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     sc.revealOpen01 = outCam.revealOpen01;
     sc.canvasWidth = canvasW;
     sc.canvasHeight = canvasH;
-    sc.sceneFlags = flags;
+    sc.sceneFlags = flags | (effectiveEffectsDetail(ctx) << 8u);
     sc.emissivePulse = outCam.emissivePulse;
     sc.moodIntensity = ctx.moodIntensity;
     sc.shotIndex = (outCam.shotIndex & 0xFFu) | (meshSlices[4].baseIndex << 8u);
@@ -2990,7 +3031,7 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
 void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
     ID3D12GraphicsCommandList* cmd,
     const FrameContext& ctx,
-    float revealOpen01,
+    const M1CameraState& cam,
     ID3D12Resource* targetCanvas,
     uint32_t targetRtvIndex,
     D3D12Context* timestampCtx) {
@@ -3073,7 +3114,9 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.isFirstDownsample = curAov | ((trilogy && curAov == 0u) ? 0x100u : 0u) | ((ctx.reducedFlash || curAov != 0u) ? 0u : 0x200u);
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
-        pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * revealOpen01);
+        pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * cam.revealOpen01);
+        pc.focusDistance = cam.focusDistance;
+        pc.focusWeight = cam.focusWeight;
         if (curAov == 0u &&
             (visualMode == ShowVisualMode::SoloNPU ||
              (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0))) {
@@ -3103,7 +3146,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
 void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     D3D12Context& d3d,
     ID3D12GraphicsCommandList* cmd,
-    const FrameContext& ctx,
+    const FrameContext& frame,
     bool useDxr,
     bool useCuda,
     bool useTensor,
@@ -3113,7 +3156,17 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     uint32_t targetRtvIndex,
     uint32_t slot,
     bool isCanonicalPass,
-    bool recordTimestamps) {
+    bool recordTimestamps,
+    bool compareDirectorLighting) {
+    FrameContext ctx = frame;
+    if (compareDirectorLighting && !isCanonicalPass) {
+        // Keep the live camera (including its iris offset), geometry, audio and time registered.
+        const auto& scripted = frame.scriptedDirectorComparison;
+        ctx.moodIntensity = scripted.lightTension;
+        ctx.moodPaletteAccent = scripted.spectralShift;
+        ctx.moodBloomStrength = scripted.bloomStrength;
+        ctx.moodCutAccent = scripted.cutAccent;
+    }
     if (isCanonicalPass) {
         if (slot < kFrameSlots) {
             retireVerifySlot(slot);
@@ -3208,7 +3261,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     }
 
     if(trilogyMesh) {
-        trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass);
+        trilogyMesh->record(cmd,ctx,cam,sceneHdr.Get(),sceneDepth.Get(),srvGpuAt(7u).ptr,canvasW,canvasH,slot,useDxr,isCanonicalPass,compareDirectorLighting);
         ID3D12DescriptorHeap* m1Heaps[] = {srvUavHeap.Get()};
         cmd->SetDescriptorHeaps(1, m1Heaps);
     } else {
@@ -3333,6 +3386,11 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     uint32_t reqCudaParticles = LiveAcceleratorOrchestra::kCudaParticleCount;
     uint32_t reqCudaMode = 0u;
     resolveCudaSimParams(ctx.samplePosition, ctx.sampleRate, activeSpecForParticles, reqCudaParticles, reqCudaMode);
+    if (effectiveEffectsDetail(ctx) == 2u && reqCudaMode == 0u) {
+        reqCudaParticles = std::clamp(activeSpecForParticles.particleBudget,
+                                      LiveAcceleratorOrchestra::kCudaParticleCount,
+                                      LiveAcceleratorOrchestra::kMaxCudaParticleCount);
+    }
 
     uint32_t activeParticleCount = LiveAcceleratorOrchestra::kSubParticleCount;
     if (!skipSharedCudaUpdate) {
@@ -3398,12 +3456,16 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         cmd->RSSetScissorRects(1, &scis);
         cmd->OMSetRenderTargets(1, &rtvHdr, FALSE, nullptr);
         cmd->SetGraphicsRootSignature(particlesGfxRootSig.Get());
+        const auto wash = rotorWashConstants(visualMode, ctx, sc.filmTime);
+        cmd->SetGraphicsRoot32BitConstants(3, sizeof(wash) / 4, &wash, 0);
         cmd->SetPipelineState(psoParticles3D.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1SceneConstants) / 4, &sc, 0);
         cmd->SetGraphicsRootShaderResourceView(1, particleGpuBuf->GetGPUVirtualAddress());
         cmd->SetGraphicsRootDescriptorTable(2, srvGpuAt(2u)); // t0 = sceneDepth
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd->DrawInstanced(6u, activeParticleCount, 0u, 0u);
+        // Two wake layers, six rotors, at most three 40-segment strands per rotor.
+        const uint32_t instances = wash.axisAndMotion[3] > 0.0f ? 2u * 6u * 3u * 40u : activeParticleCount;
+        cmd->DrawInstanced(6u, instances, 0u, 0u);
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
@@ -3414,7 +3476,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     recordBloomAndCompositeToTarget(
         cmd,
         ctx,
-        cam.revealOpen01,
+        cam,
         targetCanvas,
         targetRtvIndex,
         recordTimestamps ? &d3d : nullptr);
@@ -3570,7 +3632,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     const LetterboxViewport lb = computeLetterboxViewport16x9(targetWidth, targetHeight);
     const uint32_t abIdx = static_cast<uint32_t>(abEngine) & 3u;
     const bool codecSplitActive = ctx.showOverlay && ctx.hudMode == 2u && (abEngine == AbCompareEngine::Codec);
-    const bool codecViewActive = codecHijackActive || codecSplitActive;
+    const bool cueCodec = isCueSignalHijackAt(ctx.filmTimeSeconds);
+    const bool codecViewActive = codecHijackActive || codecSplitActive || cueCodec;
 
     bool abLeftHwVerified = false;
     switch (abEngine) {
@@ -3578,6 +3641,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     case AbCompareEngine::CUDA:   abLeftHwVerified = livePillars[1].hardwareVerified; break;
     case AbCompareEngine::Tensor: abLeftHwVerified = livePillars[2].hardwareVerified; break;
     case AbCompareEngine::Codec:  abLeftHwVerified = livePillars[3].hardwareVerified && codecHwTexValid; break;
+    case AbCompareEngine::NPU:    abLeftHwVerified = hud.directorBackend == DirectorHudBackend::Npu &&
+                                                      !hud.mood.isScriptedFallback && hud.npuCompletedInferences > 0; break;
     default: break;
     }
 
@@ -3610,14 +3675,20 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (hud.benchHasResults)              flags |= (1u << 7u);
     flags |= ((ctx.hudMode & 3u) << 8u);
     flags |= (abIdx << 10u);
+    if (abEngine == AbCompareEngine::NPU) flags |= (1u << 19u);
+    if (!hud.mood.isScriptedFallback)     flags |= (1u << 20u);
     if (codecHijackActive)                flags |= (1u << 12u);
     if (codecHwTexValid && livePillars[3].hardwareVerified) flags |= (1u << 13u);
     if (abLeftHwVerified)                 flags |= (1u << 14u);
     if (externalNv12Active && externalTexUploaded) flags |= (1u << 15u);
+    if (cueCodec && !codecHijackActive && ctx.showOverlay && ctx.hudMode < 2u)
+        flags |= (1u << 18u);
     pc.hudFlags = flags;
 
     std::copy(hud.recentGpuMs.begin(), hud.recentGpuMs.end(), pc.recentGpuMs);
     pc.volumeAndPadding[0] = hud.volumePercent;
+    pc.volumeAndPadding[1] = hud.npuInferMs;
+    pc.volumeAndPadding[2] = hud.directorRateHz;
 
     const std::array<BackendStatus, kEngineKindCount> liveEngineStatuses = {
         liveRtStatus.status,
@@ -3672,7 +3743,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     for (uint32_t p = 0; p < 4u; ++p) {
         uint32_t nib = 2u; // OFF / STANDBY
         if (p == 3u && !codecViewActive) {
-            nib = 2u;
+            nib = 4u; // IDLE: no codec work was requested for this frame.
         } else if (livePillars[p].status == BackendStatus::Faulted) {
             nib = 3u;
         } else if (livePillars[p].hardwareVerified) {
@@ -3683,6 +3754,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
         modePacked |= ((nib & 0xFu) << (p * 4u));
     }
     pc.livePillarMeta[0] = modePacked;
+    pc.livePillarMeta[1] = static_cast<uint32_t>(hud.directorBackend);
+    pc.livePillarMeta[2] = static_cast<uint32_t>(std::min<uint64_t>(hud.npuCompletedInferences, UINT32_MAX));
 
     const CaptionLine cap = evaluateFilmCaption(
         visualMode, ctx.samplePosition, ctx.sampleRate, ctx.edition, ctx.showCaptions);
@@ -3745,8 +3818,6 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (ctx.interactive.customAudioActive)       interFlags |= (1u << 28u);
     if (ctx.interactive.audioMuted)              interFlags |= (1u << 29u);
     pc.interactiveMeta[0] = interFlags;
-    pc.interactiveMeta[1] = static_cast<uint32_t>(hud.npuCompletedInferences & 0xFFFFu) |
-                            (static_cast<uint32_t>(std::clamp(hud.npuInferMs * 10.0f, 0.0f, 9999.0f) + 0.5f) << 16u);
     const uint32_t trkSlot = std::min<uint32_t>(ctx.interactive.audioTrackSlot, 5u);
     const uint32_t toastA8 = static_cast<uint32_t>(std::clamp(ctx.interactive.audioToastAlpha, 0.0f, 1.0f) * 255.0f + 0.5f);
     pc.interactiveMeta[2] = (trkSlot & 0xFFu) | ((toastA8 & 0xFFu) << 8u);
@@ -3803,7 +3874,7 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         canonDxr, canonCuda, canonTensor,
         false, false,
         impl_->canvasClean.Get(), 5u,
-        slot, true, true);
+        slot, true, true, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
 
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
 
@@ -3862,7 +3933,11 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
 
     // 3. Single-variable A/B Split-Screen comparison pass into isolated canvasAbCompare (never touches CanvasClean!)
     if (abSplitActive) {
-        if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
+        if (abCompareEngine_ == AbCompareEngine::NPU) {
+            impl_->recordScenePipelineToCanvas(
+                d3d_, cmd, ctx, canonDxr, canonCuda, canonTensor, true, true,
+                impl_->canvasAbCompare.Get(), 6u, slot, false, false, true);
+        } else if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx,
                 false, canonCuda, canonTensor,
@@ -3893,7 +3968,7 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         d3d_.width(), d3d_.height(),
         static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()),
         d3d_.swapchainChannelBits(),
-        slot, ctx, hud_, abCompareEngine_, effectiveCodecHijack);
+        slot, ctx, hud_, abCompareEngine_, codecHijackActive_);
 }
 
 bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
@@ -3956,7 +4031,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, wantAbSplice && abCompareEngine_ == AbCompareEngine::NPU);
 
         if (wantAbSplice) {
             const bool abDxr    = (abCompareEngine_ == AbCompareEngine::RT)     ? false : canonDxr;
@@ -3967,7 +4042,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
-                kHeadlessSlot, false, false);
+                kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
         }
 
         transitionResource(cmd, impl_->canvasClean.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -4023,7 +4098,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
         else if (abCompareEngine_ == AbCompareEngine::CUDA)   hwLeftVerified = impl_->livePillars[1].hardwareVerified;
         else if (abCompareEngine_ == AbCompareEngine::Tensor) hwLeftVerified = impl_->livePillars[2].hardwareVerified;
 
-        if (hwLeftVerified) {
+        if (hwLeftVerified || abCompareEngine_ == AbCompareEngine::NPU) {
             std::vector<uint8_t> abRgba;
             std::vector<uint32_t> abRgb10;
             if (!unpackRgb10ReadbackBuffer(
@@ -4031,7 +4106,8 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
                     abRgba, outRgb10 ? &abRgb10 : nullptr, outError)) {
                 return false;
             }
-            const uint32_t splitX = outWidth / 2u;
+            const float split = std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
+            const uint32_t splitX = static_cast<uint32_t>(std::ceil(static_cast<float>(outWidth) * split - 0.5f));
             for (uint32_t y = 0; y < outHeight; ++y) {
                 const size_t rowStart = (static_cast<size_t>(y) * outWidth + splitX) * 4u;
                 const size_t copyBytes = static_cast<size_t>(outWidth - splitX) * 4u;
@@ -4226,14 +4302,14 @@ bool M1TaipeiSliceEffect::renderHeadlessAbCompareForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, abCompareEngine_ == AbCompareEngine::NPU);
 
         impl_->recordScenePipelineToCanvas(
             d3d_, cmd, ctx,
             abDxr, abCuda, abTensor,
             abCuda == canonCuda, abTensor == canonTensor,
             impl_->canvasAbCompare.Get(), 6u,
-            kHeadlessSlot, false, false);
+            kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
 
         transitionResource(cmd, impl_->canvasClean.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         transitionResource(cmd, impl_->canvasAbCompare.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -4323,7 +4399,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false);
+            kHeadlessSlot, true, false, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
 
         if (abSplitActive && abCompareEngine_ != AbCompareEngine::Codec) {
             const bool abDxr    = (abCompareEngine_ == AbCompareEngine::RT)     ? false : canonDxr;
@@ -4334,7 +4410,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
-                kHeadlessSlot, false, false);
+                kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
         }
 
         if (codecViewActive && !impl_->externalNv12Active && !disableCodec_ && !d3d_.isWarp() && impl_->liveAccel.codecHardwareAvailable()) {
@@ -4448,7 +4524,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             dev, cmd,
             presentWidth, presentHeight,
             DXGI_FORMAT_R8G8B8A8_UNORM, 8u,
-            kHeadlessSlot, ctx, effHud, abCompareEngine_, effectiveCodecHijack);
+            kHeadlessSlot, ctx, effHud, abCompareEngine_, codecHijackActive_);
 
         transitionResource(cmd, presTex.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         D3D12_TEXTURE_COPY_LOCATION srcLoc{};

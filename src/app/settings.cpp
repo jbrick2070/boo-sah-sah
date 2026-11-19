@@ -32,6 +32,15 @@ bool parseBoolVal(std::string_view raw, bool& out) {
     return false;
 }
 
+bool parseEffectsDetail(std::string_view raw, uint32_t& out) {
+    const std::string value = toLower(trim(raw));
+    if (value == "low") out = 0;
+    else if (value == "normal") out = 1;
+    else if (value == "high") out = 2;
+    else return false;
+    return true;
+}
+
 std::string unquoteTomlString(std::string_view v) {
     std::string t = trim(v);
     if (t.size() >= 2 && ((t.front() == '"' && t.back() == '"') || (t.front() == '\'' && t.back() == '\''))) {
@@ -81,6 +90,12 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
 
         if (fullKey == "app.title") ioSettings.title = unquoteTomlString(val);
         else if (fullKey == "app.edition") parseEdition(unquoteTomlString(val), ioSettings.edition);
+        else if (fullKey == "display.effects_detail") {
+            if (!parseEffectsDetail(unquoteTomlString(val), ioSettings.effectsDetail)) {
+                if (outError) *outError = "display.effects_detail must be low, normal or high";
+                return false;
+            }
+        }
         else if (fullKey == "app.playback_mode") parsePlaybackMode(unquoteTomlString(val), ioSettings.playbackMode);
         else if (fullKey == "app.cue_file") ioSettings.cuePath = unquoteTomlString(val);
         else if (fullKey == "app.manifest_file") ioSettings.manifestPath = unquoteTomlString(val);
@@ -160,6 +175,12 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             const auto* v = requireNext(i, a); if (!v) return false;
             if (!parseQualityPreset(*v, ioSettings.qualityPreset)) {
                 if (outError) *outError = "Unknown quality preset: " + *v;
+                return false;
+            }
+        } else if (a == "--effects-detail") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            if (!parseEffectsDetail(*v, ioSettings.effectsDetail)) {
+                if (outError) *outError = "Expected --effects-detail low, normal or high";
                 return false;
             }
         } else if (a == "--edition") {
@@ -311,6 +332,7 @@ std::string buildCliHelpText() {
         "  --mode <full|solo_rt|solo_tensor|solo_npu|solo_cuda|finale_loop>\n"
         "  --edition <family|midnight> Story edition\n"
         "  --preset <safe|balanced|showcase|4k_experimental>\n"
+        "  --effects-detail <low|normal|high>  Particle density and fractal detail (7 cycles, Safe uses low)\n"
         "  --width <px> --height <px>  Window client size (default: 1920x1080)\n"
         "  --fullscreen / --windowed   Display mode\n"
         "  --vsync <0|1> / --no-vsync  Vertical sync toggle (default: on)\n"

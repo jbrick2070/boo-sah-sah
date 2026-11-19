@@ -33,13 +33,16 @@
     "hud.next":        { "text": "NEXT",      "note": "Button: next scene. An arrow is drawn beside it.", "max": 6, "maxWide": 3 },
     "hud.mode_film":   { "text": "F:FILM",    "note": "Button showing the camera mode: the film plays on its authored camera. Keep the 'F:' prefix exactly; F is the keyboard key.", "max": 11, "maxWide": 7 },
     "hud.mode_free":   { "text": "F:FREE",    "note": "Button showing the camera mode: the viewer moves the camera freely. Keep the 'F:' prefix exactly.", "max": 11, "maxWide": 7 },
-    "hud.live_gpu":    { "text": "LIVE GPU",  "note": "Heading of a table of what the graphics card is doing right now. GPU stays as GPU.", "max": 19, "maxWide": 11 },
+    "hud.hardware":    { "text": "HARDWARE", "note": "Heading of a table showing active GPU and NPU workloads.", "max": 19, "maxWide": 11 },
     "hud.col_size":    { "text": "SIZE",      "note": "Column heading: size of the workload.", "max": 10, "maxWide": 6 },
     "hud.col_rate":    { "text": "RATE",      "note": "Column heading: throughput (work per second).", "max": 10, "maxWide": 6 },
     "hud.state_live":  { "text": "LIVE",      "note": "Status badge: this engine is running on real hardware now.", "max": 6, "maxWide": 3 },
     "hud.state_sub":   { "text": "SUB",       "note": "Status badge: a substitute (software stand-in) is running because the hardware is not available. Abbreviate 'substitute'.", "max": 6, "maxWide": 3 },
     "hud.state_off":   { "text": "OFF",       "note": "Status badge: this engine is switched off.", "max": 6, "maxWide": 3 },
     "hud.state_fault": { "text": "FLT",       "note": "Status badge: this engine failed (fault / error). Abbreviate.", "max": 6, "maxWide": 3 },
+    "hud.state_script": { "text": "SCRIPT", "note": "The stage director is using its scripted fallback.", "max": 10, "maxWide": 6 },
+    "hud.state_warming": { "text": "WARMUP", "note": "The stage director is preparing the model for inference.", "max": 10, "maxWide": 6 },
+    "hud.state_idle":  { "text": "IDLE", "note": "The codec has no work this frame and can run when a cue or comparison requests it.", "max": 10, "maxWide": 4 },
     "hud.bench":       { "text": "BENCH [B]", "note": "Heading of the benchmark results card. Keep ' [B]' exactly; B is the keyboard key.", "max": 14, "maxWide": 8 },
     "hud.cam_free":    { "text": "FREE",      "note": "Toggle label: free camera is on.", "max": 7, "maxWide": 4 },
     "hud.cam_film":    { "text": "FILM",      "note": "Toggle label: film camera is on.", "max": 7, "maxWide": 4 },
@@ -76,6 +79,7 @@
     "win.act":     { "text": "Act",     "note": "Window title bar: 'Act 3/7'.", "max": 12, "maxWide": 6 },
     "win.explore": { "text": "Explore", "note": "Window title bar key hint: [F]=Explore (free camera).", "max": 14, "maxWide": 6 },
     "win.wipe":    { "text": "Wipe",    "note": "Window title bar key hint: [H]=Wipe (split-screen comparison).", "max": 14, "maxWide": 6 },
-    "win.lamp":    { "text": "Lamp",    "note": "Window title bar key hint: [J]=Lamp.", "max": 14, "maxWide": 6 }
+    "win.lamp":    { "text": "Lamp",    "note": "Window title bar key hint: [J]=Lamp.", "max": 14, "maxWide": 6 },
+    "win.effects_detail": { "text": "Effects detail", "note": "Window title next to key 7 and a detail level from 1 to 3.", "max": 32, "maxWide": 14 }
   }
 }

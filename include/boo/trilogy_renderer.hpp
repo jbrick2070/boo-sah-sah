@@ -14,7 +14,7 @@ public:
     // Pass target resources must be in PIXEL_SHADER_RESOURCE state on entry and exit.
     bool record(void* commandList, const FrameContext& frame, const M1CameraState& camera,
                 void* hdr, void* distance, uint64_t tensorSrv, uint32_t width, uint32_t height,
-                uint32_t slot, bool raytracing, bool canonical);
+                uint32_t slot, bool raytracing, bool canonical, bool compareDirectorLighting = false);
     bool hardwareVerified() const;
     bool nrdActive() const;
     // 0 = Deterministic Spatial Cross-Bilateral, 1 = NRD REBLUR_DIFFUSE_SPECULAR Motion, 2 = NRD REFERENCE PT Accum

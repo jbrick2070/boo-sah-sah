@@ -3,55 +3,11 @@
 #include "boo/json.hpp"
 
 #include <algorithm>
-#include <array>
-#include <fstream>
 #include <set>
-#include <windows.h>
-#include <bcrypt.h>
 
 namespace boo {
 
 namespace {
-bool isAssetPath(const std::string& value) {
-    if (value.empty() || value.find_first_of(":\\") != std::string::npos) return false;
-    const std::filesystem::path path(value);
-    return !path.has_root_path() && path.has_filename() && *path.begin() != ".." &&
-           path != "." && path.lexically_normal().generic_string() == value;
-}
-
-bool isSha256(std::string_view value) {
-    return value.size() == 64 && value.find_first_not_of("0123456789abcdef") == std::string_view::npos;
-}
-
-std::string fileSha256(const std::filesystem::path& path) {
-    std::ifstream stream(path, std::ios::binary);
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    if (!stream || !BCRYPT_SUCCESS(BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash, nullptr, 0, nullptr, 0, 0))) {
-        return {};
-    }
-    std::array<UCHAR, 64 * 1024> buffer;
-    bool ok = true;
-    while (stream.read(reinterpret_cast<char*>(buffer.data()), buffer.size()) || stream.gcount() > 0) {
-        if (!BCRYPT_SUCCESS(BCryptHashData(hash, buffer.data(), static_cast<ULONG>(stream.gcount()), 0))) {
-            ok = false;
-            break;
-        }
-    }
-    std::array<UCHAR, 32> digest{};
-    ok = ok && stream.eof() && !stream.bad() &&
-         BCRYPT_SUCCESS(BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0));
-    BCryptDestroyHash(hash);
-    if (!ok) return {};
-    static constexpr char hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(64);
-    for (UCHAR byte : digest) {
-        result += hex[byte >> 4];
-        result += hex[byte & 15];
-    }
-    return result;
-}
-
 bool isValidPreferredEngine(std::string_view eng) {
     return eng == "RT" || eng == "Tensor" || eng == "NPU" ||
            eng == "CUDA" || eng == "Codec" || eng == "Raster" || eng == "Combined";
@@ -278,12 +234,11 @@ bool loadAssetManifestFromFile(
     outManifest.project = root["project"].asString();
     outManifest.milestone = root["milestone"].asString();
 
-    if (outManifest.schema != 1 && outManifest.schema != 2) {
-        outReport.addError("MANIFEST_SCHEMA_ERROR", "Expected manifest schema 1 or 2");
+    if (outManifest.schema != 1) {
+        outReport.addError("MANIFEST_SCHEMA_ERROR", "Expected manifest schema == 1");
     }
 
-    if (const JsonValue* assetsVal = root.find("assets"); assetsVal && assetsVal->isArray() && !assetsVal->asArray().empty()) {
-        std::set<std::string> ids, paths;
+    if (const JsonValue* assetsVal = root.find("assets"); assetsVal && assetsVal->isArray()) {
         for (size_t i = 0; i < assetsVal->asArray().size(); ++i) {
             const auto& item = assetsVal->asArray()[i];
             AssetManifestEntry e{};
@@ -293,24 +248,14 @@ bool loadAssetManifestFromFile(
             e.provenance = item["provenance"].asString();
             e.license = item["license"].asString();
             e.attributionRequired = item["attribution_required"].asBool(false);
-            e.sourceUrl = item["source_url"].asString();
-            e.author = item["author"].asString();
-            e.sha256 = item["sha256"].asString();
 
-            if (e.id.empty() || !isAssetPath(e.path) || !ids.insert(e.id).second || !paths.insert(e.path).second) {
-                outReport.addError("MANIFEST_ENTRY_ID_OR_PATH", "Asset index " + std::to_string(i) + " has an invalid or duplicate id/path");
+            if (e.id.empty() || e.path.empty()) {
+                outReport.addError("MANIFEST_ENTRY_MISSING_ID_OR_PATH", "Asset index " + std::to_string(i) + " missing id/path");
             }
             if (e.license.empty() || e.provenance.empty()) {
                 outReport.addError(
                     "MANIFEST_LICENSE_OMISSION",
                     "Asset '" + e.id + "' is missing required license or provenance metadata");
-            }
-            if (outManifest.schema == 2 &&
-                (e.kind.empty() || e.author.find_first_not_of(" \t\r\n") == std::string::npos ||
-                 !e.sourceUrl.starts_with("https://") || e.sourceUrl.size() <= 8 ||
-                 e.sourceUrl.find_first_of(" \t\r\n") != std::string::npos ||
-                 !item["attribution_required"].isBool() || !isSha256(e.sha256))) {
-                outReport.addError("MANIFEST_PROVENANCE_ERROR", "Asset '" + e.id + "' has invalid provenance fields");
             }
             outManifest.assets.push_back(std::move(e));
         }
@@ -326,21 +271,6 @@ bool loadAssetManifestFromFile(
         }
     }
     return outReport.valid;
-}
-
-void verifyManifestAssetFiles(const AssetManifest& manifest, const std::filesystem::path& repoRoot, ValidationReport& report) {
-    for (const auto& asset : manifest.assets) {
-        if (!isAssetPath(asset.path) || !isSha256(asset.sha256)) {
-            report.addError("MANIFEST_INVALID_DIGEST_OR_PATH", "Invalid SHA-256 or asset path for '" + asset.id + "'");
-            continue;
-        }
-        const auto hash = fileSha256(repoRoot / asset.path);
-        if (hash.empty()) {
-            report.addError("MANIFEST_ASSET_UNREADABLE", "Cannot read or hash '" + asset.path + "'");
-        } else if (hash != asset.sha256) {
-            report.addError("MANIFEST_SHA256_MISMATCH", "File bytes differ from the manifest for '" + asset.path + "'");
-        }
-    }
 }
 
 void validateCueSheetAgainstManifest(

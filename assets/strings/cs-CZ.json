@@ -31,13 +31,16 @@
     "hud.next": "DALŠÍ",
     "hud.mode_film": "F:FILM",
     "hud.mode_free": "F:VOLNÁ",
-    "hud.live_gpu": "GPU ŽIVĚ",
+    "hud.hardware": "HARDWARE",
     "hud.col_size": "VELIKOST",
     "hud.col_rate": "RYCHLOST",
     "hud.state_live": "BĚŽÍ",
     "hud.state_sub": "NÁHR.",
     "hud.state_off": "VYP.",
     "hud.state_fault": "CHYBA",
+    "hud.state_script": "SKRIPT",
+    "hud.state_warming": "PŘÍPRAVA",
+    "hud.state_idle": "V KLIDU",
     "hud.bench": "TEST [B]",
     "hud.cam_free": "VOLNÁ",
     "hud.cam_film": "FILM",
@@ -73,6 +76,7 @@
     "win.act": "Dějství",
     "win.explore": "Průzkum",
     "win.wipe": "Porovnání",
-    "win.lamp": "Lampy"
+    "win.lamp": "Lampy",
+    "win.effects_detail": "Podrobnost efektů"
   }
 }

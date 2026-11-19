@@ -31,13 +31,16 @@
     "hud.next": "İLERİ",
     "hud.mode_film": "F:FİLM",
     "hud.mode_free": "F:SERBEST",
-    "hud.live_gpu": "CANLI GPU",
+    "hud.hardware": "DONANIM",
     "hud.col_size": "BOYUT",
     "hud.col_rate": "HIZ",
     "hud.state_live": "CANLI",
     "hud.state_sub": "YEDEK",
     "hud.state_off": "KAPALI",
     "hud.state_fault": "HATA",
+    "hud.state_script": "BETİK",
+    "hud.state_warming": "HAZIRLIK",
+    "hud.state_idle": "BOŞTA",
     "hud.bench": "BENCHMARK [B]",
     "hud.cam_free": "SERBEST",
     "hud.cam_film": "FİLM",
@@ -73,6 +76,7 @@
     "win.act": "Perde",
     "win.explore": "Keşfet",
     "win.wipe": "Karşılaştır",
-    "win.lamp": "Lamba"
+    "win.lamp": "Lamba",
+    "win.effects_detail": "Efekt ayrıntısı"
   }
 }

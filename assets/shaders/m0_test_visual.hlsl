@@ -214,7 +214,7 @@ float4 PSMain(VSOut pin) : SV_Target
     const float3 colEnamel   = float3(0.96, 0.95, 0.91);
 
     // Subtle act-specific angular modulation
-    const float t = gFilmTime;
+    const float t = gFilmTime * (((gFlags & 512u) != 0u) ? 0.35 : 1.0);
     const float r = length(p);
     const float a = atan2(p.y, p.x);
 
@@ -236,6 +236,7 @@ float4 PSMain(VSOut pin) : SV_Target
 
     // Audio-synchronized enamel crystal ripple rings
     float beatRing = exp(-28.0 * abs(r - (0.18 + 0.62 * frac(t * 0.5)))) * (0.35 + 0.95 * gAudioEnvelope);
+    if ((gFlags & 256u) != 0u) beatRing = 0.0;
 
     // Iridescent spectral mix driven by Scripted Director mood state
     float3 spectral = lerp(colJade, colOrchid, 0.5 + 0.5 * sin(3.0 * a + t * 0.7 + gSpectralShift * 3.14159));

@@ -31,13 +31,16 @@
     "hud.next": "अगला",
     "hud.mode_film": "F:फ़िल्म",
     "hud.mode_free": "F:मुक्त",
-    "hud.live_gpu": "लाइव GPU",
+    "hud.hardware": "हार्डवेयर",
     "hud.col_size": "आकार",
     "hud.col_rate": "दर",
     "hud.state_live": "चालू",
     "hud.state_sub": "विकल्प",
     "hud.state_off": "बंद",
     "hud.state_fault": "त्रुटि",
+    "hud.state_script": "स्क्रिप्ट",
+    "hud.state_warming": "तैयारी",
+    "hud.state_idle": "निष्क्रिय",
     "hud.bench": "बेंचमार्क [B]",
     "hud.cam_free": "मुक्त",
     "hud.cam_film": "फ़िल्म",
@@ -73,6 +76,7 @@
     "win.act": "अंक",
     "win.explore": "घूमें",
     "win.wipe": "तुलना",
-    "win.lamp": "लैंप"
+    "win.lamp": "लैंप",
+    "win.effects_detail": "इफ़ेक्ट का विवरण स्तर"
   }
 }

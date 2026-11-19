@@ -31,13 +31,16 @@
     "hud.next": "下一个",
     "hud.mode_film": "F:电影",
     "hud.mode_free": "F:自由",
-    "hud.live_gpu": "GPU 实时状态",
+    "hud.hardware": "硬件",
     "hud.col_size": "规模",
     "hud.col_rate": "速率",
     "hud.state_live": "运行中",
     "hud.state_sub": "替代",
     "hud.state_off": "关闭",
     "hud.state_fault": "故障",
+    "hud.state_script": "脚本",
+    "hud.state_warming": "预热中",
+    "hud.state_idle": "空闲",
     "hud.bench": "基准测试 [B]",
     "hud.cam_free": "自由",
     "hud.cam_film": "电影",
@@ -73,6 +76,7 @@
     "win.act": "幕",
     "win.explore": "探索",
     "win.wipe": "对比",
-    "win.lamp": "灯光"
+    "win.lamp": "灯光",
+    "win.effects_detail": "特效细节"
   }
 }
