@@ -1,0 +1,13 @@
+shot,cue,film_id,scene,seconds,sample,frame_count,gpu_p50_ms,gpu_p95_ms,peak_process_local_bytes
+film_taipei_8s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,taipei_intro,8,384000,60,5.574688,6.033632,1558503424
+film_mirror_95s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,mirror_intelligence,95,4560000,60,7.159520,9.381664,1559420928
+film_neural_145s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,neural_velvet,145,6960000,60,6.120352,6.627872,1559420928
+film_sanctuary_168s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,madame_n,168,8064000,60,7.155168,9.214944,1559420928
+film_sanctuary_176s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,madame_n,176,8448000,60,7.954944,8.529472,1559420928
+film_particle_225s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,particle_mutiny,225,10800000,60,7.558784,8.161376,1559420928
+film_shenzhen_258s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,signal_hijack,258,12384000,60,6.515488,6.938400,1578831872
+film_orchid_finale_318s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,silicon_rebellion,318,15264000,60,7.381312,7.925408,1578831872
+film_dawn_352s,assets/cues/film_360s.json,boo-sah-sah-glass-orchid,silicon_rebellion,352,16896000,60,8.380000,8.887040,1578831872
+trilogy_shanghai_15s,assets/cues/m2_trilogy_180s.json,boo-sah-sah-m2-trilogy-180s,shanghai_trestle,15,720000,60,6.693632,7.157888,1486479360
+trilogy_taipei_168s,assets/cues/m2_trilogy_180s.json,boo-sah-sah-m2-trilogy-180s,taipei_sanctuary,168,8064000,60,6.216416,6.668608,1486479360
+trilogy_taipei_176s,assets/cues/m2_trilogy_180s.json,boo-sah-sah-m2-trilogy-180s,taipei_sanctuary,176,8448000,60,4.319776,4.598944,1486479360
