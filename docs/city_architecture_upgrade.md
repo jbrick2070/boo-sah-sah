@@ -2,6 +2,8 @@
 
 Phase 0 records what commit `5ff4665` renders. The graphics target is a Taipei skyline with recognizable landmark spacing, a readable aircraft against the Shenzhen skyline, and street-level detail that holds up as the camera moves. Keep the seven-scene, 360-second film, its camera and soundtrack, both editions, Explore, optional accelerators and clean Spout output as acceptance references.
 
+The instancing pass has matched city frames, draw counts, ray-tracing and raster measurements for the two procedural districts. [Phase 1 measurements](baselines/city-phase1/README.md)
+
 ## Which shots to compare
 
 Always identify both cue and timestamp. The same sample in two cue sheets can show a different place. The film's seven scene boundaries are 0, 45, 100, 150, 195, 245, 275 and 360 seconds. Its three authored reveals occur at 36, 175 and 342 seconds. [Film cues](../assets/cues/film_360s.json) · [Trilogy cues](../assets/cues/m2_trilogy_180s.json) · [Camera paths](../src/render/m1_scene.cpp) · [Active geometry and transforms](../src/render/trilogy_renderer.cpp)
