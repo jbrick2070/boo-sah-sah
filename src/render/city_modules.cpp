@@ -40,6 +40,7 @@ struct ModuleBuilder {
     uint32_t part;
     std::map<std::array<uint32_t,3>, Surface> surfaces;
     uint32_t detailTier=0,detailSolid=0;
+    Point facadeMeters{};
 
     void quad(uint32_t mat, Point a, Point b, Point c, Point d) {
         auto& surface = surfaces[{mat,detailTier,detailTier ? detailSolid : 0u}];
@@ -47,6 +48,11 @@ struct ModuleBuilder {
         const Point tangent = unit(subtract(b, a));
         const Point normal = unit(cross(subtract(b, a), subtract(c, a)));
         const std::array<Point,4> positions{a,b,c,d};
+        auto tileSpan = [&](Point edge) {
+            if (facadeMeters[0] == 0.f) return 1.f;
+            return std::hypot(edge[0]*facadeMeters[0],edge[1]*facadeMeters[1],edge[2]*facadeMeters[2]);
+        };
+        const float uSpan = tileSpan(subtract(b,a)), vSpan = tileSpan(subtract(d,a));
         for (size_t i = 0; i < positions.size(); ++i) {
             BmeshVertex vertex{};
             std::copy_n(positions[i].begin(),3,vertex.positionMaterial);
@@ -55,8 +61,8 @@ struct ModuleBuilder {
             vertex.positionMaterial[3] = static_cast<float>(mat);
             vertex.normalPart[3] = static_cast<float>(part);
             vertex.tangentSign[3] = 1.f;
-            vertex.uvThicknessRoughness[0] = i == 1 || i == 2 ? 1.f : 0.f;
-            vertex.uvThicknessRoughness[1] = i >= 2 ? 1.f : 0.f;
+            vertex.uvThicknessRoughness[0] = i == 1 || i == 2 ? uSpan : 0.f;
+            vertex.uvThicknessRoughness[1] = i >= 2 ? vSpan : 0.f;
             vertex.uvThicknessRoughness[2] = .015f;
             vertex.uvThicknessRoughness[3] = mat == 2 ? .58f : .29f;
             surface.vertices.push_back(vertex);
@@ -83,6 +89,21 @@ struct ModuleBuilder {
     void box(uint32_t mat, float x, float z, float w, float d, float bottom, float top) {
         loft(mat,{x,z,w,d,bottom},{x,z,w,d,top});
     }
+    void tank(uint32_t mat,float x,float z,float w,float d,float bottom,float top) {
+        if(detailTier) ++detailSolid;
+        constexpr std::array<Vec2,8> outline{{{-.21f,-.5f},{-.5f,-.21f},{-.5f,.21f},{-.21f,.5f},
+                                              {.21f,.5f},{.5f,.21f},{.5f,-.21f},{.21f,-.5f}}};
+        std::array<Point,8> lo,hi;
+        for(size_t i=0;i<8;++i) {
+            lo[i]={x+w*outline[i][0],bottom,z+d*outline[i][1]};
+            hi[i]={lo[i][0],top,lo[i][2]};
+        }
+        for(size_t i=0;i<8;++i) quad(mat,lo[i],lo[(i+1)%8],hi[(i+1)%8],hi[i]);
+        for(const auto& q : std::array<std::array<int,4>,3>{{{0,1,2,3},{0,3,4,7},{4,5,6,7}}}) {
+            quad(mat,hi[q[0]],hi[q[1]],hi[q[2]],hi[q[3]]);
+            quad(mat,lo[q[3]],lo[q[2]],lo[q[1]],lo[q[0]]);
+        }
+    }
     Bmesh finish() const {
         Bmesh mesh;
         mesh.bounds = {1.e20f,1.e20f,1.e20f,-1.e20f,-1.e20f,-1.e20f};
@@ -104,15 +125,87 @@ struct ModuleBuilder {
     }
 };
 
+// Fixed-size, street-facing bays. The shell is recessed behind the ground-floor
+// arcade so the supporting columns and daylight under the occupied floor read
+// in silhouette. These dimensions are baked into the UVs as metres.
+constexpr uint32_t kWalkup = 5, kShop = 6;
+constexpr float kFrontage = 8.4f, kPlotDepth = 17.4f;
+float streetHeight(uint32_t style) { return style == kWalkup ? 16.4f : 10.f; }
+
+Bmesh streetFront(uint32_t style, uint32_t lod) {
+    ModuleBuilder b{62u,{}};
+    const float height=streetHeight(style);
+    b.facadeMeters={kFrontage,height,kPlotDepth};
+    auto block=[&](uint32_t mat,float x,float z,float w,float depth,float y0,float y1) {
+        b.box(mat,x/kFrontage,z/kPlotDepth,w/kFrontage,depth/kPlotDepth,y0/height,y1/height);
+    };
+    constexpr float front=-kPlotDepth/2, inner=front+3.64f, back=kPlotDepth/2;
+    // A corner bay at each side supports the slab. The shop glazing sits 3.64 m
+    // behind the front edge, with 3.33 m clear to the underside of the soffit.
+    block(13,0,(inner+back)*.5f,kFrontage-.12f,back-inner,0,3.60f);
+    for(float x:{-3.92f,0.f,3.92f}) block(2,x,front+.37f,.38f,.42f,0,3.34f);
+    block(28,0,0,kFrontage,kPlotDepth,3.33f,3.62f);
+    const uint32_t skin=style==kWalkup ? 28u : 24u;
+    block(13,0,.85f,kFrontage-.18f,kPlotDepth-1.76f,3.60f,height);
+    for (int i=0; i<(style==kWalkup ? 4 : 2); ++i) {
+        const float floor=3.60f+i*3.20f;
+        block(skin,0,front+.73f,kFrontage-.12f,1.46f,floor,floor+.25f);
+        for(float x:{-3.9f,3.9f}) block(skin,x,front+.91f,.36f,1.28f,floor+.24f,floor+3.17f);
+        // Balcony aprons and corner returns, with room to see into the recess.
+        block(skin,-1.92f,front+.16f,3.62f,.22f,floor+.24f,floor+1.02f);
+    }
+    block(skin,0,.02f,kFrontage,kPlotDepth-.04f,height-.13f,height+.18f);
+    if (style==kWalkup) {
+        block(24,1.50f,3.5f,3.2f,3.8f,height+.18f,height+1.72f);
+        b.tank(11,-1.7f/kFrontage,3.6f/kPlotDepth,1.7f/kFrontage,1.8f/kPlotDepth,
+               (height+.18f)/height,(height+1.50f)/height);
+    } else {
+        // The contemporary shop row has an open roof stair and a stepped sign
+        // parapet. Keep the ornamental historic Dihua frontage out of Xinyi.
+        block(skin,0,front+.36f,5.6f,.56f,height+.18f,height+.64f);
+        block(skin,0,front+.36f,3.0f,.56f,height+.64f,height+.99f);
+    }
+    if(lod<2) {
+        b.detailTier=2;
+        block(15,.92f,inner-.07f,4.4f,.12f,2.28f,2.88f);
+        block(11,3.14f,front+.39f,.74f,.52f,3.65f,4.73f);
+    }
+    if(lod==0) {
+        b.detailTier=1;
+        for(int floor=0;floor<(style==kWalkup ? 4 : 2);++floor) {
+            const float y=3.60f+3.20f*floor;
+            for(float x:{.25f,1.26f,2.27f}) block(11,x,front+.88f,.04f,.10f,y+.85f,y+2.78f);
+            block(11,-2.45f,front+.87f,1.15f,.62f,y+1.04f,y+1.66f);
+        }
+    }
+    return b.finish();
+}
+
 // Major changes in profile persist in all three LODs. Only the finer projections
 // disappear, so a direct seek across a threshold gives the same skyline silhouette.
 Bmesh makeModule(uint32_t kit, uint32_t style, uint32_t glazing, uint32_t lod) {
+    if (kit==2 && (style==kWalkup || style==kShop)) return streetFront(style,lod);
     ModuleBuilder b{kit==1 ? 60u : 61u, {}};
     const uint32_t trim = kit==1 ? (style==1 ? 6u : 16u) : 15u;
     if (style == 4) {
         // Ground extension under the outlying blocks of the original compact set.
         b.box(2,0,0,1,1,0,1);
         return b.finish();
+    } else if (style == 7) {
+        // An inhabited service stair and a pair of steel water cisterns on
+        // the shared roof. The tank profiles survive the distant skyline.
+        b.box(2,0,0,.80f,.77f,0,.16f);
+        b.box(glazing,-.22f,.08f,.31f,.58f,.14f,.78f);
+        b.box(2,-.22f,.08f,.35f,.61f,.77f,.84f);
+        b.tank(11,.16f,-.14f,.24f,.28f,.15f,.62f);
+        b.tank(11,.18f,.19f,.23f,.26f,.15f,.51f);
+    } else if (style == 8) {
+        // Narrow parapet blades and a shadowed mechanical floor below a
+        // warm top slab distinguish commercial offices from the walk-ups.
+        b.box(glazing,0,0,.76f,.71f,0,.34f);
+        for(float x:{-.30f,-.11f,.11f,.30f})
+            b.loft(11,{x,.02f,.07f,.62f,.33f},{x,.11f,.065f,.38f,1.02f});
+        b.box(trim,0,.11f,.72f,.40f,.91f,.97f);
     } else if (style == 3) {
         // A raised mechanical lantern. The open middle retains sky between the fins.
         b.box(glazing,0,.09f,.86f,.62f,0,.43f);
@@ -171,7 +264,7 @@ Bmesh makeModule(uint32_t kit, uint32_t style, uint32_t glazing, uint32_t lod) {
         b.detailTier=2;
         if(lod<2) b.box(2,.035f,.065f,.90f,.82f,.723f,.741f);
     }
-    if(lod == 0 && style != 3) {
+    if(lod == 0 && style < 3) {
         b.detailTier=1;
         // Recessed ground-floor arcade behind street columns and a shade canopy.
         b.box(2,0,-.48f,.99f,.14f,.115f,.133f);
@@ -259,6 +352,28 @@ struct Site {
     float bottom,height;
     uint32_t part,material,style,seed;
 };
+
+void addXinyiStreetFronts(std::vector<Site>& sites) {
+    struct Row { float x, z; unsigned bays; bool facesNorth; };
+    // The original podiums start north of Z=21.8. The rows occupy their own
+    // parcels on either side of the Z=18.5 avenue, with a passage at each end.
+    // The short western row stays beyond the edge of the orchid terrace.
+    constexpr Row rows[]={{-3.3f,20.65f,9,false}, {8.85f,20.65f,8,false},
+                          {-3.3f,16.24f,8,true}, {-3.3f,34.05f,4,true},
+                          {19.45f,34.05f,7,true}, {-12.3f,7.6f,5,false}};
+    constexpr float scale=.08f;
+    for(const auto& row:rows) {
+        for(unsigned bay=0;bay<row.bays;++bay) {
+            const float x=row.x+.75f*bay;
+            const uint32_t seed=mixBits(static_cast<uint32_t>(std::lround((x+64.f)*100.f))^
+                                        mixBits(static_cast<uint32_t>(std::lround(row.z*100.f))));
+            const uint32_t style=seed%3u ? kWalkup : kShop;
+            Footprint plot{(x-18.5f)/scale,(row.z-60.f)/scale,kFrontage,kPlotDepth,
+                           row.facesNorth ? -1.f : 1.f,0.f};
+            sites.push_back({plot,.01f/scale,streetHeight(style),2,13,style,seed});
+        }
+    }
+}
 
 void addLegacyDistricts(std::vector<Site>& sites,uint32_t kit) {
     const bool taipei=kit==2;
@@ -362,7 +477,8 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
                       && std::abs(wx-originX)+std::abs(wz-originZ)>6.f) {
                 site.bottom=top-.025f/scale;
                 site.height=std::clamp(.23f*height,1.7f/scale,5.5f/scale);
-                site.style=3;
+                constexpr uint32_t profiles[]{3,7,8};
+                site.style=taipei ? profiles[seed%3u] : 3u;
                 const std::array<int32_t,2> cell{int32_t(std::floor(wx/7.f)),int32_t(std::floor(wz/7.f))};
                 auto [it,inserted]=crowns.try_emplace(cell,site);
                 if(!inserted && site.bottom>it->second.bottom) it->second=site;
@@ -370,6 +486,7 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
         }
     }
     if(legacy) addLegacyDistricts(sites,kit);
+    if(taipei) addXinyiStreetFronts(sites);
     if(sites.empty()) return;
     for(const auto& [cell,crown]:crowns) sites.push_back(crown);
 
