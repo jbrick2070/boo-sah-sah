@@ -13,6 +13,7 @@ param(
   [string]$Version = '1.0.0.0',
   [string]$Stage,
   [string]$OutDir,
+  [switch]$RequireHardwareSidecars,
   [switch]$Register,
   [switch]$Overwrite
 )
@@ -57,6 +58,15 @@ function Assert-StorePackage([string]$path) {
       'assets/shaders/m1_particles_ps.cso', 'assets/shaders/m2_mesh_vs.cso', 'assets/shaders/m2_mesh_ps.cso',
       'assets/shaders/m2_mesh_rt_ps.cso', 'assets/shaders/m1_nv12_pack_cs.cso'
     )
+    if ($RequireHardwareSidecars) {
+      $required += @('openvino/openvino.dll', 'openvino/openvino_c.dll', 'openvino/openvino_ir_frontend.dll',
+                     'openvino/openvino_intel_npu_plugin.dll', 'openvino/openvino_intel_npu_compiler_loader.dll',
+                     'openvino/openvino_intel_npu_vm_runtime.dll', 'openvino/tbb12.dll',
+                     'openvino/tbbbind_2_5.dll', 'openvino/tbbmalloc.dll', 'nrd/NRD.dll',
+                     'openvino/LICENSE-OpenVINO-Apache-2.0.txt', 'nrd/LICENSE-NVIDIA-NRD.txt',
+                     'openvino/licensing/runtime-third-party-programs.txt', 'openvino/licensing/onednn_third-party-programs.txt',
+                     'openvino/licensing/onetbb_third-party-programs.txt')
+    }
     foreach ($name in $required) {
       if ($entries[$name].Length -le 0) { throw "Missing or empty Store payload: $name" }
     }

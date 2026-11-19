@@ -108,9 +108,21 @@ if ((-not $ExcludeOpenVinoRuntime) -and (Test-Path $VenvOvDir)) {
             Copy-Item -Force $srcDll (Join-Path $OvStage $dll)
         }
     }
-    $OvLicense = Get-ChildItem (Join-Path $RepoRoot ".venv\Lib\site-packages\openvino-*.dist-info\*LICENSE*") -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($OvLicense) {
-        Copy-Item -Force $OvLicense.FullName (Join-Path $OvStage "LICENSE-OpenVINO-Apache-2.0.txt")
+    $OvMetadata = Get-ChildItem -LiteralPath (Join-Path $RepoRoot ".venv\Lib\site-packages") -Directory -Filter 'openvino-*.dist-info' | Select-Object -First 1
+    if (-not $OvMetadata) { throw "OpenVINO runtime found, but its wheel metadata is missing." }
+    $OvLicenseRoot = Join-Path $OvMetadata.FullName 'licenses'
+    if (-not (Test-Path -LiteralPath $OvLicenseRoot -PathType Container)) { $OvLicenseRoot = $OvMetadata.FullName }
+    $OvLicense = Get-ChildItem -LiteralPath $OvLicenseRoot -File -Filter 'LICENSE*' | Select-Object -First 1
+    if (-not $OvLicense) { throw "OpenVINO wheel has no license under $OvLicenseRoot." }
+    Copy-Item -LiteralPath $OvLicense.FullName -Destination (Join-Path $OvStage 'LICENSE-OpenVINO-Apache-2.0.txt')
+    # Current wheels put notices in licenses/licensing. Older wheels can carry them next to LICENSE.
+    $notices = Get-ChildItem -LiteralPath $OvLicenseRoot -File -Recurse |
+        Where-Object { $_.Name -match 'third[-_ ]party|^NOTICE' }
+    foreach ($notice in $notices) {
+        $relative = $notice.FullName.Substring($OvLicenseRoot.Length + 1)
+        $destination = Join-Path $OvStage $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+        Copy-Item -LiteralPath $notice.FullName -Destination $destination
     }
     Write-Host "==> Staged compact OpenVINO NPU runtime sidecar into openvino\" -ForegroundColor Cyan
 }
