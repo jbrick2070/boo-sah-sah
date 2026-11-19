@@ -2344,7 +2344,7 @@ int main(int argc, char** argv) {
     boo::Logger::instance().setConsoleEnabled(false);
 
     bool noActivate = false, trilogyCaptures = false, filmCaptures = false, heroVideoCapture = false, interactiveCaptures = false, validationCaptures = false, filmStress = false, lifecycleTests = false;
-    bool cityBaseline = false;
+    bool cityBaseline = false, taipeiSliceVideo = false;
     for (int arg = 1; arg < argc; ++arg) {
         const std::string option = argv[arg];
         if (option == "--no-activate") noActivate = true;
@@ -2359,6 +2359,7 @@ int main(int argc, char** argv) {
         }
         else if (option == "--city-baseline-raster") { cityBaseline = true; gCityForceRaster = true; }
         else if (option == "--hero-video-capture") heroVideoCapture = true;
+        else if (option == "--taipei-slice-video") taipeiSliceVideo = true;
         else if (option == "--interactive-captures") interactiveCaptures = true;
         else if (option == "--validation-captures") validationCaptures = true;
         else if (option == "--film-stress") filmStress = true;
@@ -2373,7 +2374,7 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
-    const int dedicatedSuites = int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline);
+    const int dedicatedSuites = int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(taipeiSliceVideo) + int(interactiveCaptures) + int(validationCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline);
     if (dedicatedSuites > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
     if (dedicatedSuites && !noActivate) {
         std::cerr << "Automated integration gates require --no-activate.\n";
@@ -2382,7 +2383,8 @@ int main(int argc, char** argv) {
     if (trilogyCaptures) { runTest("M2CapturesAndDeterminism", testM2CapturesAndDeterminism); return gTestsFailed ? 1 : 0; }
     if (filmCaptures) { runTest("FullFilmCapturesAndMontage", testFullFilmCaptureGate); return gTestsFailed ? 1 : 0; }
     if (cityBaseline) { runTest("CityBaseline", testCityBaseline); return gTestsFailed ? 1 : 0; }
-    if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", testHeroVideoCaptureGate); return gTestsFailed ? 1 : 0; }
+    if (heroVideoCapture) { runTest("HeroTenSecondVideoCapture", [] { return captureTenSecondVideo(false); }); return gTestsFailed ? 1 : 0; }
+    if (taipeiSliceVideo) { runTest("TaipeiTrilogyTenSecondVideoCapture", [] { return captureTenSecondVideo(true); }); return gTestsFailed ? 1 : 0; }
     if (interactiveCaptures) { runTest("InteractiveShowcaseCaptures", testInteractiveShowcaseCaptureGate); return gTestsFailed ? 1 : 0; }
     if (validationCaptures) { runTest("ValidationShowcaseCaptures", testValidationShowcaseCaptures); return gTestsFailed ? 1 : 0; }
     if (filmStress) { runTest("FullFilmStressAndRecovery", testFilmStressGate); return gTestsFailed ? 1 : 0; }

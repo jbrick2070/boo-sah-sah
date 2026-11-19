@@ -1,0 +1,158 @@
+{
+  "before": {
+    "adapter": "NVIDIA GeForce RTX 5080 Laptop GPU",
+    "checkpoints": [
+      {
+        "frame": 0,
+        "rgb10_fnv1a64": "850cead08f728690",
+        "sample": 8064000,
+        "visible_lod_placements": [
+          1,
+          0,
+          349
+        ]
+      },
+      {
+        "frame": 60,
+        "rgb10_fnv1a64": "aa5966189173dd63",
+        "sample": 8160000,
+        "visible_lod_placements": [
+          1,
+          0,
+          350
+        ]
+      },
+      {
+        "frame": 120,
+        "rgb10_fnv1a64": "09231fe16e665c43",
+        "sample": 8256000,
+        "visible_lod_placements": [
+          1,
+          0,
+          354
+        ]
+      },
+      {
+        "frame": 180,
+        "rgb10_fnv1a64": "81df95b38127fa8c",
+        "sample": 8352000,
+        "visible_lod_placements": [
+          1,
+          0,
+          363
+        ]
+      },
+      {
+        "frame": 240,
+        "rgb10_fnv1a64": "0c080aa9135c8f5a",
+        "sample": 8448000,
+        "visible_lod_placements": [
+          1,
+          0,
+          363
+        ]
+      },
+      {
+        "frame": 299,
+        "rgb10_fnv1a64": "f72cbef6bfedbce5",
+        "sample": 8542400,
+        "visible_lod_placements": [
+          1,
+          0,
+          363
+        ]
+      }
+    ],
+    "complete": true,
+    "cue": "assets/cues/m2_trilogy_180s.json",
+    "end_sample_exclusive": 8544000,
+    "format": "D3D12 R10G10B10A2_UNORM little-endian; FFmpeg x2bgr10le",
+    "fps": 30,
+    "frames": 300,
+    "height": 1440,
+    "last_frame_sample": 8542400,
+    "sample_rate": 48000,
+    "scene": "taipei_sanctuary",
+    "start_sample": 8064000,
+    "width": 2560,
+    "renderer_commit": "f5dbac007b0b58fdb20d66c6342a2202f241a920"
+  },
+  "after": {
+    "adapter": "NVIDIA GeForce RTX 5080 Laptop GPU",
+    "checkpoints": [
+      {
+        "frame": 0,
+        "rgb10_fnv1a64": "dad885626bbc9df5",
+        "sample": 8064000,
+        "visible_lod_placements": [
+          1,
+          22,
+          353
+        ]
+      },
+      {
+        "frame": 60,
+        "rgb10_fnv1a64": "0389a4cd6033d002",
+        "sample": 8160000,
+        "visible_lod_placements": [
+          1,
+          25,
+          358
+        ]
+      },
+      {
+        "frame": 120,
+        "rgb10_fnv1a64": "c67a60b585646327",
+        "sample": 8256000,
+        "visible_lod_placements": [
+          1,
+          11,
+          365
+        ]
+      },
+      {
+        "frame": 180,
+        "rgb10_fnv1a64": "e6295b3b113a943f",
+        "sample": 8352000,
+        "visible_lod_placements": [
+          1,
+          11,
+          374
+        ]
+      },
+      {
+        "frame": 240,
+        "rgb10_fnv1a64": "cc7850461f7e4064",
+        "sample": 8448000,
+        "visible_lod_placements": [
+          1,
+          11,
+          374
+        ]
+      },
+      {
+        "frame": 299,
+        "rgb10_fnv1a64": "4324769a0173a365",
+        "sample": 8542400,
+        "visible_lod_placements": [
+          1,
+          11,
+          374
+        ]
+      }
+    ],
+    "complete": true,
+    "cue": "assets/cues/m2_trilogy_180s.json",
+    "end_sample_exclusive": 8544000,
+    "format": "D3D12 R10G10B10A2_UNORM little-endian; FFmpeg x2bgr10le",
+    "fps": 30,
+    "frames": 300,
+    "height": 1440,
+    "last_frame_sample": 8542400,
+    "sample_rate": 48000,
+    "scene": "taipei_sanctuary",
+    "start_sample": 8064000,
+    "width": 2560,
+    "renderer_commit": "71f3e464abaa566de929d947b1cfc72a5a522756"
+  }
+}
