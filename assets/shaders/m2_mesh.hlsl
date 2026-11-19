@@ -190,6 +190,49 @@ float3 sceneSunDir() {
     return norm(float3(-0.44, 0.74, -0.32));
 }
 
+// Two theatrical spots mounted over the orchid. The gel wheel, pan and dimmer use
+// exactly the same transfer function for the neural and scripted stage directors.
+bool sanctuarySpotsOn() {
+    return (showFlags & 1u) != 0u && ((showFlags >> 2u) & 7u) == 3u && !lampsOff();
+}
+
+struct SanctuarySpot { float3 origin; float3 axis; float3 radiance; };
+
+SanctuarySpot sanctuarySpot(float side) {
+    SanctuarySpot spot;
+    spot.origin = float3(side * 2.9, 8.0, 4.0);
+    float travel = ((interFlags & (1u << 14u)) != 0u) ? 0.45 : 1.0;
+    float pan = (moodLight - 0.5) * 5.0;
+    float gel = moodAccent * 10.0 + moodBloom * 2.5;
+    float3 target = float3(side * 0.25 + sin(pan + side * 0.65) * 2.65 * travel,
+                           4.3 + (moodBloom - 0.45) * 2.1 * travel, 5.55 + side * 0.35);
+    spot.axis = norm(target - spot.origin);
+    float wheel = 0.5 + 0.5 * travel * sin(gel + side * 1.4);
+    float3 cool = side < 0.0 ? float3(0.10, 0.80, 1.00) : float3(0.35, 0.19, 0.85);
+    float3 warm = side < 0.0 ? float3(0.96, 0.24, 0.38) : float3(1.00, 0.53, 0.18);
+    spot.radiance = lerp(cool, warm, wheel) * (1.05 + 0.80 * (moodBloom - 0.5) * travel);
+    return spot;
+}
+
+float3 sanctuaryBeam(SanctuarySpot spot, float3 ray, float surfaceDistance) {
+    float3 fromSpot = eye - spot.origin;
+    float dv = dot(ray, spot.axis);
+    float t = clamp((dv * dot(fromSpot, spot.axis) - dot(fromSpot, ray)) /
+                    max(1.0 - dv * dv, 0.02), 0.0, min(surfaceDistance, 16.0));
+    float3 path = fromSpot + t * ray;
+    float along = dot(path, spot.axis);
+    float radius = 0.08 + 0.17 * max(along, 0.0);
+    float3 radial = path - along * spot.axis;
+    float core = exp2(-2.0 * dot(radial, radial) / (radius * radius));
+    float reach = smoothstep(0.0, 0.5, along) * (1.0 - smoothstep(4.8, 7.0, along));
+    return spot.radiance * core * reach * (0.36 + 0.48 * moodBloom);
+}
+
+float3 sanctuaryHaze(float3 ray, float distanceToSurface) {
+    return sanctuaryBeam(sanctuarySpot(-1.0), ray, distanceToSurface) +
+           sanctuaryBeam(sanctuarySpot(1.0), ray, distanceToSurface);
+}
+
 float3 sceneSunRadiance() {
     if (sunOverridden()) {
         // Physically motivated time-of-day: warm low sun -> neutral high sun -> cool moonlight below the horizon
@@ -326,6 +369,47 @@ float3 skyAerialFog(float3 d) {
 
 bool cityExterior() {
     return (showFlags & 64u) != 0u || (showFlags == 0u && act != 0u);
+}
+
+// The stelae and enamel columns have longitudinal, object-locked UVs. Retain
+// the same finish when the surface is seen in a mirror or through the flower.
+float3 cathedralFinish(uint material, uint part, float2 uv, float coverage,
+                       inout float3 base, inout float rough, inout float metallic) {
+    if (material == 12u && part >= 200u && part <= 207u) {
+        float across = abs(2.0 * uv.y - 1.0);
+        float end = min(uv.x, 1.0 - uv.x);
+        float fan = abs(frac(5.0 * end - 0.36 * across + 0.50) - 0.50);
+        float aa = clamp(coverage * 5.4, 0.002, 0.22);
+        float etched = (1.0 - smoothstep(0.011, 0.018 + aa, fan))
+                     * (1.0 - smoothstep(0.13, 0.29, end)) * (1.0 - smoothstep(0.045, 0.11, coverage));
+        float edge = smoothstep(0.78, 0.86, across);
+        float brass = max(etched, edge * 0.78);
+        base = lerp(base, float3(0.51, 0.25, 0.082), brass);
+        rough = lerp(0.048, 0.32, brass);
+        metallic = lerp(metallic, 0.86, brass);
+        return brass * float3(0.13, 0.061, 0.015);
+    }
+    if (material == 20u && part >= 210u && part <= 215u) {
+        float height = saturate(uv.x);
+        float rib = 0.5 + 0.5 * cos(kTwoPi * (uv.y * 6.0 + 0.33 * height));
+        float root = (1.0 - smoothstep(0.05, 0.66, height)) * (0.55 + 0.38 * rib);
+        base *= lerp(1.0.xxx, float3(0.32, 0.62, 0.55), root);
+        rough = lerp(rough, 0.28, root);
+        return 0.0.xxx;
+    }
+    return 0.0.xxx;
+}
+
+// Periodic lozenges follow the warp and weft of the exported ribbon. The
+// neural field sets the height of the threads and the strength of the gold weft.
+float3 velvetThreads(float2 uv, float2 uvWidth, float3 field) {
+    float2 loom = float2(uv.x * 56.0, uv.y * 3.0);
+    float spread = dot(uvWidth, float2(56.0, 3.0));
+    float2 distance = abs(frac(float2(loom.x + loom.y, loom.x - loom.y) + 0.5) - 0.5);
+    float2 thread = 1.0 - smoothstep(0.045.xx, (0.085 + min(spread, 0.2)).xx, distance);
+    float visibility = 1.0 - smoothstep(0.12, 0.45, spread);
+    return visibility * (thread.x * float3(0.62, 0.27, 0.082) * (0.32 + 0.55 * field.r)
+                       + thread.y * float3(0.048, 0.31, 0.33) * (0.42 + 0.58 * field.b));
 }
 
 bool isCurtainWall(uint m) { return m == 5u || m == 13u || m == 14u; }
@@ -969,6 +1053,8 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float hRough = clamp(hOrm.y, 0.03, 0.98);
         if (hm == 1u) hRough = lerp(hRough, 0.08, wetP);
         float hMetal = saturate(hOrm.z);
+        float hitUvWidth = coneSpread * hitT / max(0.2, abs(dot(hitNGeom, direction)));
+        float3 stageTrim = cathedralFinish(hm, hitPart, hitUv, hitUvWidth, hBase, hRough, hMetal);
         if (act == 1u && hm == 11u && hitPart >= 100u && hitPart <= 115u) {
             float bodyY = v0.p.y + bary.x * (v1.p.y - v0.p.y) + bary.y * (v2.p.y - v0.p.y);
             aircraftPaint(hitPart, bodyY, coneSpread * hitT * length(w2o[1]), hBase, hRough, hMetal);
@@ -1063,7 +1149,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             return true;
         }
 
-        float3 hitCol = direct2 + ibl2 + (districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT));
+        float3 hitCol = direct2 + ibl2 + stageTrim + (districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT));
         if (!inBath) {
             float hAlt = exp(-max(p.y - 2.0, 0.0) * 0.14);
             float hFog = 1.0 - exp(-max(hitT - (isDawnFinale() ? 95.0 : 4.5), 0.0) * (isDawnFinale() ? (0.0006 + 0.0020 * hAlt) : 0.0055));
@@ -1264,11 +1350,20 @@ float shaftMediumDensity(float3 p) {
 #if defined(M2_RT)
 // Ray-marched single scattering: each march step fires a sun / moon visibility ray through the BVH,
 // so towers, the bridge truss and orchid petals carve real light shafts out of the haze.
-float3 rtLightShafts(float3 dir, float maxT, float jitter, inout uint queries) {
+float3 rtLightShafts(float3 dir, float maxT, float jitter, float surfaceVisibility, inout uint queries) {
     const uint kSteps = 3u;
     float marchT = min(maxT, 90.0);
     float dt = marchT / (float)kSteps;
     float3 sd = sceneSunDir();
+    // At night these two sets are lit by practicals in shallow stage haze.
+    // Integrate that local layer and reuse key-light visibility at the surface.
+    // The two colored stage fixtures have their own finite beam integrals.
+    if (!sunOverridden() && (sanctuarySpotsOn() || isGrandTutti())) {
+        float reach = min(marchT, 16.0);
+        float density = shaftMediumDensity(eye + dir * (0.5 * reach));
+        float scattered = 1.0 - exp(-density * reach);
+        return sceneSunRadiance() * scattered * lerp(0.035, 0.105, surfaceVisibility);
+    }
     float acc = 0.0;
     float tau = 0.0;
     [loop] for (uint s = 0u; s < kSteps; ++s) {
@@ -1415,6 +1510,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float rough = clamp(ormSample.y, 0.020, 0.98);
     float metallic = saturate(ormSample.z);
     float auxVal = ormSample.w;
+    float2 uvWidth = fwidth(i.uv.xy);
+    float3 stageTrim = cathedralFinish(matId, partId, i.uv.xy, max(uvWidth.x, uvWidth.y), base, rough, metallic);
     if (aircraft && matId == 11u && partId <= 115u) {
         aircraftPaint(partId, i.localY, fwidth(i.localY), base, rough, metallic);
     }
@@ -1820,7 +1917,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     if (!inBath) {
-        shaftInscatter = rtLightShafts(-v, dist, frac(ign + 0.3710), queries);
+        shaftInscatter = rtLightShafts(-v, dist, frac(ign + 0.3710), dot(sunTrans, 1.0.xxx / 3.0), queries);
     }
 
     rayQueryCount = queries;
@@ -1846,6 +1943,32 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     // 1. Direct Sun / Key GGX + Clearcoat + Curved-Glass Caustics (restirDirect routed to denoised path!)
     float3 diffConservBase = (translucency > 0.02) ? (base * (1.0 - 0.24 * translucency)) : base;
     float3 directSunOnly = evalGgxDirect(n, v, sunDir, diffConservBase, rough, metallic, clearcoat) * sunRad * sunTrans;
+
+    float3 stageIrradiance = 0.0.xxx;
+    if (sanctuarySpotsOn()) {
+        [unroll] for (uint fixture = 0; fixture < 2; ++fixture) {
+            SanctuarySpot spot = sanctuarySpot(fixture == 0u ? -1.0 : 1.0);
+            float3 toward = spot.origin - i.world;
+            float radiusSq = max(dot(toward, toward), 0.04);
+            float3 lightDirection = toward * rsqrt(radiusSq);
+            float cone = smoothstep(0.89, 0.985, dot(-lightDirection, spot.axis));
+            // A cut-metal gobo projects five overlapping petals from each spot.
+            // Its coordinates follow the real director-steered projection axis.
+            float3 beamRight = norm(cross(spot.axis, float3(0.0, 0.0, 1.0)));
+            float3 beamUp = cross(beamRight, spot.axis);
+            float2 projected = float2(dot(lightDirection, beamRight), dot(lightDirection, beamUp));
+            float radius = max(length(projected), 0.001);
+            float c = projected.x / radius;
+            float c2 = c * c;
+            float petal = c * (16.0 * c2 * c2 - 20.0 * c2 + 5.0);
+            float boundary = 0.19 + 0.077 * petal;
+            float cut = 1.0 - smoothstep(boundary - 0.025, boundary + 0.025, radius);
+            cone *= 0.28 + 0.72 * cut;
+            float3 incident = spot.radiance * (48.0 * cone / (1.0 + radiusSq));
+            directSunOnly += evalGgxDirect(n, v, lightDirection, diffConservBase, rough, metallic, clearcoat) * incident;
+            stageIrradiance += incident * (0.28 + 0.72 * abs(dot(nGeom, lightDirection)));
+        }
+    }
 
     // 2. Subsurface / Botanical Leaf Translucency (backlit Calathea veins, Fern fronds, Succulent, Enamel, Towel)
     if (translucency > 0.02) {
@@ -1921,7 +2044,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 coatRefl = hasTracedReflection ? lerp(reflected, iblSpecEnv, 0.12) : sampleIblEnv(reflect(-v, n), 0.06, inBath);
     float3 specIndirectTerm = (specRadiance * (f0 * envBrdf.x + envBrdf.y) + coatRefl * coatWeight) * specOcclusion;
 
-    float3 emissiveTerm = districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022);
+    float3 emissiveTerm = stageTrim + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
     float3 nonIndirectColor = directSunOnly + emissiveTerm;
     float3 indirectColor = diffIndirectTerm + specIndirectTerm + restirDirect;
 
@@ -2030,6 +2153,21 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.512), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.512)));
             float3 dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.07 * edgeRim);
             float3 glassTrans = max(transmitted * tirBoost + dispersion, 0.0.xxx) * beer + bodyScatter * (1.0 - beer) + nectarGlow;
+            if (matId == 3u && partId >= 10u && partId <= 16u) {
+                glassTrans += stageIrradiance * (0.014 + 0.085 * midribDepth + 0.045 * crispMargin);
+            }
+            if (isGrandTutti() && matId == 3u && partId >= 10u && partId <= 16u) {
+                // A mineral front climbs the orchid before the tabletop reveal.
+                // The clear margins still refract the set throughout the change.
+                float growth = smoothstep(276.0, 328.0, time) * (1.0 - smoothstep(333.0, 337.5, time));
+                float bladeDepth = uBlade + 0.38 * abs(vBlade);
+                float mineral = growth * (1.0 - smoothstep(growth - 0.16, growth + 0.18, bladeDepth));
+                float ribs = 0.5 + 0.5 * cos(kTwoPi * (7.0 * uBlade - 1.7 * vBlade * vBlade));
+                ribs = lerp(ribs, 0.5, smoothstep(0.025, 0.08, uvWidth.x));
+                float3 nacre = lerp(float3(0.09, 0.34, 0.30), float3(0.87, 0.65, 0.40),
+                                     saturate(0.20 + 0.55 * ribs + 0.22 * n.y));
+                glassTrans = lerp(glassTrans, nacre * (0.45 + 0.42 * saturate(dot(n, sunDir))), mineral * 0.76);
+            }
             float reflMix = isThinCrystalPetal
                 ? clamp(0.032 + 0.48 * fres, 0.032, 0.56)
                 : clamp(0.044 + 0.85 * fres, 0.044, 0.92);
@@ -2079,6 +2217,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float fieldLuma = dot(field, float3(0.2126, 0.7152, 0.0722));
         float3 tone = ((showFlags & 2u) != 0u) ? float3(0.86, 0.42, 0.66) : float3(0.34, 0.72, 0.66);
         float3 silk = lerp(fieldLuma.xxx * tone, field * tone, 0.24);
+        silk += velvetThreads(i.uv.xy, uvWidth, field);
         color = silk * 0.68 * (0.55 + 0.55 * velvetRim)
               + specRadiance * (0.34 * fres)
               + float3(0.95, 0.74, 0.38) * (velvetRim * 0.18);
@@ -2105,6 +2244,12 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         transScale *= (1.0 - fogW);
         color += shaftInscatter;
         nonIndirectColor += shaftInscatter;
+    }
+
+    if (sanctuarySpotsOn()) {
+        float3 localHaze = sanctuaryHaze(norm(i.world - eye), dist);
+        color += localHaze;
+        nonIndirectColor += localHaze;
     }
 
     if (showFlags == 0u) {
@@ -2197,6 +2342,8 @@ Targets PSSky(SkyOut i) {
     float3 d = norm(forward + right * p.x * aspect * tan(fov * 0.5) + up * p.y * tan(fov * 0.5));
     uint curAov = aovMode();
     float3 skyCol = sky(d);
+    if (sanctuarySpotsOn() && curAov == 0u)
+        skyCol += sanctuaryHaze(d, 16.0);
     if (curAov != 0u) {
         if (curAov == 2u) skyCol = (-d) * 0.5 + 0.5;
         else if (curAov == 3u) skyCol = float3(1.0, 0.0, 1.0);
@@ -2211,7 +2358,7 @@ Targets PSSky(SkyOut i) {
             ? frac(interleavedGradientNoise(i.pos.xy + float2(5.588238, 3.143218) * (float)(accumFrame & 255u)) + 0.6180340 * (float)accumFrame)
             : interleavedGradientNoise(i.pos.xy);
         uint skyQueries = 0u;
-        skyCol += rtLightShafts(d, 90.0, frac(ignSky + 0.3710), skyQueries);
+        skyCol += rtLightShafts(d, 90.0, frac(ignSky + 0.3710), 1.0, skyQueries);
         uint waveSkyQueries = WaveActiveSum(skyQueries);
         if (canonical != 0u && WaveIsFirstLane()) {
             InterlockedAdd(verified[1], waveSkyQueries);
