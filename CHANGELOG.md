@@ -2,6 +2,12 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## [Unreleased] — Hardware comparisons
+
+- Click an engine in the HUD to compare its contribution in the current shot. The five tabs switch between ray tracing, CUDA, Tensor, codec and the NPU director. Close the panel to return to the full frame.
+- Press **4** for the guided NPU lighting comparison. The hardware panel identifies Intel NPU, CPU and scripted operation.
+- The soundtrack starts with the film clock after graphics warm-up, keeping the opening music aligned with the first scene.
+
 ## [Unreleased] — Live Audio Reactivity
 
 ### Added

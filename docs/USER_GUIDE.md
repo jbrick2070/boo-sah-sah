@@ -68,7 +68,7 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Left` / `Right` | Seek `-2 s` / `+2 s` (`Shift` + `Left`/`Right`: `-10 s` / `+10 s`) |
 | `,` / `.` (or `[` / `]`) | Step `-1` / `+1` frame (`800` samples @ `48 kHz`) while paused |
 | `G` | Jump to narrative reveal pre-roll |
-| `1` – `6` | Mode: `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU Solo, `5` CUDA Solo, `6` Finale Loop |
+| `1` – `6` | Mode: `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU comparison, `5` CUDA Solo, `6` Finale Loop |
 | `L` | Toggle timeline loop |
 | `M` | Mute / Unmute audio |
 | `-` / `=` (or `Down` / `Up`) | Master volume `-5%` / `+5%` |
@@ -76,7 +76,7 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `K` | Toggle lower-third captions (`--captions` / `--no-captions`; non-medical end card always shown) |
 | `Q` | Cycle Quality Preset (`Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`) |
 | `Tab` / `F1` | Cycle HUD: `Full Telemetry` -> `Compact Strip` -> `A/B Split-Screen` -> `Off (Clean Cinema)` |
-| `A` | Cycle active A/B Split-Screen pillar (`RT` -> `CUDA` -> `Tensor` -> `Codec`) |
+| `A` | Cycle the split-screen comparison through RT, CUDA, Tensor, Codec, and the stage director. |
 | `X` / `C` / `T` / `U` / `V` | Live failover toggle for **RT** (`X`), **CUDA** (`C`), **Tensor** (`T`), **NPU** (`U`), **Codec** (`V`) |
 | `O` | Toggle live **Spout2** clean-feed sender (`BooSahSah_Clean`) |
 | `W` | Toggle / **One-Key Privacy Stop** for opt-in UVC webcam (`LIVE CAMERA`) |
@@ -84,6 +84,12 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `F11` / `Alt+Enter` | Toggle borderless fullscreen |
 | `F12` | Save clean 8-bit `.bmp` frame + `.json` timing metadata into `diagnostics/captures/` |
 | `Esc` | Clean shutdown |
+
+Click a row in the **Hardware** table to compare that engine at the current playhead. The five tabs below the split-view labels let you change engines while watching the same shot. Drag the divider to inspect an edge or reflection. The × button closes the comparison and returns to the previous HUD. These controls also work while paused.
+
+The NPU row shows where the stage director runs. `LIVE` means the NPU has completed an inference. `CPU` means OpenVINO has run the model on the CPU. `SCRIPT` means a deterministic script supplies the controls. `WARMUP` appears while the director prepares or waits for its first inference, `OFF` when inference is disabled, and `FLT` for a fault. The Full HUD shows completed inferences, the last inference time in milliseconds, and completions in the past second in hertz. The GPU renders both halves. The left half uses the current shot’s direction and the right half uses its scripted lighting. Shenzhen holds its authored lighting, so both halves match there.
+
+Press `4`, click the **[4]** shortcut beside the NPU row, or click the bottom NPU button for the guided sanctuary comparison. Close it with × or `4` to restore your previous playhead and play/pause state. Cue sheets without a sanctuary loop open the director comparison in place.
 
 ### Interactive NVIDIA-RTX Explore & Lighting Studio Controls (Optional)
 

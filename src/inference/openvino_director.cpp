@@ -54,7 +54,6 @@ using OvInferRequestGetOutputTensorFn   = int(__cdecl*)(const ov_infer_request*,
 using OvTensorDataFn                    = int(__cdecl*)(const ov_tensor*, void**);
 using OvTensorGetSizeFn                 = int(__cdecl*)(const ov_tensor*, size_t*);
 using OvTensorFreeFn                    = void(__cdecl*)(ov_tensor*);
-using OvInferRequestInferFn             = int(__cdecl*)(ov_infer_request*);
 using OvInferRequestStartAsyncFn        = int(__cdecl*)(ov_infer_request*);
 using OvInferRequestWaitForFn           = int(__cdecl*)(ov_infer_request*, int64_t);
 using OvInferRequestCancelFn            = int(__cdecl*)(ov_infer_request*);
@@ -81,7 +80,6 @@ struct OpenVinoCDispatch {
     OvTensorDataFn tensorData = nullptr;
     OvTensorGetSizeFn tensorGetSize = nullptr;
     OvTensorFreeFn tensorFree = nullptr;
-    OvInferRequestInferFn inferSync = nullptr;
     OvInferRequestStartAsyncFn startAsync = nullptr;
     OvInferRequestWaitForFn waitFor = nullptr;
     OvInferRequestCancelFn cancel = nullptr;
@@ -92,7 +90,7 @@ struct OpenVinoCDispatch {
                (compileModelProps || compileModelVariadic) && compiledModelFree &&
                createInferRequest && inferRequestFree &&
                getInputTensor && getOutputTensor && tensorData && tensorGetSize && tensorFree &&
-               inferSync && startAsync && waitFor;
+               startAsync && waitFor;
     }
 };
 
@@ -181,7 +179,6 @@ const OpenVinoCDispatch* acquireOpenVinoDispatch(bool allowDevVenvDiscovery) noe
     d.tensorData           = reinterpret_cast<OvTensorDataFn>(GetProcAddress(hMod, "ov_tensor_data"));
     d.tensorGetSize        = reinterpret_cast<OvTensorGetSizeFn>(GetProcAddress(hMod, "ov_tensor_get_size"));
     d.tensorFree           = reinterpret_cast<OvTensorFreeFn>(GetProcAddress(hMod, "ov_tensor_free"));
-    d.inferSync            = reinterpret_cast<OvInferRequestInferFn>(GetProcAddress(hMod, "ov_infer_request_infer"));
     d.startAsync           = reinterpret_cast<OvInferRequestStartAsyncFn>(GetProcAddress(hMod, "ov_infer_request_start_async"));
     d.waitFor              = reinterpret_cast<OvInferRequestWaitForFn>(GetProcAddress(hMod, "ov_infer_request_wait_for"));
     d.cancel               = reinterpret_cast<OvInferRequestCancelFn>(GetProcAddress(hMod, "ov_infer_request_cancel"));
@@ -277,17 +274,23 @@ struct OpenVinoDirector::Impl {
     bool executeSingleInference(
         const DirectorFeatureVector& fv,
         NeuralInferenceSample& outSample,
-        bool useAsyncWithTimeout,
+        int64_t timeoutMs,
         bool injectTimeout,
-        std::string* outErr) {
+        NeuralInferenceFailure& failure) {
+        failure = {};
         if (!ov || !inferReq) {
-            if (outErr) *outErr = "Inference request is not initialized.";
+            failure.reason = "Inference request is not initialized.";
+            return false;
+        }
+        if (!std::all_of(fv.values.begin(), fv.values.end(), [](float value) { return std::isfinite(value); })) {
+            failure.reason = "Director input contains a non-finite feature.";
             return false;
         }
 
         ov_tensor* inTensor = nullptr;
-        if (ov->getInputTensor(inferReq, &inTensor) != 0 || !inTensor) {
-            if (outErr) *outErr = "Failed to acquire input tensor.";
+        const int inputStatus = ov->getInputTensor(inferReq, &inTensor);
+        if (inputStatus != 0 || !inTensor) {
+            failure.reason = "Input tensor unavailable: " + statusToString(*ov, inputStatus);
             return false;
         }
         size_t inCount = 0;
@@ -298,7 +301,7 @@ struct OpenVinoDirector::Impl {
                           (inPtr != nullptr);
         if (!inOk) {
             ov->tensorFree(inTensor);
-            if (outErr) *outErr = "Input tensor shape/type mismatch (expected 16 floats).";
+            failure.reason = "Input tensor is unreadable or does not contain 16 values.";
             return false;
         }
         std::memcpy(inPtr, fv.values.data(), sizeof(float) * 16u);
@@ -306,36 +309,34 @@ struct OpenVinoDirector::Impl {
 
         const auto t0 = std::chrono::steady_clock::now();
         if (injectTimeout) {
-            if (outErr) *outErr = "Injected NPU inference timeout (--inject-npu-timeout).";
+            failure.timedOut = true;
+            failure.reason = "Injected inference timeout (--inject-npu-timeout).";
             return false;
         }
 
-        if (useAsyncWithTimeout) {
-            const int startSt = ov->startAsync(inferReq);
-            if (startSt != 0) {
-                if (outErr) *outErr = "ov_infer_request_start_async failed: " + statusToString(*ov, startSt);
-                return false;
-            }
-            const int waitSt = ov->waitFor(inferReq, std::max<int64_t>(10, inferTimeoutMs));
-            if (waitSt != 0) {
-                if (ov->cancel) (void)ov->cancel(inferReq);
-                if (outErr) *outErr = "Inference wait_for timed out or failed: " + statusToString(*ov, waitSt);
-                return false;
-            }
-        } else {
-            const int infSt = ov->inferSync(inferReq);
-            if (infSt != 0) {
-                if (outErr) *outErr = "ov_infer_request_infer failed: " + statusToString(*ov, infSt);
-                return false;
-            }
+        const int startSt = ov->startAsync(inferReq);
+        if (startSt != 0) {
+            failure.reason = "Could not start inference: " + statusToString(*ov, startSt);
+            return false;
+        }
+        const int waitSt = ov->waitFor(inferReq, timeoutMs);
+        if (waitSt != 0) {
+            constexpr int kOvResultNotReady = -9; // ov_status_e::RESULT_NOT_READY from the C API.
+            failure.timedOut = waitSt == kOvResultNotReady;
+            failure.reason = (failure.timedOut
+                ? "Inference did not complete within " + std::to_string(timeoutMs) + " ms: "
+                : "Inference wait failed: ") + statusToString(*ov, waitSt);
+            if (ov->cancel) (void)ov->cancel(inferReq);
+            return false;
         }
         const auto t1 = std::chrono::steady_clock::now();
         const float elapsedMs = static_cast<float>(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
 
         ov_tensor* outTensor = nullptr;
-        if (ov->getOutputTensor(inferReq, &outTensor) != 0 || !outTensor) {
-            if (outErr) *outErr = "Failed to acquire output tensor.";
+        const int outputStatus = ov->getOutputTensor(inferReq, &outTensor);
+        if (outputStatus != 0 || !outTensor) {
+            failure.reason = "Output tensor unavailable: " + statusToString(*ov, outputStatus);
             return false;
         }
         size_t outCount = 0;
@@ -346,7 +347,7 @@ struct OpenVinoDirector::Impl {
                            (outPtr != nullptr);
         if (!outOk) {
             ov->tensorFree(outTensor);
-            if (outErr) *outErr = "Output tensor shape mismatch (expected 10 floats).";
+            failure.reason = "Output tensor is unreadable or does not contain 10 values.";
             return false;
         }
 
@@ -356,7 +357,7 @@ struct OpenVinoDirector::Impl {
 
         for (float v : raw) {
             if (!std::isfinite(v)) {
-                if (outErr) *outErr = "Non-finite NaN/Inf detected in neural output.";
+                failure.reason = "Model returned a non-finite output.";
                 return false;
             }
         }
@@ -366,7 +367,7 @@ struct OpenVinoDirector::Impl {
         float bestProb = raw[0];
         for (uint8_t c = 0; c < 5u; ++c) {
             if (raw[c] < -0.01f || raw[c] > 1.01f) {
-                if (outErr) *outErr = "Category probability out of [0, 1] bounds.";
+                failure.reason = "Model returned an invalid category probability of " + std::to_string(raw[c]) + ".";
                 return false;
             }
             probSum += raw[c];
@@ -376,7 +377,7 @@ struct OpenVinoDirector::Impl {
             }
         }
         if (probSum < 0.95f || probSum > 1.05f) {
-            if (outErr) *outErr = "Category probability distribution does not sum to 1.0.";
+            failure.reason = "Model category probabilities sum to " + std::to_string(probSum) + " instead of 1.";
             return false;
         }
 
@@ -417,13 +418,15 @@ struct OpenVinoDirector::Impl {
         DirectorFeatureVector testVec{};
         testVec.values = {0.45f, 0.50f, 0.42f, 0.50f, 0.35f, 0.65f, 0.50f, 0.0f, 1.0f, 0.0f, 0.48f, 0.68f, 0.20f, 0.32f, 0.15f, 0.5f};
         NeuralInferenceSample verifiedSample{};
-        std::string verifyErr;
-        if (!executeSingleInference(testVec, verifiedSample, false, false, &verifyErr)) {
+        NeuralInferenceFailure verifyErr;
+        // The first request can include device setup. Give it a separate cold-start deadline.
+        constexpr int64_t kVerifyTimeoutMs = 2000;
+        if (!executeSingleInference(testVec, verifiedSample, kVerifyTimeoutMs, false, verifyErr)) {
             ov->inferRequestFree(inferReq);
             inferReq = nullptr;
             ov->compiledModelFree(compiled);
             compiled = nullptr;
-            outDetailError = std::string(devName) + " test inference failed: " + verifyErr;
+            outDetailError = std::string(devName) + " test inference failed: " + verifyErr.reason;
             return false;
         }
 
@@ -553,6 +556,9 @@ HardwareResult OpenVinoDirector::initialize(const OpenVinoDirectorConfig& config
         res.detectedHardwareDetail = npuDeviceLabel + " (OpenVINO NPU plugin)";
         // Explicit "NPU" target — NEVER unqualified "AUTO" (SPEC_v4 Section 4.2.3)
         if (impl_->tryCompileAndVerifyDevice("NPU", npuFailureReason)) {
+            if (config.npuInferTimeoutMs > 0) {
+                impl_->inferTimeoutMs = std::max<int64_t>(20, config.npuInferTimeoutMs);
+            }
             res.status = BackendStatus::Accelerated;
             res.health = HealthState::ActiveAccelerated;
             res.successfullyExecutedTestWork = true;
@@ -610,10 +616,14 @@ HardwareResult OpenVinoDirector::initialize(const OpenVinoDirectorConfig& config
 bool OpenVinoDirector::infer(
     const DirectorFeatureVector& features,
     NeuralInferenceSample& outSample,
-    bool injectTimeout) {
-    if (!impl_ || !impl_->ready) return false;
-    std::string err;
-    return impl_->executeSingleInference(features, outSample, true, injectTimeout, &err);
+    bool injectTimeout,
+    NeuralInferenceFailure* failure) {
+    if (!impl_ || !impl_->ready) {
+        if (failure) *failure = {"Director is not initialized.", false};
+        return false;
+    }
+    NeuralInferenceFailure ignored;
+    return impl_->executeSingleInference(features, outSample, impl_->inferTimeoutMs, injectTimeout, failure ? *failure : ignored);
 }
 
 void OpenVinoDirector::shutdown() noexcept {
@@ -658,6 +668,7 @@ struct AsyncDirectorController::Impl {
     std::atomic<bool> disableNpu{false};
     std::atomic<bool> injectTimeout{false};
     std::atomic<bool> initialCompileDone{false};
+    std::atomic<uint64_t> routeRevision{0};
 
     mutable std::mutex mtx;
     std::condition_variable cvWorker;
@@ -665,11 +676,15 @@ struct AsyncDirectorController::Impl {
 
     DirectorFeatureVector latestFeatures{};
     bool hasFeatureInput = false;
+    uint64_t timelineRevision = 0;
 
     bool hasValidNeuralSample = false;
     std::atomic<bool> runtimeQuarantined{false};
+    bool retryableHardwareFailure = false;
     NeuralInferenceSample latestNeuralSample{};
     std::chrono::steady_clock::time_point lastNeuralSampleTime{};
+    // At most five successful worker ticks can finish in one second (200 ms cadence).
+    std::array<std::chrono::steady_clock::time_point, 5> completionTimes{};
     HardwareResult currentHwResult{};
     float lastInferMs = 0.0f;
     uint64_t completedInferences = 0;
@@ -681,6 +696,12 @@ struct AsyncDirectorController::Impl {
     bool smoothingInitialized = false;
 
     std::thread worker;
+
+    void clearRouteSamples() noexcept {
+        hasValidNeuralSample = false;
+        lastInferMs = 0.0f;
+        completedInferences = 0;
+    }
 
     HardwareResult makeDisabledStatus() const {
         HardwareResult r{};
@@ -710,15 +731,17 @@ struct AsyncDirectorController::Impl {
 
     void workerLoop() {
         bool compiledAttempted = false;
+        uint64_t activeRevision = routeRevision.load(std::memory_order_acquire);
 
         while (!stopRequested.load(std::memory_order_acquire)) {
+            const uint64_t revision = routeRevision.load(std::memory_order_acquire);
+            if (revision != activeRevision) {
+                neural.shutdown();
+                compiledAttempted = false;
+                activeRevision = revision;
+            }
             const bool isDisabled = disableNpu.load(std::memory_order_acquire);
             if (isDisabled) {
-                {
-                    std::lock_guard<std::mutex> lk(mtx);
-                    hasValidNeuralSample = false;
-                    currentHwResult = makeDisabledStatus();
-                }
                 if (!initialCompileDone.exchange(true, std::memory_order_acq_rel)) {
                     cvInit.notify_all();
                 }
@@ -738,11 +761,15 @@ struct AsyncDirectorController::Impl {
                 cfg.allowDevVenvDiscovery = true;
                 cfg.simulateMissingRuntimeForTest = simulateMissingRuntime;
                 cfg.inferTimeoutMs = 250;
+                // At 5 Hz on Intel AI Boost, verified requests occasionally finished in 347–557 ms.
+                // Keep that same request pending on the worker; the render thread can hold its last mood.
+                cfg.npuInferTimeoutMs = 1000;
 
                 const HardwareResult initRes = neural.initialize(cfg);
                 {
                     std::lock_guard<std::mutex> lk(mtx);
-                    currentHwResult = disableNpu.load(std::memory_order_acquire) ? makeDisabledStatus() : initRes;
+                    if (routeRevision.load(std::memory_order_acquire) != revision) continue;
+                    currentHwResult = initRes;
                 }
                 if (!initialCompileDone.exchange(true, std::memory_order_acq_rel)) {
                     cvInit.notify_all();
@@ -751,8 +778,10 @@ struct AsyncDirectorController::Impl {
 
             if (neural.isReady() && !runtimeQuarantined) {
                 DirectorFeatureVector fv{};
+                uint64_t inputRevision;
                 {
                     std::lock_guard<std::mutex> lk(mtx);
+                    inputRevision = timelineRevision;
                     fv = latestFeatures;
                     if (!hasFeatureInput) {
                         fv.values = {0.42f, 0.50f, 0.40f, 0.48f, 0.35f, 0.50f, 0.50f, 0.0f, 0.0f, 0.0f,
@@ -761,29 +790,34 @@ struct AsyncDirectorController::Impl {
                 }
 
                 NeuralInferenceSample sample{};
+                NeuralInferenceFailure failure{};
                 const bool forceTimeout = injectTimeout.load(std::memory_order_acquire);
-                if (neural.infer(fv, sample, forceTimeout)) {
+                if (neural.infer(fv, sample, forceTimeout, &failure)) {
                     const auto now = std::chrono::steady_clock::now();
                     std::lock_guard<std::mutex> lk(mtx);
-                    if (disableNpu.load(std::memory_order_acquire)) {
-                        hasValidNeuralSample = false;
-                        currentHwResult = makeDisabledStatus();
-                        continue;
-                    }
-                    latestNeuralSample = sample;
-                    lastNeuralSampleTime = now;
-                    hasValidNeuralSample = true;
+                    if (routeRevision.load(std::memory_order_acquire) != revision) continue;
                     lastInferMs = sample.latencyMs;
+                    completionTimes[completedInferences % completionTimes.size()] = now;
                     ++completedInferences;
                     currentHwResult = neural.hardwareResult();
+                    if (inputRevision == timelineRevision) {
+                        latestNeuralSample = sample;
+                        lastNeuralSampleTime = now;
+                        hasValidNeuralSample = true;
+                    }
                 } else {
                     // Graceful mid-film stall/timeout failover (SPEC_v4 Section 8.2):
                     // Hold current smoothed mood on render thread and transition cleanly to Scripted Director!
+                    const bool onNpu = neural.isUsingHardwareNpu();
+                    const std::string device = neural.activeDeviceName();
                     neural.shutdown();
-                    std::lock_guard<std::mutex> lk(mtx);
+                    std::unique_lock<std::mutex> lk(mtx);
+                    if (routeRevision.load(std::memory_order_acquire) != revision) continue;
+                    const uint64_t previousCompletions = completedInferences;
                     runtimeQuarantined = true;
-                    hasValidNeuralSample = false;
-                    ++timeoutCount;
+                    retryableHardwareFailure = onNpu && !forceTimeout;
+                    clearRouteSamples();
+                    if (failure.timedOut) ++timeoutCount;
 
                     HardwareResult failRes{};
                     failRes.engine = EngineKind::NPU;
@@ -793,20 +827,20 @@ struct AsyncDirectorController::Impl {
                     failRes.status = BackendStatus::Degraded;
                     failRes.health = HealthState::ActiveDegraded;
                     failRes.successfullyExecutedTestWork = false;
-                    failRes.activeBackend = "Scripted_Director_Timeout_Failover";
-                    failRes.diagnosticCode = "NPU_INFERENCE_TIMEOUT_FAILOVER";
-                    failRes.humanReadableReason = forceTimeout
-                        ? "Injected NPU inference timeout (--inject-npu-timeout); held last mood and failed over cleanly to Scripted Director."
-                        : "NPU inference exceeded watchdog timeout; held last mood and failed over cleanly to Scripted Director.";
+                    failRes.activeBackend = failure.timedOut ? "Scripted_Director_Timeout_Failover" : "Scripted_Director_Inference_Error";
+                    failRes.diagnosticCode = failure.timedOut ? "NPU_INFERENCE_TIMEOUT_FAILOVER" : "NPU_INFERENCE_ERROR_FAILOVER";
+                    failRes.humanReadableReason = "OpenVINO " + device + " after " + std::to_string(previousCompletions) +
+                        " successful completions: " + failure.reason + " Switched to the scripted director.";
                     currentHwResult = failRes;
-                    BOO_LOG_WARN("NPU", currentHwResult.humanReadableReason);
+                    lk.unlock();
+                    BOO_LOG_WARN("NPU", failRes.humanReadableReason);
                 }
             }
 
             // 5 Hz cadence (200 ms) per SPEC_v4 Section 4.2.3 (2-10 Hz recommended)
             std::unique_lock<std::mutex> lk(mtx);
             cvWorker.wait_for(lk, std::chrono::milliseconds(200), [&] {
-                return stopRequested.load(std::memory_order_acquire);
+                return stopRequested.load(std::memory_order_acquire) || routeRevision.load(std::memory_order_acquire) != revision;
             });
         }
     }
@@ -834,10 +868,10 @@ void AsyncDirectorController::start(
     impl_->stopRequested.store(false, std::memory_order_release);
     impl_->initialCompileDone.store(false, std::memory_order_release);
     impl_->hasFeatureInput = false;
-    impl_->hasValidNeuralSample = false;
+    impl_->timelineRevision = 0;
+    impl_->clearRouteSamples();
     impl_->runtimeQuarantined = false;
-    impl_->lastInferMs = 0.0f;
-    impl_->completedInferences = 0;
+    impl_->retryableHardwareFailure = false;
     impl_->timeoutCount = 0;
     impl_->smoothedState = DirectorMoodState{};
     impl_->lastCategoryChangeTime = -10.0;
@@ -858,6 +892,12 @@ bool AsyncDirectorController::waitForInitialCompile(uint32_t maxWaitMs) noexcept
 
 void AsyncDirectorController::reset(uint64_t seed) noexcept {
     if (!impl_) return;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        ++impl_->timelineRevision;
+        impl_->hasValidNeuralSample = false;
+        impl_->hasFeatureInput = false;
+    }
     impl_->seed = seed;
     impl_->scripted.reset(seed);
     impl_->smoothingInitialized = false;
@@ -871,11 +911,29 @@ void AsyncDirectorController::setDisableNpu(bool disable) noexcept {
         if (impl_->disableNpu.exchange(disable, std::memory_order_acq_rel) == disable) return;
         // Publish the selected route synchronously; an in-flight worker result
         // must not leave an Accelerated badge visible after the user disables it.
-        impl_->hasValidNeuralSample = false;
+        impl_->clearRouteSamples();
+        impl_->retryableHardwareFailure = false;
+        impl_->routeRevision.fetch_add(1, std::memory_order_acq_rel);
         impl_->currentHwResult = disable ? impl_->makeDisabledStatus() : impl_->makeProbingStatus();
         if (!disable) impl_->runtimeQuarantined = false;
     }
     impl_->cvWorker.notify_all();
+}
+
+bool AsyncDirectorController::retryIfDegraded() noexcept {
+    if (!impl_) return false;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        if (!impl_->running || impl_->disableNpu || impl_->injectTimeout ||
+            !impl_->runtimeQuarantined || !impl_->retryableHardwareFailure) return false;
+        impl_->runtimeQuarantined = false;
+        impl_->retryableHardwareFailure = false;
+        impl_->clearRouteSamples();
+        impl_->currentHwResult = impl_->makeProbingStatus();
+        impl_->routeRevision.fetch_add(1, std::memory_order_acq_rel);
+    }
+    impl_->cvWorker.notify_all();
+    return true;
 }
 
 void AsyncDirectorController::setInjectTimeout(bool inject) noexcept {
@@ -888,16 +946,25 @@ void AsyncDirectorController::setInjectTimeout(bool inject) noexcept {
 
 DirectorMoodState AsyncDirectorController::evaluateFrame(
     const FrameContext& ctx,
-    const SceneCue* activeCue) noexcept {
-    if (!impl_) return DirectorMoodState{};
+    const SceneCue* activeCue,
+    DirectorMoodState* scriptedBaseline) noexcept {
+    if (!impl_) {
+        if (scriptedBaseline) *scriptedBaseline = {};
+        return {};
+    }
 
     const DirectorMoodState scriptedTarget = impl_->scripted.evaluate(ctx, activeCue);
+    if (scriptedBaseline) *scriptedBaseline = scriptedTarget;
     const DirectorFeatureVector fv = impl_->scripted.buildFeatures(ctx, activeCue);
 
     bool useNeural = false;
     NeuralInferenceSample neuralSample{};
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
+        if (ctx.seeking) {
+            ++impl_->timelineRevision;
+            impl_->hasValidNeuralSample = false;
+        }
         impl_->latestFeatures = fv;
         impl_->hasFeatureInput = true;
         if (impl_->hasValidNeuralSample && !impl_->disableNpu.load(std::memory_order_relaxed) && !impl_->runtimeQuarantined) {
@@ -961,13 +1028,25 @@ AsyncDirectorTelemetry AsyncDirectorController::telemetry() const noexcept {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     out.hardwareResult = impl_->disableNpu.load(std::memory_order_acquire)
         ? impl_->makeDisabledStatus() : impl_->currentHwResult;
-    out.lastInferMs = impl_->lastInferMs;
-    out.completedInferences = impl_->completedInferences;
+    if (!impl_->hasValidNeuralSample && out.hardwareResult.successfullyExecutedTestWork) {
+        out.hardwareResult.health = HealthState::Probing;
+        out.hardwareResult.status = BackendStatus::Substituted;
+        out.hardwareResult.successfullyExecutedTestWork = false;
+        out.hardwareResult.activeBackend = "Scripted_Director_Warmup";
+        out.hardwareResult.diagnosticCode = "NPU_AWAITING_CURRENT_CUE";
+        out.hardwareResult.humanReadableReason = "Running scripted controls while the model processes the current scene.";
+    }
     out.timeoutCount = impl_->timeoutCount;
-    if (impl_->hasValidNeuralSample) {
+    if (impl_->running && impl_->hasValidNeuralSample) {
         const auto now = std::chrono::steady_clock::now();
+        out.lastInferMs = impl_->lastInferMs;
+        out.completedInferences = impl_->completedInferences;
         out.resultAgeMs = static_cast<float>(
             std::chrono::duration<double, std::milli>(now - impl_->lastNeuralSampleTime).count());
+        const auto start = now - std::chrono::seconds(1);
+        const size_t count = static_cast<size_t>(std::min<uint64_t>(out.completedInferences, impl_->completionTimes.size()));
+        out.completedRateHz = static_cast<float>(std::count_if(impl_->completionTimes.begin(),
+            impl_->completionTimes.begin() + count, [start](auto t) { return t > start; }));
     }
     return out;
 }

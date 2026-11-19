@@ -29,7 +29,7 @@ constexpr UiLabelSpec kLabelSpecs[static_cast<size_t>(UiLabel::Count)] = {
     {"hud.prev",        4.0f, 1.50f, true,  0}, {"hud.play",       5.4f, 1.50f, true,  0},
     {"hud.pause",       5.4f, 1.50f, true,  0}, {"hud.next",       5.0f, 1.55f, true,  0},
     {"hud.mode_film",   8.8f, 1.50f, true,  0}, {"hud.mode_free",  8.8f, 1.50f, true,  0},
-    {"hud.live_gpu",   15.0f, 1.55f, false, 0}, {"hud.col_size",   8.0f, 1.40f, false, 0},
+    {"hud.hardware",   11.0f, 1.55f, false, 0}, {"hud.col_size",   8.0f, 1.40f, false, 0},
     {"hud.col_rate",    8.0f, 1.40f, false, 0},
     {"hud.state_live",  5.0f, 1.45f, true,  0}, {"hud.state_sub",  5.0f, 1.45f, true,  0},
     {"hud.state_off",   5.0f, 1.45f, true,  0}, {"hud.state_fault",5.0f, 1.45f, true,  0},
@@ -54,6 +54,8 @@ constexpr UiLabelSpec kLabelSpecs[static_cast<size_t>(UiLabel::Count)] = {
     {"hud.aov.ray_heat", 16.8f, 1.45f, false, 0},
     {"hud.live_camera",  13.4f, 1.55f, false, 0},
     {"hud.ost.synth",    24.0f, 1.32f, false, 0}, {"hud.ost.custom",      24.0f, 1.32f, false, 0},
+    {"hud.state_script",  7.0f, 1.45f, true,  0}, {"hud.state_warming",   7.0f, 1.45f, true,  0},
+    {"hud.state_idle",    5.0f, 1.45f, true,  0},
 };
 
 std::wstring utf8ToWide(std::string_view utf8) {

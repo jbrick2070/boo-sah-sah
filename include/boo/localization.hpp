@@ -12,6 +12,7 @@ enum class UiText : uint32_t {
     UnsupportedGpuTitle,
     GraphicsFailureBody,
     Loading,
+    IndependentProduction,
     Count
 };
 

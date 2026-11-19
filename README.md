@@ -66,7 +66,7 @@ Debug-layer absence is recorded as unavailable, never as proof of zero warnings.
 | `Left` / `Right` | Seek `-2 s` / `+2 s` (`Shift` + `Left`/`Right`: `-10 s` / `+10 s`) |
 | `,` / `.` (or `[` / `]`) | Step `-1` / `+1` frame (`800` samples @ `48 kHz`) while paused |
 | `G` | Seek to narrative reveal pre-roll |
-| `1` – `6` | `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU Solo, `5` CUDA Solo, `6` Finale Loop |
+| `1` – `6` | `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` compare the live and scripted directors in the sanctuary (press again to return), `5` CUDA Solo, `6` Finale Loop |
 | `L` | Toggle looping |
 | `M` | Toggle mute |
 | `-` / `=` (or `Down` / `Up`) | Trim master volume by `5%` (`0–100%`) |
@@ -80,7 +80,7 @@ Debug-layer absence is recorded as unavailable, never as proof of zero warnings.
 | `V` | Toggle live **HW H.264 MFT** Encode+Decode round-trip / `SHADER SIGNAL` / clean bypass |
 | `O` | Toggle **Spout2** clean-feed D3D12->D3D11 shared texture sender (`BooSahSah_Clean`) |
 | `W` | Toggle / **One-Key Privacy Stop** for opt-in UVC webcam (`LIVE CAMERA`) |
-| `A` | Cycle single-variable A/B split-screen pillar (`RT -> CUDA -> Tensor -> Codec`) |
+| `A` | Cycle the split-screen comparison through RT, CUDA, Tensor, Codec, and the stage director. Press `4` to jump straight to the director comparison. |
 | `Tab` / `F1` | Cycle HUD: `Full Telemetry` -> `Compact Strip` -> `A/B Split` -> `Clean Cinema` |
 | `B` | Start asynchronous standalone numerical benchmark sweep (`BENCH [B]`) |
 | `F11` / `Alt+Enter` | Toggle borderless fullscreen |

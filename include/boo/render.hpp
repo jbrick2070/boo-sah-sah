@@ -30,6 +30,20 @@ struct GpuPassTimingsMs {
     double presentPassMs = 0.0;
 };
 
+enum class DirectorHudBackend : uint32_t { Off, Warming, Npu, Cpu, Scripted, Faulted };
+
+inline DirectorHudBackend classifyDirectorHudBackend(const HardwareResult& result) noexcept {
+    if (result.health == HealthState::Probing) return DirectorHudBackend::Warming;
+    if (result.status == BackendStatus::Faulted) return DirectorHudBackend::Faulted;
+    if (result.status == BackendStatus::Unavailable || result.diagnosticCode == "DISABLED_BY_FLAG")
+        return DirectorHudBackend::Off;
+    if (result.successfullyExecutedTestWork) {
+        if (result.status == BackendStatus::Accelerated) return DirectorHudBackend::Npu;
+        if (result.activeBackend.starts_with("OpenVINO_CPU")) return DirectorHudBackend::Cpu;
+    }
+    return DirectorHudBackend::Scripted;
+}
+
 // Telemetry packet uploaded each frame to the procedural D3D12 HUD shader
 // to render crisp on-screen numbers, progress bars, engine badges, audio spectrum, and benchmark gauges.
 struct HudTelemetrySnapshot {
@@ -66,6 +80,8 @@ struct HudTelemetrySnapshot {
     bool codecSignalHijackActive = false;
     bool liveCameraActive = false;
     std::array<LivePillarTelemetry, 4> livePillars{};
+    DirectorHudBackend directorBackend = DirectorHudBackend::Off;
+    float directorRateHz = 0.0f;
     float npuInferMs = 0.0f;
     float npuResultAgeMs = 0.0f;
     uint64_t npuCompletedInferences = 0;
