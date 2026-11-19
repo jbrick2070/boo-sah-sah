@@ -245,6 +245,7 @@ struct TrilogyMeshRenderer::Impl {
     bool reblurPrevValid=false,prevSunOverride=false,prevLampsOff=false;
     float prevWorldToView[16]{},prevViewToClip[16]{},prevEye[3]{},prevForward[3]{},prevSunDir[3]{};
     uint32_t w=0,h=0,hits=0,queries=0,fallbacks=0;
+    bool usedFallbackTexture = false;
     bool verified=false,rtReady=false;
     explicit Impl(D3D12Context& c):context(c),nrd(c){}
     bool isPartActiveInShow(const Part& p,float time) const noexcept {
@@ -457,18 +458,22 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         Btex bAlb, bNor, bOrm, bEnv;
         std::string texWhy;
         if (fault || !loadBtex(resolveResourcePath("assets/textures/pbr_albedo_alpha.btex"), bAlb, &texWhy)) {
+            s.usedFallbackTexture = true;
             bAlb = buildFallbackAlbedoArray(42u);
             BOO_LOG_WARN("M2Tex", "pbr_albedo_alpha.btex fallback: " + texWhy);
         }
         if (fault || !loadBtex(resolveResourcePath("assets/textures/pbr_normal.btex"), bNor, &texWhy)) {
+            s.usedFallbackTexture = true;
             bNor = buildFallbackNormalArray(42u);
             BOO_LOG_WARN("M2Tex", "pbr_normal.btex fallback: " + texWhy);
         }
         if (fault || !loadBtex(resolveResourcePath("assets/textures/pbr_ormt.btex"), bOrm, &texWhy)) {
+            s.usedFallbackTexture = true;
             bOrm = buildFallbackOrmtArray(42u);
             BOO_LOG_WARN("M2Tex", "pbr_ormt.btex fallback: " + texWhy);
         }
         if (fault || !loadBtex(resolveResourcePath("assets/textures/pbr_ibl_env.btex"), bEnv, &texWhy)) {
+            s.usedFallbackTexture = true;
             bEnv = buildFallbackEnvIblArray(3u);
             BOO_LOG_WARN("M2Tex", "pbr_ibl_env.btex fallback: " + texWhy);
         }
@@ -1125,4 +1130,7 @@ uint32_t TrilogyMeshRenderer::activeDenoiseMode() const noexcept {return impl_?i
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}
+bool TrilogyMeshRenderer::hasAllAuthoredSceneAssets() const noexcept {
+    return impl_->fallbacks == 0 && !impl_->usedFallbackTexture;
+}
 }

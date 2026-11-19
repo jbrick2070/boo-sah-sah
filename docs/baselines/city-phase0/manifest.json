@@ -1,0 +1,378 @@
+{
+  "adapter": "NVIDIA GeForce RTX 5080 Laptop GPU",
+  "capture": "HUD off, no captions or audio-reactive input; RGB10A2 CanvasClean compared word for word after a backward seek; lossless WIC RGB8 PNG of the 8-bit conversion",
+  "complete": true,
+  "controls": "Family, clean canvas, sample-derived ScriptedDirector and analytical audio, default preferred graphics paths",
+  "debug_layer": false,
+  "edition": "Family",
+  "frames": [
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 4.40851,
+      "gpu_p95_ms": 4.85802,
+      "peak_process_local_bytes": 1564315648,
+      "png": "film_taipei_8s.png",
+      "rgb10_fnv1a64": "f18ffd30743da1ea",
+      "sample": 384000,
+      "scene": "taipei_intro",
+      "scene_seed": "15601832261673277967",
+      "seconds": 8
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 7.23914,
+      "gpu_p95_ms": 8.00893,
+      "peak_process_local_bytes": 1564315648,
+      "png": "film_sanctuary_168s.png",
+      "rgb10_fnv1a64": "bb4bd61936e3bb37",
+      "sample": 8064000,
+      "scene": "madame_n",
+      "scene_seed": "12718711786011255109",
+      "seconds": 168
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 8.36214,
+      "gpu_p95_ms": 9.45229,
+      "peak_process_local_bytes": 1564315648,
+      "png": "film_sanctuary_176s.png",
+      "rgb10_fnv1a64": "a0c8e6682693d84a",
+      "sample": 8448000,
+      "scene": "madame_n",
+      "scene_seed": "12718711786011255109",
+      "seconds": 176
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "NVIDIA H.264 Encoder MFT [NVENC 13.1] -> H.264 Decode",
+          "diagnostic": "CODEC_LIVE_ROUNDTRIP_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 6.05971,
+      "gpu_p95_ms": 6.56726,
+      "peak_process_local_bytes": 1583726592,
+      "png": "film_shenzhen_258s.png",
+      "rgb10_fnv1a64": "7a67d5c159779802",
+      "sample": 12384000,
+      "scene": "signal_hijack",
+      "scene_seed": "7353745564429695274",
+      "seconds": 258
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Substituted",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 7.87869,
+      "gpu_p95_ms": 8.38262,
+      "peak_process_local_bytes": 1583726592,
+      "png": "film_orchid_finale_318s.png",
+      "rgb10_fnv1a64": "ebf9fe89b8467376",
+      "sample": 15264000,
+      "scene": "silicon_rebellion",
+      "scene_seed": "5228488399170977588",
+      "seconds": 318
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Substituted",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/film_360s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-glass-orchid",
+      "gpu_p50_ms": 7.9527,
+      "gpu_p95_ms": 9.58358,
+      "peak_process_local_bytes": 1583726592,
+      "png": "film_dawn_352s.png",
+      "rgb10_fnv1a64": "0c1eb26cbcdf45e5",
+      "sample": 16896000,
+      "scene": "silicon_rebellion",
+      "scene_seed": "5228488399170977588",
+      "seconds": 352
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/m2_trilogy_180s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-m2-trilogy-180s",
+      "gpu_p50_ms": 5.79363,
+      "gpu_p95_ms": 6.17878,
+      "peak_process_local_bytes": 1477337088,
+      "png": "trilogy_shanghai_15s.png",
+      "rgb10_fnv1a64": "4a4d46ebe186c54b",
+      "sample": 720000,
+      "scene": "shanghai_trestle",
+      "scene_seed": "18265546929721754217",
+      "seconds": 15
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/m2_trilogy_180s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-m2-trilogy-180s",
+      "gpu_p50_ms": 5.56438,
+      "gpu_p95_ms": 5.99824,
+      "peak_process_local_bytes": 1477992448,
+      "png": "trilogy_taipei_168s.png",
+      "rgb10_fnv1a64": "fa13fd742b2604e5",
+      "sample": 8064000,
+      "scene": "taipei_sanctuary",
+      "scene_seed": "13972176293143546493",
+      "seconds": 168
+    },
+    {
+      "backends": {
+        "CUDA": {
+          "backend": "CUDA Driver PTX (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "CUDA_LIVE_PARTICLES_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Codec": {
+          "backend": "Direct_10Bit_CanvasClean_Bypass",
+          "diagnostic": "CODEC_BYPASS_CLEAN_ACTIVE",
+          "status": "Unavailable",
+          "verified": false
+        },
+        "RT": {
+          "backend": "D3D12_DXR_1_2_RayQuery",
+          "diagnostic": "DXR_LIVE_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        },
+        "Tensor": {
+          "backend": "PTX mma.sync.m16n8k16 (NVIDIA GeForce RTX 5080 Laptop GPU SM 12.0)",
+          "diagnostic": "TENSOR_LIVE_MMA_VERIFIED",
+          "status": "Accelerated",
+          "verified": true
+        }
+      },
+      "cue": "assets/cues/m2_trilogy_180s.json",
+      "cue_seed": "266203",
+      "film_id": "boo-sah-sah-m2-trilogy-180s",
+      "gpu_p50_ms": 4.24035,
+      "gpu_p95_ms": 5.33584,
+      "peak_process_local_bytes": 1477992448,
+      "png": "trilogy_taipei_176s.png",
+      "rgb10_fnv1a64": "fe24576645ed24e7",
+      "sample": 8448000,
+      "scene": "taipei_sanctuary",
+      "scene_seed": "13972176293143546493",
+      "seconds": 176
+    }
+  ],
+  "height": 1440,
+  "preset": "Showcase",
+  "sample_rate": 48000,
+  "schema": 1,
+  "timing": "D3D12 direct queue, clear through presentation draw, excluding DXGI Present wait, external compute queues and readback",
+  "vram": "Maximum sampled DXGI local-segment CurrentUsage for this process at measured frame retirement, bytes",
+  "width": 2560,
+  "window": "24 preroll frames then 60 consecutive samples at 60 Hz from each anchor; nearest-rank percentiles"
+}

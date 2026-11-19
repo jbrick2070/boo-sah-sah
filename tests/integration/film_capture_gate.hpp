@@ -145,7 +145,7 @@ boo::FrameContext makeFilmGateContext(const boo::CueSheet& cue, int64_t sample, 
 
 bool writeFilmGateJson(const std::filesystem::path& path, const boo::JsonValue& value) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out << boo::serializeJson(value, 2) << '\n';
+    out << boo::serializeJson(value, 2);
     out.close();
     BOO_CHECK(out.good());
     return true;

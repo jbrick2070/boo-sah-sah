@@ -599,6 +599,8 @@ bool D3D12Context::beginFrame() {
     }
     if (!checkDeviceHealthy()) return false;
 
+    // A missing timestamp must not repeat the preceding slot's measurement.
+    impl_->lastPassTimings = {};
     // Read resolved 5-point GPU timestamps from this retired frame slot (zero GPU stall)
     if (requiredFence > 0 && impl_->timestampReadback && impl_->gpuTimestampFreq > 0) {
         const uint32_t slot = impl_->frameIndex;

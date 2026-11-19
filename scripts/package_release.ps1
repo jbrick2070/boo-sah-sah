@@ -70,7 +70,11 @@ Copy-Item -Force (Join-Path $RepoRoot "assets\shaders\*.hlsl") (Join-Path $Stage
 Copy-Item -Force (Join-Path $RepoRoot "assets\meshes\*.bmesh") (Join-Path $StageDir "assets\meshes\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\textures\*.btex") (Join-Path $StageDir "assets\textures\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\models\madame_n_*") (Join-Path $StageDir "assets\models\")
-Copy-Item -Force (Join-Path $RepoRoot "assets\audio\*.mp3") (Join-Path $StageDir "assets\audio\")
+$soundtrack = (Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "assets\manifest.json") | ConvertFrom-Json).assets |
+    Where-Object { $_.kind -eq 'audio' }
+foreach ($track in $soundtrack) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $track.path) -Destination (Join-Path $StageDir $track.path) -ErrorAction Stop
+}
 Copy-Item -Force (Join-Path $RepoRoot "assets\cues\*.json") (Join-Path $StageDir "assets\cues\")
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\strings") | Out-Null
 Copy-Item -Force (Join-Path $RepoRoot "assets\strings\*.json") (Join-Path $StageDir "assets\strings\")
@@ -116,24 +120,33 @@ if ((-not $ExcludeOpenVinoRuntime) -and (Test-Path $VenvOvDir)) {
 #     enabling progressive NRD REFERENCE accumulation up to 4096 SPP in Interactive Explore Studio mode.
 $NrdDllSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\bin\NRD.dll"
 $NrdLicSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\LICENSE-NVIDIA-NRD.txt"
+$NrdStage = Join-Path $StageDir "nrd"
+New-Item -ItemType Directory -Force -Path $NrdStage | Out-Null
+# The compiled M2 shader contains RTXDI code even when the NRD DLL is omitted.
+Copy-Item -LiteralPath $NrdLicSrc -Destination (Join-Path $NrdStage "LICENSE-NVIDIA-NRD.txt") -ErrorAction Stop
 if ((-not $ExcludeNrdRuntime) -and (Test-Path $NrdDllSrc)) {
-    $NrdStage = Join-Path $StageDir "nrd"
-    New-Item -ItemType Directory -Force -Path $NrdStage | Out-Null
     Copy-Item -Force $NrdDllSrc (Join-Path $NrdStage "NRD.dll")
-    if (Test-Path $NrdLicSrc) {
-        Copy-Item -Force $NrdLicSrc (Join-Path $NrdStage "LICENSE-NVIDIA-NRD.txt")
-    }
     Write-Host "==> Staged dynamic NVIDIA NRD v4.18.0 DXIL sidecar into nrd\" -ForegroundColor Cyan
 }
 
 # 6. Documentation, changelog, and licenses
 Copy-Item -Force (Join-Path $RepoRoot "README.md") (Join-Path $StageDir "README.md")
 Copy-Item -Force (Join-Path $RepoRoot "LICENSES.md") (Join-Path $StageDir "LICENSES.md")
+Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE"), (Join-Path $RepoRoot "LICENSE-ASSETS.md") -Destination $StageDir -ErrorAction Stop
 Copy-Item -Force (Join-Path $RepoRoot "CHANGELOG.md") (Join-Path $StageDir "CHANGELOG.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\USER_GUIDE.md") (Join-Path $StageDir "docs\USER_GUIDE.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\SPEC_v4.md") (Join-Path $StageDir "docs\SPEC_v4.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\quality_upgrade_report.md") (Join-Path $StageDir "docs\quality_upgrade_report.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\quality_timings.json") (Join-Path $StageDir "docs\quality_timings.json")
+
+# Resolve cues and registered release assets entirely within the assembled layout.
+Push-Location -LiteralPath $StageDir
+try {
+    & (Join-Path $StageDir "boo_sah_sah.exe") --validate-cues --no-activate | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Staged asset or cue verification failed before packing." }
+} finally {
+    Pop-Location
+}
 
 Write-Host "==> Packing single-file Windows installer: $SetupPath" -ForegroundColor Cyan
 $packProc = Start-Process -FilePath $StubExe -ArgumentList @("--pack", "`"$StubExe`"", "`"$StageDir`"", "`"$SetupPath`"") -Wait -PassThru -NoNewWindow

@@ -21,6 +21,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+      - name: Check source and asset provenance
+        run: python tools/refresh_asset_hashes.py --check
       - name: Build native baseline
         run: ./scripts/build.ps1 -Preset ${{ matrix.preset }}
       - name: CPU tests and cue provenance

@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "project": "BOO SAH SAH — The Glass Orchid Protocol",
   "milestone": "M10",
   "assets": [
@@ -8,8 +8,10 @@
       "path": "assets/shaders/m0_test_visual.hlsl",
       "kind": "shader",
       "provenance": "Original M0 procedural HLSL shader authored for BOO SAH SAH",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/shaders/m0_test_visual.hlsl",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
       "sha256": "cb8f3b5cc5c2084bea981feffa57856d52fccf39bede3b9015ba81368759904b"
     },
     {
@@ -17,8 +19,10 @@
       "path": "assets/shaders/m0_benchmarks.hlsl",
       "kind": "shader",
       "provenance": "Original M0 ad-hoc DXR 1.1 and HLSL compute benchmark kernels authored for BOO SAH SAH",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/shaders/m0_benchmarks.hlsl",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
       "sha256": "75bb66688816178a1edbb700a8a1bcc8e8ef21b8133941b34475f06db334110d"
     },
     {
@@ -26,17 +30,21 @@
       "path": "assets/shaders/m1_taipei_slice.hlsl",
       "kind": "shader",
       "provenance": "Original M1 4-pass DXR 1.1 RayQuery + Raster + Dual-Kawase HDR Bloom + ACES + Letterbox HUD shader suite",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
-      "sha256": "54eff71e55791c9f875d562b8bac5eba41b81b3b1b2dfee637369b10e94be4d0"
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/shaders/m1_taipei_slice.hlsl",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "1961a8e0a71c23dc9dabc25df2636e97b13bb76203d394bc003a34317cf8a835"
     },
     {
       "id": "cue_m1_taipei_60s",
       "path": "assets/cues/m1_taipei_60s.json",
       "kind": "cue_sheet",
       "provenance": "Original M1 60-second (2,880,000-sample @ 48 kHz) Taipei to Glass Orchid vertical slice cue schedule",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/m1_taipei_60s.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "928f83b699b9536578e81dd6a9006696fafd7f1e0537fb32a8f54f0563d16ba7"
     },
     {
@@ -44,8 +52,10 @@
       "path": "assets/cues/film_360s.json",
       "kind": "cue_sheet",
       "provenance": "Original 360-second (17,280,000-sample @ 48 kHz) master timeline cue schedule per SPEC_v4",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/film_360s.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "7f5a6d0d3921a3c3dd74383aa29b8c30392ad17985cb36d462912ab1cd14552f"
     },
     {
@@ -53,8 +63,10 @@
       "path": "assets/cues/solo_rt.json",
       "kind": "cue_sheet",
       "provenance": "Original RT Solo loop cue schedule",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/solo_rt.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "0a87da3ab67811ae8a48c81fb1430ed68eb5d76a9363db9ccb0f29462d430e10"
     },
     {
@@ -62,8 +74,10 @@
       "path": "assets/cues/solo_tensor.json",
       "kind": "cue_sheet",
       "provenance": "Original Tensor Solo loop cue schedule",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/solo_tensor.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "dc8ddfaae6bb1be4d77951877cf7f92fe0148aa353a33857e3ad5e704c2b1d6e"
     },
     {
@@ -71,8 +85,10 @@
       "path": "assets/cues/solo_npu.json",
       "kind": "cue_sheet",
       "provenance": "Original NPU Solo loop cue schedule",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/solo_npu.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "f8c9de225f78ab43267dac76e2f2a04dcfd52825b125ac093e16d660b6fb0166"
     },
     {
@@ -80,8 +96,10 @@
       "path": "assets/cues/solo_cuda.json",
       "kind": "cue_sheet",
       "provenance": "Original CUDA Solo loop cue schedule",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/solo_cuda.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "2668472a5a633ac15a39d089844583d75ce1bf9ea5979bcc6425c01b54613aca"
     },
     {
@@ -89,17 +107,24 @@
       "path": "assets/cues/m2_trilogy_180s.json",
       "kind": "cue_sheet",
       "provenance": "Original project-authored M2 trilogy",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/cues/m2_trilogy_180s.json",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "eb34d51a382f9513ae43e8b37eea00f0bee68da0ac554cbc6c19e656aaa812f7"
     },
     {
       "id": "shader_m2_mesh",
       "path": "assets/shaders/m2_mesh.hlsl",
       "kind": "shader",
-      "provenance": "Original project-authored M2 trilogy",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "provenance": "Project-authored M2 trilogy shader with adapted NVIDIA RTXDI reservoir sampling",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/shaders/m2_mesh.hlsl",
+      "author": "Jeffrey A Brick and NVIDIA Corporation",
+      "license": "MIT AND LicenseRef-NVIDIA-RTX-SDKs",
+      "attribution_required": true,
+      "upstream_sources": [
+        "https://github.com/NVIDIA-RTX/RTXDI"
+      ],
       "sha256": "500de90abf9794f20865113d797a987783246f7cabedfd226fe0a93183b4268b"
     },
     {
@@ -107,8 +132,10 @@
       "path": "assets/models/madame_n_director.xml",
       "kind": "model",
       "provenance": "Original compact 16->64->32->(5+5) OpenVINO IR stage-director MLP generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_madame_n_model.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
       "sha256": "f919bc523849191bde20812297e40c0735a7685f57525f7d03ed4c3fd8f90aaf"
     },
     {
@@ -116,8 +143,10 @@
       "path": "assets/models/madame_n_director.bin",
       "kind": "model",
       "provenance": "Original FP32 OpenVINO IR weights generated deterministically by tools/gen_madame_n_model.py (seed 266203)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_madame_n_model.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
       "sha256": "72f7826cf0c8feaffb5b1f462f4b329cfe9be64b522c2025e44d0639c007ccf1"
     },
     {
@@ -125,35 +154,91 @@
       "path": "assets/models/madame_n_metadata.json",
       "kind": "metadata",
       "provenance": "Model contract and SHA-256 verification metadata generated by tools/gen_madame_n_model.py",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_madame_n_model.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
       "sha256": "5bab6511d60471864047d77bbec3537ff8b0db89103eaefaf297cf95a800cd28"
     },
     {
       "id": "tex_pbr_albedo_alpha",
       "path": "assets/textures/pbr_albedo_alpha.btex",
       "kind": "texture",
-      "provenance": "40-slice 1024x1024 BC7_UNORM_SRGB PBR base-color + cutout alpha array built by tools/gen_pbr_textures.py from PolyHaven CC0 scans + authored PBR layers",
+      "provenance": "42-slice 1024x1024 BC7_UNORM_SRGB PBR base-color + cutout alpha array built by tools/gen_pbr_textures.py from PolyHaven CC0 scans + authored PBR layers",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_pbr_textures.py",
+      "author": "Jeffrey A Brick (assembly), Amal Kumar, Charlotte Baglioni, James Ray Cock, Jenelle van Heerden, Rico Cilliers, Rob Tuytel, Sergej Majboroda, colormass (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/asphalt_02",
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/clay_plaster",
+        "https://polyhaven.com/a/concrete_moss",
+        "https://polyhaven.com/a/concrete_pavers_02",
+        "https://polyhaven.com/a/fern_02",
+        "https://polyhaven.com/a/granite_tile_02",
+        "https://polyhaven.com/a/long_white_tiles",
+        "https://polyhaven.com/a/marble_01",
+        "https://polyhaven.com/a/plastered_wall_02",
+        "https://polyhaven.com/a/potted_plant_04",
+        "https://polyhaven.com/a/rough_linen",
+        "https://polyhaven.com/a/terrazzo_tiles",
+        "https://polyhaven.com/a/white_oak_veneer"
+      ],
       "sha256": "8d6f07ac515ca1890deb4edc6995b63103ea1356d9089606007c06a8869067c2"
     },
     {
       "id": "tex_pbr_normal",
       "path": "assets/textures/pbr_normal.btex",
       "kind": "texture",
-      "provenance": "40-slice 1024x1024 BC5_UNORM tangent-space normal map array built by tools/gen_pbr_textures.py from PolyHaven CC0 scans + authored PBR layers",
+      "provenance": "42-slice 1024x1024 BC5_UNORM tangent-space normal map array built by tools/gen_pbr_textures.py from PolyHaven CC0 scans + authored PBR layers",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_pbr_textures.py",
+      "author": "Jeffrey A Brick (assembly), Amal Kumar, Charlotte Baglioni, James Ray Cock, Jenelle van Heerden, Rico Cilliers, Rob Tuytel, Sergej Majboroda, colormass (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/asphalt_02",
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/clay_plaster",
+        "https://polyhaven.com/a/concrete_moss",
+        "https://polyhaven.com/a/concrete_pavers_02",
+        "https://polyhaven.com/a/fern_02",
+        "https://polyhaven.com/a/granite_tile_02",
+        "https://polyhaven.com/a/long_white_tiles",
+        "https://polyhaven.com/a/marble_01",
+        "https://polyhaven.com/a/plastered_wall_02",
+        "https://polyhaven.com/a/potted_plant_04",
+        "https://polyhaven.com/a/rough_linen",
+        "https://polyhaven.com/a/terrazzo_tiles",
+        "https://polyhaven.com/a/white_oak_veneer"
+      ],
       "sha256": "4e7d27a671baa1ddf62914c5c4c58b2be8dd8db2f13b90bd5435452fd9f3a5f2"
     },
     {
       "id": "tex_pbr_ormt",
       "path": "assets/textures/pbr_ormt.btex",
       "kind": "texture",
-      "provenance": "40-slice 1024x1024 BC7_UNORM linear AO/roughness/metallic/translucency-clearcoat array with Toksvig specular AA mips built by tools/gen_pbr_textures.py",
+      "provenance": "42-slice 1024x1024 BC7_UNORM linear AO/roughness/metallic/translucency-clearcoat array with Toksvig specular AA mips built by tools/gen_pbr_textures.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_pbr_textures.py",
+      "author": "Jeffrey A Brick (assembly), Amal Kumar, Charlotte Baglioni, James Ray Cock, Jenelle van Heerden, Rico Cilliers, Rob Tuytel, Sergej Majboroda, colormass (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/asphalt_02",
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/clay_plaster",
+        "https://polyhaven.com/a/concrete_moss",
+        "https://polyhaven.com/a/concrete_pavers_02",
+        "https://polyhaven.com/a/fern_02",
+        "https://polyhaven.com/a/granite_tile_02",
+        "https://polyhaven.com/a/long_white_tiles",
+        "https://polyhaven.com/a/marble_01",
+        "https://polyhaven.com/a/plastered_wall_02",
+        "https://polyhaven.com/a/potted_plant_04",
+        "https://polyhaven.com/a/rough_linen",
+        "https://polyhaven.com/a/terrazzo_tiles",
+        "https://polyhaven.com/a/white_oak_veneer"
+      ],
       "sha256": "30d2cdc1982109b73a3b7bf447552cc66471b8a9f47a6883469c5b3540cfda4e"
     },
     {
@@ -161,8 +246,13 @@
       "path": "assets/textures/pbr_ibl_env.btex",
       "kind": "texture",
       "provenance": "3-slice 512x256 RGBA16F GGX-prefiltered equirectangular IBL array built by tools/gen_pbr_textures.py from PolyHaven CC0 qwantani_dawn_puresky + procedural studio/sky HDRs",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_pbr_textures.py",
+      "author": "Jeffrey A Brick (assembly), Greg Zaal, Jarod Guest (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/qwantani_dawn_puresky"
+      ],
       "sha256": "a01809a933b13bcdf75a8fb5adfa86446eee5d769a653be51dcad6497aac5514"
     },
     {
@@ -170,6 +260,8 @@
       "path": "assets/meshes/shanghai_trestle.bmesh",
       "kind": "mesh",
       "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
       "sha256": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15"
@@ -179,6 +271,8 @@
       "path": "assets/meshes/shenzhen_evtol.bmesh",
       "kind": "mesh",
       "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
       "sha256": "9ea67989fd467beb75f93949fbfd8ea2f68b98c63f8db06888a2a205acffa1ac"
@@ -188,8 +282,14 @@
       "path": "assets/meshes/taipei_101_hero.bmesh",
       "kind": "mesh",
       "provenance": "Procedural Blender geometry + solidified PolyHaven CC0 botanical scans generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick (assembly), Rico Cilliers, Rob Tuytel (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/fern_02"
+      ],
       "sha256": "d1be86b40522ae31497b3f3c1142ee432d65ac14e29d7e5d58f8867ff97f475f"
     },
     {
@@ -197,6 +297,8 @@
       "path": "assets/meshes/glass_orchid_hero.bmesh",
       "kind": "mesh",
       "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
       "sha256": "80aa114ecfc81b01dd14131faf0d631c97f882536ccd6e3d468560cd476894ea"
@@ -206,6 +308,8 @@
       "path": "assets/meshes/enamel_cathedral.bmesh",
       "kind": "mesh",
       "provenance": "Original procedural Blender geometry generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
       "sha256": "e75edac862d8c54306466a8c32d2eb7dfb9b6861a3b8f636437761ccfeae09a8"
@@ -215,8 +319,15 @@
       "path": "assets/meshes/microbial_sanctuary.bmesh",
       "kind": "mesh",
       "provenance": "Procedural Blender geometry + solidified PolyHaven CC0 botanical scans generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick (assembly), James Ray Cock, Rico Cilliers, Rob Tuytel (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/fern_02",
+        "https://polyhaven.com/a/potted_plant_04"
+      ],
       "sha256": "5e2ad7ba0a6d45a00ddab681ebe0de232d2d9b8981480d48edfa11de2a87f2dd"
     },
     {
@@ -224,8 +335,14 @@
       "path": "assets/meshes/dawn_alcove.bmesh",
       "kind": "mesh",
       "provenance": "Procedural Blender geometry + solidified PolyHaven CC0 botanical scans generated by tools/gen_trilogy_meshes.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick (assembly), Rico Cilliers, Rob Tuytel (source assets)",
       "license": "CC0-1.0",
       "attribution_required": false,
+      "upstream_sources": [
+        "https://polyhaven.com/a/calathea_orbifolia_01",
+        "https://polyhaven.com/a/fern_02"
+      ],
       "sha256": "9c46c1941c6a5f01b8f32bb0dbdf202d268a3f79182e6101d85a27ffc082acfe"
     },
     {
@@ -233,8 +350,10 @@
       "path": "assets/audio/01_neon_orchid.mp3",
       "kind": "audio",
       "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid — Taiwanese Spy Jazz)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/01_neon_orchid.mp3",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "425c8893fdc38e13f572802597b53700c113966c7285484e868ca3be3789d031"
     },
     {
@@ -242,8 +361,10 @@
       "path": "assets/audio/02_acid_lotus.mp3",
       "kind": "audio",
       "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus — Taiwanese Detroit Techno)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/02_acid_lotus.mp3",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "1a26607fc0252d2a718b92ecc9c7e77ba5c3d909b68c29d6666740faceada07f"
     },
     {
@@ -251,8 +372,10 @@
       "path": "assets/audio/03_velvet_cipher.mp3",
       "kind": "audio",
       "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher — Cinematic Taiwanese Synth-Funk)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/03_velvet_cipher.mp3",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "31b15859de51d3988c5e195957511364f878953f7bb4e398b97dd1882b450c1c"
     },
     {
@@ -260,8 +383,10 @@
       "path": "assets/audio/04_glass_dragon.mp3",
       "kind": "audio",
       "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon — Progressive Demoscene Electronica)",
-      "license": "Proprietary / Project First-Party",
-      "attribution_required": false,
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/04_glass_dragon.mp3",
+      "author": "Jeffrey A Brick",
+      "license": "CC-BY-NC-4.0",
+      "attribution_required": true,
       "sha256": "b299721459028832f2f054c3283759125ab9338d27d90f4b768174448ebb87dd"
     }
   ],
@@ -292,5 +417,150 @@
     "m2_shenzhen_evtol_raster",
     "m2_taipei_sanctuary_dxr",
     "m2_taipei_sanctuary_raster"
+  ],
+  "source_tools": [
+    {
+      "id": "tool_bench_report_main",
+      "path": "tools/bench_report/main.cpp",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/bench_report/main.cpp",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "1775715f56a43b173d95e51cb6eda7e019d2f7c907f41a05cbefeec1f2ff86d1"
+    },
+    {
+      "id": "tool_build_visual_proof_sheets",
+      "path": "tools/build_visual_proof_sheets.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/build_visual_proof_sheets.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "5606eab23dd992fd1c35f069196b8176e13c48dbfea1589e80e4cc8b1e66bb7f"
+    },
+    {
+      "id": "tool_cue_validate_main",
+      "path": "tools/cue_validate/main.cpp",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/cue_validate/main.cpp",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "d41d95de13c297ce88e0a933d09c6de3d80a3c041d5bc72b5a2ad0f2cc45aebf"
+    },
+    {
+      "id": "tool_fetch_polyhaven_cc0",
+      "path": "tools/fetch_polyhaven_cc0.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/fetch_polyhaven_cc0.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "3d77aa7ab880784010d2af13695a1eb8770655f0b231f8a5f3ff1c47ebae22bd"
+    },
+    {
+      "id": "tool_gen_app_icon",
+      "path": "tools/gen_app_icon.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_app_icon.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "03e392f7e81afad3cb90aa020dfb8a96242e473d205ddf1540da1e717e76c3d3"
+    },
+    {
+      "id": "tool_gen_madame_n_model",
+      "path": "tools/gen_madame_n_model.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_madame_n_model.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "b69c99eeee0e3a026c09b175b101fb03db8f51636a61a9b4627541bf9af1bdec"
+    },
+    {
+      "id": "tool_gen_pbr_textures",
+      "path": "tools/gen_pbr_textures.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_pbr_textures.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "36abf63efefdef8df1a861f6d1b368727cfb22e5a2fde424187df2159e3aa8a9"
+    },
+    {
+      "id": "tool_gen_title_glyphs",
+      "path": "tools/gen_title_glyphs.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_title_glyphs.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "770fc23662696deb54c43a9f19b6fb271641c0e48ab7835108243621cb3c8542"
+    },
+    {
+      "id": "tool_gen_trilogy_meshes",
+      "path": "tools/gen_trilogy_meshes.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/gen_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "ab882f14197cb6ce8ebc2fefc4aea7b16a5027b1914bc8258dd43eccb6332994"
+    },
+    {
+      "id": "tool_installer_setup_main",
+      "path": "tools/installer/setup_main.cpp",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/installer/setup_main.cpp",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "16e909326b823a1e11fefcc9a1fe6f6b02f8517894934c34874ff7e72a6a0d7c"
+    },
+    {
+      "id": "tool_refresh_asset_hashes",
+      "path": "tools/refresh_asset_hashes.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/refresh_asset_hashes.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "e2493673849ca826075b33f6918c99903a59236b2598289ef146e4f898722344"
+    },
+    {
+      "id": "tool_render_cycles_reference",
+      "path": "tools/render_cycles_reference.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/render_cycles_reference.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "1b0b00e370a273205d6a21bf58bde3e0d335bfa22c6e6751ee9be12eb434c030"
+    },
+    {
+      "id": "tool_verify_trilogy_meshes",
+      "path": "tools/verify_trilogy_meshes.py",
+      "kind": "tool",
+      "provenance": "Original project tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/verify_trilogy_meshes.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "ddf8c663492e76eceab7c67f03c09696c664caca168188e30d89205dd4dd49d0"
+    }
   ]
 }

@@ -1305,14 +1305,17 @@ int main(int argc, char** argv) {
         AssetManifest manifest{};
         ValidationReport manifestRep{};
         const auto resolvedManifest = resolveResourcePath(settings.manifestPath);
-        if (!loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
+        const auto repoRoot = std::filesystem::absolute(resolvedManifest).parent_path().parent_path();
+        if (loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
+            verifyManifestAssetFiles(manifest, repoRoot, manifestRep);
+        }
+        if (!manifestRep.valid) {
             std::cerr << "[FAIL] Asset manifest validation failed (" << resolvedManifest.string() << "):\n";
             for (const auto& iss : manifestRep.issues) {
                 std::cerr << "  - [" << iss.code << "] " << iss.message << "\n";
             }
             return 1;
         }
-        const auto repoRoot = resolvedManifest.parent_path().parent_path();
         const std::vector<std::filesystem::path> defaultCues = {
             "assets/cues/film_360s.json",
             "assets/cues/m2_trilogy_180s.json",
@@ -1324,12 +1327,12 @@ int main(int argc, char** argv) {
         };
         bool allValid = true;
         for (const auto& cf : defaultCues) {
-            const auto resolvedCue = resolveResourcePath(cf);
+            const auto resolvedCue = repoRoot / cf;
             CueSheet sheet{};
             ValidationReport rep{};
             loadCueSheetFromFile(resolvedCue, sheet, rep);
             if (rep.valid) {
-                validateCueSheetAgainstManifest(sheet, manifest, repoRoot, rep);
+                validateCueSheetAgainstManifest(sheet, manifest, {}, rep);
             }
             if (rep.valid) {
                 std::cout << "[PASS] " << resolvedCue.filename().string()
