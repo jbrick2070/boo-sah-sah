@@ -2,6 +2,7 @@
 
 #include "boo/api.hpp"
 #include "boo/city_modules.hpp"
+#include "boo/m1_scene.hpp"
 
 #include <bit>
 #include <cmath>
@@ -43,6 +44,44 @@ bool testCityModuleLodTransitions() {
     return true;
 }
 
+bool checkXinyiArcades(const boo::CityModuleLayout& layout) {
+    size_t streetSites = 0;
+    for (const auto& p : layout.placements) {
+        const auto& nearMesh = layout.modules[p.modules[0]];
+        if (nearMesh.submeshes.front().part != 62u) continue;
+        ++streetSites;
+        const float width = std::abs(p.rows[0]), height = p.rows[5], depth = std::abs(p.rows[10]);
+        for (const auto id : p.modules) {
+            bool foundSoffit = false, foundShopfront = false;
+            for (const auto& v : layout.modules[id].vertices) {
+                const auto& pos = v.positionMaterial;
+                // The front of the building is -depth/2 in the local frame.
+                foundSoffit |= pos[3] == 28 && v.normalPart[1] < -.99f &&
+                    std::abs(pos[1]*height-3.33f) < .001f && std::abs(pos[2]*depth+depth/2) < .001f;
+                foundShopfront |= pos[3] == 13 && v.normalPart[2] < -.99f &&
+                    std::abs(pos[2]*depth+depth/2-3.64f) < .001f &&
+                    std::abs(v.uvThicknessRoughness[0]-(width-.12f)) < .001f;
+            }
+            BOO_CHECK(foundSoffit && foundShopfront);
+        }
+        // Check the actual camera trajectories against the full bounding sphere
+        // of each new lot, at ten samples per second through both Taipei passes.
+        for (auto mode : {boo::ShowVisualMode::FullFilm360s, boo::ShowVisualMode::M2Trilogy180s}) {
+            const int start = mode == boo::ShowVisualMode::FullFilm360s ? 0 : 120;
+            const int end = mode == boo::ShowVisualMode::FullFilm360s ? 45 : 180;
+            for (int t=start*10; t<end*10; ++t) {
+                const auto camera = boo::evaluateShowCamera(mode,int64_t(t)*4800);
+                const auto& eye = camera.eye;
+                const float distance = std::hypot(eye[0]-(18.5f+.08f*p.center[0]),
+                    eye[1]-.08f*p.center[1],eye[2]-(60.f+.08f*p.center[2]));
+                BOO_CHECK(distance > .08f*p.radius+.1f);
+            }
+        }
+    }
+    BOO_CHECK(streetSites == 41);
+    return true;
+}
+
 bool testCityModulesPreserveAuthoredKits() {
     for (uint32_t kit : {1u, 2u}) {
         const auto path = boo::resolveResourcePath(kit == 1 ? "assets/meshes/shenzhen_evtol.bmesh"
@@ -73,8 +112,9 @@ bool testCityModulesPreserveAuthoredKits() {
             BOO_CHECK(first.placements.empty() && first.modules.empty());
             continue;
         }
-        const size_t expected = legacy ? (kit == 1 ? 676u : 625u) : (kit == 1 ? 467u : 449u);
+        const size_t expected = legacy ? (kit == 1 ? 676u : 666u) : (kit == 1 ? 467u : 490u);
         BOO_CHECK(first.placements.size() == expected);
+        if (kit==2) BOO_CHECK(checkXinyiArcades(first));
         if (legacy) {
             BOO_CHECK(mesh.indices.size() == originalIndices && mesh.vertices.size() == originalVertices);
         } else {

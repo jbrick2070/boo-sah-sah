@@ -329,7 +329,7 @@ bool cityExterior() {
 bool isCurtainWall(uint m) { return m == 5u || m == 13u || m == 14u; }
 
 bool isDistrictGlazing(uint m, uint partId) {
-    return cityExterior() && isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u)));
+    return cityExterior() && isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u || partId == 62u)));
 }
 
 // Exact coverage of a repeated stripe, including its average when several stripes fit in one pixel.
