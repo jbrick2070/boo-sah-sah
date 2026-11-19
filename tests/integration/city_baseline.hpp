@@ -2,6 +2,8 @@
 // PNG writer and deterministic film context. This suite never shows its swapchain HWND.
 bool gCityForceRaster = false;
 bool gRoomBaseline = false;
+bool gWholeShowBaseline = false;
+bool gBaseline4K = false;
 
 struct CityBaselineShot {
     int seconds;
@@ -26,6 +28,7 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
 
     auto context = [&](int offset) {
         auto ctx = makeFilmGateContext(cue, anchor + offset * step, Edition::Family);
+        if (gBaseline4K) ctx.qualityPreset = QualityPresetId::Experimental4K;
         if (gRoomBaseline) {
             auto& view = ctx.interactive;
             // Pin the camera without submitting Explore motion to the temporal denoiser.
@@ -101,7 +104,7 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
         BOO_CHECK(d3d.beginFrame() && present(ctx));
         uint32_t w = 0, h = 0;
         BOO_CHECK(fx.readLastRenderedCanvasForTest(rgba, w, h, &error, &rgb10));
-        BOO_CHECK(w == 2560 && h == 1440);
+        BOO_CHECK(w == fx.canvasWidth() && h == fx.canvasHeight());
         return true;
     };
     std::vector<uint32_t> reference, replay;
@@ -153,7 +156,7 @@ bool captureCityBaselineShot(boo::D3D12Context& d3d, boo::M1TaipeiSliceEffect& f
     const auto luma = computeRgba8LumaMetrics(rgba);
     BOO_CHECK(luma.meanLuma > 0.008 && luma.p99Luma - luma.p10Luma > 0.04);
     const auto filename = std::string(shot.name) + ".png";
-    BOO_CHECK(writeCapturePng(directory / filename, rgba, 2560, 1440));
+    BOO_CHECK(writeCapturePng(directory / filename, rgba, fx.canvasWidth(), fx.canvasHeight()));
 
     std::sort(gpuMs.begin(), gpuMs.end());
     const double p50 = gpuMs.at(29), p95 = gpuMs.at(56); // Nearest rank over 60 samples.
@@ -194,27 +197,28 @@ bool testCityBaseline() {
     const auto manifest = directory / "manifest.json";
     BOO_CHECK(writeFilmGateJson(manifest, report));
 
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    const auto spec = findQualityPresetSpec(presets, gBaseline4K ? QualityPresetId::Experimental4K : QualityPresetId::Showcase);
+    BOO_CHECK(spec.renderWidth == (gBaseline4K ? 3840u : 2560u) && spec.renderHeight == (gBaseline4K ? 2160u : 1440u));
     struct HiddenWindow {
-        HWND hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"STATIC", L"",
-                                    WS_POPUP, 0, 0, 2560, 1440, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND hwnd;
+        HiddenWindow(int width, int height) : hwnd(CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"STATIC", L"",
+                                    WS_POPUP, 0, 0, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr)) {}
         ~HiddenWindow() { if (hwnd) DestroyWindow(hwnd); }
-    } window;
+    } window(spec.renderWidth, spec.renderHeight);
     BOO_CHECK(window.hwnd && !IsWindowVisible(window.hwnd));
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(window.hwnd, 2560, 1440, false, gRequireDebugLayer, &error));
+    BOO_CHECK(d3d.initialize(window.hwnd, spec.renderWidth, spec.renderHeight, false, gRequireDebugLayer, &error));
     BOO_CHECK(!d3d.isWarp() && (!gRequireDebugLayer || d3d.debugLayerActive()));
-    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
-    const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
-    BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
 
     report["adapter"] = d3d.adapterName();
     report["debug_layer"] = d3d.debugLayerActive();
-    report["preset"] = "Showcase";
+    report["preset"] = gBaseline4K ? "4K Experimental" : "Showcase";
     report["edition"] = "Family";
     report["sample_rate"] = 48000;
-    report["width"] = 2560;
-    report["height"] = 1440;
+    report["width"] = int(spec.renderWidth);
+    report["height"] = int(spec.renderHeight);
     report["render_path"] = gCityForceRaster ? "forced raster" : "preferred";
     report["controls"] = "Family, clean canvas, sample-derived ScriptedDirector and analytical audio";
     report["capture"] = "HUD off, no captions or audio-reactive input; RGB10A2 CanvasClean compared word for word after a backward seek; lossless WIC RGB8 PNG of the 8-bit conversion";
@@ -242,6 +246,15 @@ bool testCityBaseline() {
                              {168, "taipei_sanctuary", "trilogy_taipei_168s"},
                              {176, "taipei_sanctuary", "trilogy_taipei_176s"}}}
     };
+    if (gWholeShowBaseline) {
+        auto& filmShots = sequences[0].shots;
+        filmShots.insert(filmShots.end(), {
+            {95, "mirror_intelligence", "film_mirror_95s"},
+            {145, "neural_velvet", "film_neural_145s"},
+            {225, "particle_mutiny", "film_particle_225s"}
+        });
+        std::sort(filmShots.begin(), filmShots.end(), [](const auto& a, const auto& b) { return a.seconds < b.seconds; });
+    }
     if (gRoomBaseline) {
         sequences[0].shots.clear();
         sequences[1].shots = {{176, "taipei_sanctuary", "arcade_front"}, {176, "taipei_sanctuary", "arcade_oblique", true}};
