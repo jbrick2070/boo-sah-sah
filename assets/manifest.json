@@ -527,7 +527,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "133bcf78554f834118699e865d76078440c0d25c00e3bb8fc07aa0e1698bdf54"
+      "sha256": "4a9b319c3d7fc09ec0d2eb34b37cf557b8e7c75a8e6a63635339ac4c75494c47"
     },
     {
       "id": "tool_installer_setup_main",
@@ -582,7 +582,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "8cba581a283be5f926217a87eaa78a43d314ae6338c871c9dcd9650edc382775"
+      "sha256": "80c51da51c8669a58471592aafc747c3ad89e8ee86cac8bf662a01406e5b634e"
     },
     {
       "id": "tool_taipei_relief",
