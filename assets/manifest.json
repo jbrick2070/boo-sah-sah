@@ -125,7 +125,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "5fe1526c2e6279a0b2f65ce3166bbe4323153c82a15e75f0bd2b88733763604e"
+      "sha256": "abf0adda8d17c92d750952ab0e3f5eaf5f92e3daa70db17f2bcfc5056bd8e7bd"
     },
     {
       "id": "model_madame_n_director_xml",
@@ -388,6 +388,17 @@
       "license": "CC-BY-NC-4.0",
       "attribution_required": true,
       "sha256": "b299721459028832f2f054c3283759125ab9338d27d90f4b768174448ebb87dd"
+    },
+    {
+      "id": "tex_city_rooms",
+      "path": "assets/textures/city_rooms.btex",
+      "kind": "texture",
+      "provenance": "Six original procedural room interiors, baked as five mipmapped faces per room by tools/gen_city_rooms.py",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "CC0-1.0",
+      "attribution_required": false,
+      "sha256": "5df914b059f7a67b05c4e2d0f8828198d21f1cc665a8e2764c2a8d4552b9ad66"
     }
   ],
   "visual_presets": [
@@ -561,6 +572,17 @@
       "license": "MIT",
       "attribution_required": true,
       "sha256": "ddf8c663492e76eceab7c67f03c09696c664caca168188e30d89205dd4dd49d0"
+    },
+    {
+      "id": "tool_gen_city_rooms",
+      "path": "tools/gen_city_rooms.py",
+      "kind": "tool",
+      "provenance": "Original deterministic room texture generator",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "40d0fad55b20ed293c3e27832bf8d179c0acb5e19a9dbcf5df4411cbb0c0902f"
     }
   ]
 }

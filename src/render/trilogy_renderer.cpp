@@ -308,7 +308,7 @@ struct TrilogyMeshRenderer::Impl {
     std::array<Part,6> marbleTemplates{};
     size_t maxTlasInstances=0;
     ComPtr<ID3D12Resource> vb,ib,scratch,tlas,tlasScratch,instances,depth;
-    ComPtr<ID3D12Resource> albedoTex,normalTex,ormtTex,envIblTex,fallbackTensorTex;
+    ComPtr<ID3D12Resource> albedoTex,normalTex,ormtTex,envIblTex,roomTex,fallbackTensorTex;
     ComPtr<ID3D12Resource> gbufNormRough,gbufDiffRadHit,gbufSpecRadHit,gbufModViewZ,nrdMv;
     ComPtr<ID3D12Resource> nrdNormRough,nrdViewZ,nrdDiffIn,nrdSpecIn;
     ComPtr<ID3D12DescriptorHeap> rtv,dsv,srvHeap;
@@ -698,6 +698,14 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             bEnv = buildFallbackEnvIblArray(3u);
             BOO_LOG_WARN("M2Tex", "pbr_ibl_env.btex fallback: " + texWhy);
         }
+        Btex rooms;
+        if (fault || !loadBtex(resolveResourcePath("assets/textures/city_rooms.btex"), rooms, &texWhy) ||
+            rooms.arraySize != 30u || rooms.dxgiFormat != DXGI_FORMAT_R8G8B8A8_UNORM) {
+            s.usedFallbackTexture = true;
+            rooms = buildFallbackAlbedoArray(30u);
+            BOO_LOG_WARN("M2Tex", "Using fallback city rooms");
+        }
+        s.roomTex = uploadBtexArray(d, s.context, rooms, error);
         s.albedoTex = uploadBtexArray(d, s.context, bAlb, error);
         s.normalTex = uploadBtexArray(d, s.context, bNor, error);
         s.ormtTex   = uploadBtexArray(d, s.context, bOrm, error);
@@ -746,11 +754,21 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         bindArraySrv(3u, s.ormtTex.Get(),   bOrm); // t6
         bindArraySrv(4u, s.envIblTex.Get(), bEnv); // t7
 
-        D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=5;range.BaseShaderRegister=3;
+        // Five static SRVs and four 20-descriptor frame regions precede the room array.
+        constexpr UINT roomIndex = 5u + 4u * 20u;
+        bindArraySrv(roomIndex, s.roomTex.Get(), rooms);
+        D3D12_DESCRIPTOR_RANGE ranges[2]{};
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[0].NumDescriptors = 5;
+        ranges[0].BaseShaderRegister = 3;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[1].NumDescriptors = 1;
+        ranges[1].BaseShaderRegister = 10;
+        ranges[1].OffsetInDescriptorsFromTableStart = roomIndex;
         D3D12_ROOT_PARAMETER params[9]{};
         for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?5:36;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
-        params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={1,&range};
+        params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={2,ranges};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
         params[7].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[7].Descriptor.ShaderRegister=8;
         params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[8].Descriptor.ShaderRegister=9;
@@ -1087,6 +1105,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
                     }
                     dc.mat=part.sub.material;
                     dc.part=part.sub.part&0xffffu;
+                    // City flags use the high half only for static module instances.
+                    if (m != location.modules[2]) dc.part |= 1u << 24;
                     append(part,dc,location.seed,visible,true);
                 };
                 for (const auto& place : group.visible) emit(place,true);
@@ -1447,6 +1467,12 @@ uint32_t TrilogyMeshRenderer::activeDenoiseMode() const noexcept {return impl_?i
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}
+void TrilogyMeshRenderer::resetTemporalHistory() noexcept {
+    impl_->nrd.resetHistory();
+    impl_->reblurFrameCounter = 0;
+    impl_->reblurPrevValid = false;
+    impl_->accumValid = false;
+}
 CityDrawStats TrilogyMeshRenderer::lastCityDrawStats() const noexcept {return impl_->lastStats;}
 bool TrilogyMeshRenderer::hasAllAuthoredSceneAssets() const noexcept {
     return impl_->fallbacks == 0 && !impl_->usedFallbackTexture;
