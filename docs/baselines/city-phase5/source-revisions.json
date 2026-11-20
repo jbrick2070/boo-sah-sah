@@ -1,0 +1,24 @@
+{
+  "before": {
+    "capture_checkout": "71f3e464abaa566de929d947b1cfc72a5a522756",
+    "inputs_sha256": {
+      "assets/shaders/m2_mesh.hlsl": "abf0adda8d17c92d750952ab0e3f5eaf5f92e3daa70db17f2bcfc5056bd8e7bd",
+      "assets/shaders/m1_taipei_slice.hlsl": "1961a8e0a71c23dc9dabc25df2636e97b13bb76203d394bc003a34317cf8a835",
+      "assets/meshes/shanghai_trestle.bmesh": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15",
+      "assets/meshes/shenzhen_evtol.bmesh": "9ea67989fd467beb75f93949fbfd8ea2f68b98c63f8db06888a2a205acffa1ac",
+      "assets/meshes/taipei_101_hero.bmesh": "d1be86b40522ae31497b3f3c1142ee432d65ac14e29d7e5d58f8867ff97f475f",
+      "src/render/city_modules.cpp": "4bf0d931f9f7c99738ef214103c4b0cd8677030e38bb1df7e54c0840efbf8e80"
+    }
+  },
+  "after": {
+    "capture_checkout": "a5c79669cb4c0a48cd4490490dec6d35defc0e90",
+    "inputs_sha256": {
+      "assets/shaders/m2_mesh.hlsl": "b69d885d6d1e12a5b523e88c5dde4799015024805f859fcc0a276600ad6721cb",
+      "assets/shaders/m1_taipei_slice.hlsl": "acea6f0aba05711723738e38f33894e4d7933c3f5c6dedd295ca0635c333a30f",
+      "assets/meshes/shanghai_trestle.bmesh": "4269b834e07ccd80a138f0f2d0346b800e117306ecd6407ce42a350e69520e92",
+      "assets/meshes/shenzhen_evtol.bmesh": "9ea67989fd467beb75f93949fbfd8ea2f68b98c63f8db06888a2a205acffa1ac",
+      "assets/meshes/taipei_101_hero.bmesh": "d1be86b40522ae31497b3f3c1142ee432d65ac14e29d7e5d58f8867ff97f475f",
+      "src/render/city_modules.cpp": "625842a51165dd281ac9920f64f11044cbec8a7added026e0f26e6fd8fd837c6"
+    }
+  }
+}

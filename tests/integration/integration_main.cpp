@@ -2357,6 +2357,12 @@ int main(int argc, char** argv) {
             gRoomBaseline = true;
             gCityForceRaster = option == "--room-baseline-raster";
         }
+        else if (option == "--show-baseline" || option == "--show-baseline-raster") {
+            cityBaseline = true;
+            gWholeShowBaseline = true;
+            gCityForceRaster = option == "--show-baseline-raster";
+        }
+        else if (option == "--baseline-4k") gBaseline4K = true;
         else if (option == "--city-baseline-raster") { cityBaseline = true; gCityForceRaster = true; }
         else if (option == "--hero-video-capture") heroVideoCapture = true;
         else if (option == "--taipei-slice-video") taipeiSliceVideo = true;
@@ -2374,6 +2380,7 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
+    if (gBaseline4K && !cityBaseline) { std::cerr << "--baseline-4k requires a baseline capture suite.\n"; return 2; }
     const int dedicatedSuites = int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(taipeiSliceVideo) + int(interactiveCaptures) + int(validationCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline);
     if (dedicatedSuites > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
     if (dedicatedSuites && !noActivate) {

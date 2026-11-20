@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "project": "BOO SAH SAH — The Glass Orchid Protocol",
+  "project": "BOO SAH SAH â€” The Glass Orchid Protocol",
   "milestone": "M10",
   "assets": [
     {
@@ -34,7 +34,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "1961a8e0a71c23dc9dabc25df2636e97b13bb76203d394bc003a34317cf8a835"
+      "sha256": "acea6f0aba05711723738e38f33894e4d7933c3f5c6dedd295ca0635c333a30f"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -125,7 +125,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "abf0adda8d17c92d750952ab0e3f5eaf5f92e3daa70db17f2bcfc5056bd8e7bd"
+      "sha256": "b69d885d6d1e12a5b523e88c5dde4799015024805f859fcc0a276600ad6721cb"
     },
     {
       "id": "model_madame_n_director_xml",
@@ -264,7 +264,7 @@
       "author": "Jeffrey A Brick",
       "license": "CC0-1.0",
       "attribution_required": false,
-      "sha256": "be51ac69c8c8db8ace0a6d5cf0b2b0fdd30283087de1aa994e01db84e03abf15"
+      "sha256": "4269b834e07ccd80a138f0f2d0346b800e117306ecd6407ce42a350e69520e92"
     },
     {
       "id": "mesh_shenzhen_evtol",
@@ -349,7 +349,7 @@
       "id": "ost_01_neon_orchid",
       "path": "assets/audio/01_neon_orchid.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid — Taiwanese Spy Jazz)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (1. Neon Orchid â€” Taiwanese Spy Jazz)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/01_neon_orchid.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -360,7 +360,7 @@
       "id": "ost_02_acid_lotus",
       "path": "assets/audio/02_acid_lotus.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus — Taiwanese Detroit Techno)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (2. Acid Lotus â€” Taiwanese Detroit Techno)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/02_acid_lotus.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -371,7 +371,7 @@
       "id": "ost_03_velvet_cipher",
       "path": "assets/audio/03_velvet_cipher.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher — Cinematic Taiwanese Synth-Funk)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (3. Velvet Cipher â€” Cinematic Taiwanese Synth-Funk)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/03_velvet_cipher.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -382,7 +382,7 @@
       "id": "ost_04_glass_dragon",
       "path": "assets/audio/04_glass_dragon.mp3",
       "kind": "audio",
-      "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon — Progressive Demoscene Electronica)",
+      "provenance": "Original first-party soundtrack for BOO SAH SAH (4. Glass Dragon â€” Progressive Demoscene Electronica)",
       "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/assets/audio/04_glass_dragon.mp3",
       "author": "Jeffrey A Brick",
       "license": "CC-BY-NC-4.0",
@@ -527,7 +527,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "ab882f14197cb6ce8ebc2fefc4aea7b16a5027b1914bc8258dd43eccb6332994"
+      "sha256": "58c529fb31b58b444af69fb5fa6ac21480f7bd614fd8541d1edc6e7c644df239"
     },
     {
       "id": "tool_installer_setup_main",

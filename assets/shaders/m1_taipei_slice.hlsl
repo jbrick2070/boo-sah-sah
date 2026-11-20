@@ -3729,7 +3729,8 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     bool isShow3D = (gSceneFlags & 32u) != 0u;
     // Keep the full simulation workload, but draw a stable sparse subset so
     // the velocity field frames the hero instead of veiling its silhouette.
-    if (isMutiny && (instId % 5u) != 0u) return vout;
+    const bool reducedEffects = (gSceneFlags & (1u << 14u)) != 0u;
+    if (isMutiny && (instId % (reducedEffects ? 9u : 5u)) != 0u) return vout;
     if(isM2) {
         uint act=(gSceneFlags>>2u)&3u;
         if(act==0u) {
@@ -3818,7 +3819,22 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         ? (.32 * smoothstep(0, 2, min(abs(gFilmTime - 60), abs(gFilmTime - 120))))
         : (isMutiny ? 0.36 : (isShow3D ? 0.34 : 1.0));
 
-    if (!isMote)
+    // Illuminate two helical streams through the actual simulated positions.
+    // The flow's signed side sets its dye, and the velocity orients the tracers.
+    float streamSide = 0.0;
+    float stream = 0.0;
+    bool tracer = false;
+    if (isMutiny)
+    {
+        float2 radial = center.xz - float2(0.0, 5.50);
+        float phase = (center.y - 5.55) * 1.48;
+        streamSide = dot(radial, float2(cos(phase), sin(phase))) * rsqrt(max(dot(radial, radial), 0.01));
+        stream = smoothstep(0.65, 0.97, abs(streamSide));
+        energy *= lerp(0.13, !reducedEffects ? 2.15 : 1.45, stream);
+        tracer = isMote && !reducedEffects && (instId & 3u) == 1u;
+    }
+
+    if (!isMote || tracer)
     {
         float3 velProj = vel - viewDir * dot(vel, viewDir);
         float velMag = length(velProj);
@@ -3829,6 +3845,8 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         halfWid = max(desiredWid, pixelWorldSize * 0.75);
         energy *= saturate(desiredWid / max(halfWid, 1e-4));
         halfLen = clamp(length(vel) * ((isM2 || isShow3D) ? 0.010 : 0.013), halfWid * 3.0, (isM2 || isShow3D) ? 0.14 : (isMutiny ? 0.11 : 0.19));
+        if (tracer)
+            halfLen = max(halfWid * 2.8, min(0.095, 0.033 * velMag));
     }
     else
     {
@@ -3893,9 +3911,15 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         tint = baseHue * (0.62 + 0.75 * gRevealOpen01) * (1.0 + gEmissivePulse * 0.45);
     }
 
+    if (isMutiny)
+    {
+        float3 cool = lerp(float3(0.035, 0.54, 0.70), float3(0.33, 1.00, 0.78), stream);
+        float3 warm = isMidnight ? float3(0.96, 0.25, 0.67) : float3(1.00, 0.56, 0.18);
+        tint = lerp(cool, warm, smoothstep(-0.18, 0.18, streamSide)) * (0.62 + 0.25 * gEmissivePulse);
+    }
     vout.position     = float4(ndcX * zCam, ndcY * zCam, 0.5 * zCam, zCam);
     vout.quadUv       = corner;
-    vout.colorAndKind = float4(tint, isMote ? 1.0 : 0.0);
+    vout.colorAndKind = float4(tint, (isMote && !tracer) ? 1.0 : 0.0);
     vout.rayDist      = length(relCenter);
     vout.energyScale  = energy * lifeFade;
     return vout;

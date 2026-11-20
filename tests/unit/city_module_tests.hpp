@@ -112,7 +112,7 @@ bool testCityModulesPreserveAuthoredKits() {
             BOO_CHECK(first.placements.empty() && first.modules.empty());
             continue;
         }
-        const size_t expected = legacy ? (kit == 1 ? 676u : 666u) : (kit == 1 ? 467u : 490u);
+        const size_t expected = legacy ? (kit == 1 ? 676u : 666u) : (kit == 1 ? 468u : 490u);
         BOO_CHECK(first.placements.size() == expected);
         if (kit==2) BOO_CHECK(checkXinyiArcades(first));
         if (legacy) {

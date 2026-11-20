@@ -2981,6 +2981,8 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     sc.revealOpen01 = outCam.revealOpen01;
     sc.canvasWidth = canvasW;
     sc.canvasHeight = canvasH;
+    if (ctx.qualityPreset == QualityPresetId::Safe || ctx.reducedFlash || ctx.motionScale < 0.99f)
+        flags |= 1u << 14u;
     sc.sceneFlags = flags;
     sc.emissivePulse = outCam.emissivePulse;
     sc.moodIntensity = ctx.moodIntensity;
