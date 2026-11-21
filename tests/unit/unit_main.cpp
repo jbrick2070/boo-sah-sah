@@ -2,6 +2,7 @@
 #include "boo/audio.hpp"
 #include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
+#include "boo/city_modules.hpp"
 #include <fstream>
 #include "boo/clock.hpp"
 #include "boo/cues.hpp"
@@ -14,9 +15,11 @@
 #include "boo/media_input.hpp"
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
+#include "../../src/app/world_portal.h"
 #include "boo/ui_text.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -51,6 +54,31 @@ bool hasErrorCode(const boo::ValidationReport& rep, std::string_view code) {
         if (iss.isError && iss.code == code) return true;
     }
     return false;
+}
+
+bool testPublicWorldLocators() {
+    using boo::isPublicWorldLocator;
+    const std::wstring path = L"/worlds/9a693db7-51ee-4622-a118-1966f080c8a8";
+    const std::wstring address = L"https://room-1.host.example" + path;
+    BOO_CHECK(isPublicWorldLocator(address));
+    BOO_CHECK(boo::worldVisitorUri(address) == L"demoverse://visit/room-1.host.example" + path);
+    BOO_CHECK(boo::worldVisitorUri(address + L"#invite").empty());
+    for (const auto* origin : {L"http://host.example", L"file://host.example", L"https://local",
+             L"https://user@host.example", L"https://host.example:443", L"https://host.example.",
+             L"https://host..example", L"https://-host.example", L"https://host-.example",
+             L"https://host.123", L"https://HOST.example", L"https://host.example\\other",
+             L"https://host.example%2fother", L"https://example.test?x=", L"https://example.test#x"}) {
+        BOO_CHECK(!isPublicWorldLocator(origin + path));
+    }
+    for (const auto* suffix : {L"#invite", L"?arg=1", L"/", L"\r\n", L" "})
+        BOO_CHECK(!isPublicWorldLocator(address + suffix));
+    BOO_CHECK(!isPublicWorldLocator(address.substr(0, address.size() - 1)));
+    BOO_CHECK(!isPublicWorldLocator(L"https://host.example/worlds/9a693db7-51ee-4622-A118-1966f080c8a8"));
+    const std::wstring label(63, L'a');
+    const auto maxAddress = L"https://" + label + L"." + label + L"." + label + L"." + std::wstring(61, L'b') + path;
+    BOO_CHECK(maxAddress.size() == 305 && isPublicWorldLocator(maxAddress));
+    BOO_CHECK(!isPublicWorldLocator(L"https://" + label + L"a.example" + path));
+    return true;
 }
 
 bool testJsonParserAndSerializer() {
@@ -172,6 +200,38 @@ bool testInvalidCueFixturesRejected() {
         BOO_CHECK(!loadCueSheetFromFile(resolveResourcePath("tests/fixtures/invalid_duration.json"), s, r));
         BOO_CHECK(hasErrorCode(r, "FULL_FILM_DURATION_MISMATCH"));
     }
+    return true;
+}
+
+bool testManifestProvenanceAndByteIntegrity() {
+    using namespace boo;
+    const auto source = std::filesystem::absolute(resolveResourcePath("assets/manifest.json"));
+    const auto root = source.parent_path().parent_path();
+    ValidationReport report;
+    AssetManifest manifest;
+    BOO_CHECK(loadAssetManifestFromFile(source, manifest, report));
+    BOO_CHECK(manifest.schema == 2);
+    const auto cue = std::find_if(manifest.assets.begin(), manifest.assets.end(),
+        [](const AssetManifestEntry& entry) { return entry.id == "cue_film_360s"; });
+    BOO_CHECK(cue != manifest.assets.end());
+    BOO_CHECK(cue->license == "CC-BY-NC-4.0" && cue->attributionRequired);
+    AssetManifest single;
+    single.assets.push_back(*cue);
+    verifyManifestAssetFiles(single, root, report);
+    BOO_CHECK(report.valid);
+    single.assets.front().sha256.assign(64, '0');
+    verifyManifestAssetFiles(single, root, report);
+    BOO_CHECK(hasErrorCode(report, "MANIFEST_SHA256_MISMATCH"));
+
+    auto parsed = parseJsonFile(source);
+    BOO_CHECK(parsed.ok);
+    parsed.value["assets"].asArrayMut().front()["author"] = "";
+    auto invalid = std::filesystem::temp_directory_path() /
+        ("boo-invalid-provenance-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+    std::ofstream(invalid, std::ios::binary) << serializeJson(parsed.value);
+    const bool accepted = loadAssetManifestFromFile(invalid, manifest, report);
+    std::filesystem::remove(invalid);
+    BOO_CHECK(!accepted && hasErrorCode(report, "MANIFEST_PROVENANCE_ERROR"));
     return true;
 }
 
@@ -422,6 +482,59 @@ bool testSettingsAndPathRedaction() {
     BOO_CHECK(s.disableRT && s.disableNPU && !s.disableCUDA);
     BOO_CHECK(s.reducedFlash && s.legacyM0Visual);
     BOO_CHECK(std::abs(s.autoExitSeconds - 5.5) < 1e-6);
+
+    // Neural rendering: off by default so the film is untouched; each network and the solo view parse.
+    AppSettings n{};
+    BOO_CHECK(loadSettingsFromToml(resolveResourcePath("config/default.toml"), n));
+    BOO_CHECK(!n.neural.enabled && n.neural.solo == NeuralSolo::None);
+    BOO_CHECK(!n.neural.runs(NeuralFeature::Shading) && !n.neural.runs(NeuralFeature::RadianceCache));
+    std::vector<std::string> neuralCli = {"--neural", "on", "--neural-textures", "off", "--neural-solo", "cache"};
+    BOO_CHECK(parseCommandLineArgs(neuralCli, n));
+    BOO_CHECK(n.neural.enabled && n.neural.shading && !n.neural.textures && n.neural.radianceCache);
+    BOO_CHECK(n.neural.solo == NeuralSolo::RadianceCache);
+    BOO_CHECK(!n.neural.runs(NeuralFeature::Textures) && n.neural.runs(NeuralFeature::RadianceCache));
+    // Solo runs its network even with the suite switched off.
+    NeuralRenderingControls soloOnly{};
+    soloOnly.solo = NeuralSolo::Textures;
+    BOO_CHECK(soloOnly.runs(NeuralFeature::Textures) && !soloOnly.runs(NeuralFeature::Shading));
+    std::vector<std::string> badNeural = {"--neural-solo", "everything"};
+    BOO_CHECK(!parseCommandLineArgs(badNeural, n));
+    BOO_CHECK(n.neural.tensorCores);
+    std::vector<std::string> coresCli = {"--neural-tensor-cores", "off", "--dashboard", "mini"};
+    BOO_CHECK(parseCommandLineArgs(coresCli, n));
+    BOO_CHECK(!n.neural.tensorCores && n.dashboardPanel == 1u);
+    std::vector<std::string> badPanel = {"--dashboard", "tiny"};
+    BOO_CHECK(!parseCommandLineArgs(badPanel, n));
+    // GPU workout: off by default; level, formation and bird camera parse, and levels clamp to 0..10.
+    BOO_CHECK(n.gpuWorkout == 0u && n.flockFormation == 0u && !n.birdCam);
+    std::vector<std::string> workoutCli = {"--gpu-workout", "7", "--flock", "kettle", "--bird-cam"};
+    BOO_CHECK(parseCommandLineArgs(workoutCli, n));
+    BOO_CHECK(n.gpuWorkout == 7u && n.flockFormation == 5u && n.birdCam);
+    std::vector<std::string> overCli = {"--gpu-workout", "99"};
+    BOO_CHECK(parseCommandLineArgs(overCli, n) && n.gpuWorkout == 10u);
+    // The workout's frame-rate floor: film speed unless told otherwise, 0 switches it off.
+    BOO_CHECK(n.workoutFloorFps == 24.0f);
+    std::vector<std::string> floorCli = {"--workout-floor-fps", "60"};
+    BOO_CHECK(parseCommandLineArgs(floorCli, n) && n.workoutFloorFps == 60.0f);
+    std::vector<std::string> noFloorCli = {"--workout-floor-fps", "0"};
+    BOO_CHECK(parseCommandLineArgs(noFloorCli, n) && n.workoutFloorFps == 0.0f);
+    std::vector<std::string> lowFloorCli = {"--workout-floor-fps", "3"};
+    BOO_CHECK(parseCommandLineArgs(lowFloorCli, n) && n.workoutFloorFps == 10.0f);
+    std::vector<std::string> badFloorCli = {"--workout-floor-fps", "fast"};
+    BOO_CHECK(!parseCommandLineArgs(badFloorCli, n));
+    std::vector<std::string> badFlock = {"--flock", "murmuration"};
+    BOO_CHECK(!parseCommandLineArgs(badFlock, n));
+
+    // Test rig: every GPU feature on, including all three neural networks.
+    AppSettings rig{};
+    rig.disableCUDA = true;
+    std::vector<std::string> rigCli = {"--test-rig"};
+    BOO_CHECK(parseCommandLineArgs(rigCli, rig));
+    BOO_CHECK(!rig.disableRT && !rig.disableCUDA && !rig.disableTensor);
+    BOO_CHECK(rig.pathTracing == PathTracingLevel::High && rig.dlssMode == DlssMode::Quality && rig.rayReconstruction);
+    BOO_CHECK(rig.frameGeneration == FrameGenerationMode::X6 && rig.reflex == ReflexMode::Boost);
+    BOO_CHECK(rig.neural.enabled && rig.neural.runs(NeuralFeature::Shading) &&
+              rig.neural.runs(NeuralFeature::Textures) && rig.neural.runs(NeuralFeature::RadianceCache));
     return true;
 }
 
@@ -516,9 +629,9 @@ bool testAudioClicklessCrossfadeAndGainRamps() {
         return adv;
     };
 
-    // 1. Cold start ramp-up from 0.0 -> full 0.14f headroom gain (must start at 0 with zero click)
+    // 1. The master ramps from silence to unity while the procedural mix retains its headroom.
     BOO_CHECK(renderAndMeasure(1024u, false, false, 1.0f) == 1024u);
-    BOO_CHECK(std::abs(synth.currentGain() - 0.14f) < 1e-4f);
+    BOO_CHECK(std::abs(synth.currentGain() - 1.0f) < 1e-4f);
     BOO_CHECK(maxStep < 0.010f);
 
     // 2. Abrupt long-distance seek during full-scale playback (48.0s -> 5.0s -> 30.0s -> 56.0s)
@@ -547,7 +660,7 @@ bool testAudioClicklessCrossfadeAndGainRamps() {
     BOO_CHECK(renderAndMeasure(128u, true, false, 1.0f) == 0u);
     BOO_CHECK(std::abs(prevL) < 1e-6f && std::abs(prevR) < 1e-6f);
     BOO_CHECK(renderAndMeasure(1024u, false, false, 1.0f) == 1024u);
-    BOO_CHECK(std::abs(synth.currentGain() - 0.14f) < 1e-4f);
+    BOO_CHECK(std::abs(synth.currentGain() - 1.0f) < 1e-4f);
     BOO_CHECK(maxStep < 0.010f);
 
     return true;
@@ -610,6 +723,151 @@ bool testTimelineClockSwitchAndTaipei101FinaleFraming() {
     BOO_CHECK(cam58.target[2] > 16.0f);
     BOO_CHECK(cam58.fovYRadians > cam48.fovYRadians + 0.08f);
 
+    return true;
+}
+
+bool testFilmOrbits() {
+    using namespace boo;
+    constexpr double tau = 6.283185307179586;
+    struct Orbit { double start, end, centerX, centerZ, minRadius, maxRadius; };
+    for (const Orbit orbit : {Orbit{46.0, 80.0, 0.0, 5.5, 2.8, 3.25},
+                              Orbit{301.5, 330.5, 18.5, 60.0, 15.0, 30.0}}) {
+        for (const float motion : {1.0f, 0.35f, 0.f}) {
+            std::vector<M1CameraState> poses;
+            double previousAngle = 0.0, signedSweep = 0.0, totalTravel = 0.0;
+            double minSweep = 0.0, maxSweep = 0.0;
+            for (double time = orbit.start; time <= orbit.end; time += 0.25) {
+                const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(time * 48000), 48000, 0.85f, false, motion);
+                const double dx = cam.eye[0] - orbit.centerX, dz = cam.eye[2] - orbit.centerZ;
+                const double radius = std::hypot(dx, dz), angle = std::atan2(dx, -dz);
+                BOO_CHECK(radius >= orbit.minRadius && radius <= orbit.maxRadius);
+                if (time <= 49.0 || time >= 71.0 || motion == 0.f) {
+                    BOO_CHECK(std::hypot(cam.target[0] - orbit.centerX, cam.target[2] - orbit.centerZ) < 0.1 * radius);
+                } else if (time >= 59.5 && time <= 64.0) {
+                    // Keep the identifiable northeast mirror face centered throughout the close pass.
+                    BOO_CHECK(std::abs(cam.target[0] - 3.86f) < 0.03f && std::abs(cam.target[1] - 7.20f) < 0.03f);
+                    BOO_CHECK(std::abs(cam.target[2] - 7.57f) < 0.03f && cam.fovYRadians < 1.05f);
+                }
+                BOO_CHECK(cam.up[0] == 0.0f && cam.up[1] == 1.0f && cam.up[2] == 0.0f);
+                if (!poses.empty()) {
+                    const double delta = std::remainder(angle - previousAngle, tau);
+                    BOO_CHECK(std::abs(delta) < 0.09); // A single quarter-second step cannot hide a cut.
+                    if (time > 49.0 && time <= 71.0) {
+                        const auto& previous = poses.back();
+                        double dot = 0.0, currentLength2 = 0.0, previousLength2 = 0.0;
+                        for (int axis = 0; axis < 3; ++axis) {
+                            const double currentDirection = cam.target[axis] - cam.eye[axis];
+                            const double previousDirection = previous.target[axis] - previous.eye[axis];
+                            dot += currentDirection * previousDirection;
+                            currentLength2 += currentDirection * currentDirection;
+                            previousLength2 += previousDirection * previousDirection;
+                        }
+                        const double maxAngle = (motion < 1.f ? 12.0 : 26.0) * 0.25 * tau / 360.0;
+                        BOO_CHECK(dot > std::cos(maxAngle) * std::sqrt(currentLength2 * previousLength2));
+                    }
+                    signedSweep += delta;
+                    totalTravel += std::abs(delta);
+                    minSweep = std::min(minSweep, signedSweep);
+                    maxSweep = std::max(maxSweep, signedSweep);
+                }
+                previousAngle = angle;
+                poses.push_back(cam);
+            }
+            if (motion == 1.0f) {
+                BOO_CHECK(std::abs(std::abs(signedSweep) - tau) < 0.001);
+                BOO_CHECK(std::abs(totalTravel - tau) < 0.001);
+            } else if (motion > 0.f) {
+                BOO_CHECK(maxSweep - minSweep > 0.05 && maxSweep - minSweep < 0.45);
+                BOO_CHECK(totalTravel < 0.9);
+            } else {
+                BOO_CHECK(totalTravel == 0.0);
+                for (const auto& cam : poses) {
+                    for (int axis = 0; axis < 3; ++axis) {
+                        BOO_CHECK(cam.eye[axis] == poses.front().eye[axis] && cam.target[axis] == poses.front().target[axis]);
+                    }
+                }
+            }
+
+            // Seek back through the same quarter-second frames at a different audio sample rate.
+            for (size_t i = poses.size(); i-- > 0;) {
+                const double time = orbit.start + 0.25 * static_cast<double>(i);
+                const auto seek = evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(time * 44100), 44100, 0.85f, false, motion);
+                for (int axis = 0; axis < 3; ++axis) {
+                    BOO_CHECK(seek.eye[axis] == poses[i].eye[axis] && seek.target[axis] == poses[i].target[axis]);
+                }
+                BOO_CHECK(seek.fovYRadians == poses[i].fovYRadians);
+            }
+        }
+    }
+    return true;
+}
+
+bool testAircraftHeroFraming() {
+    using namespace boo;
+    for (float motion : {1.0f, 0.35f}) {
+        // The film uses the trilogy's 60-second flight in a 30-second cue. Stop before the outgoing camera blend.
+        for (int step = 0; step <= 54; ++step) {
+            const float filmTime = 245.0f + 0.5f * step;
+            const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(filmTime * 48000), 48000, 0.5f, false, motion);
+            const auto trilogy = evaluateTrilogyCamera(int64_t(60 + step) * 48000, 48000, false, motion);
+            const auto pose = evaluateEvtolPose(ShowVisualMode::FullFilm360s, filmTime);
+            for (int i = 0; i < 3; ++i) {
+                BOO_CHECK(std::abs(trilogy.eye[i] - cam.eye[i]) < 1e-4f);
+                BOO_CHECK(std::abs(trilogy.target[i] - cam.target[i]) < 1e-4f);
+            }
+            BOO_CHECK(cam.focusWeight == 1.0f && cam.focusDistance > 9.0f);
+
+            float dx = cam.target[0] - cam.eye[0], dy = cam.target[1] - cam.eye[1], dz = cam.target[2] - cam.eye[2];
+            const float length = std::sqrt(dx*dx + dy*dy + dz*dz);
+            dx /= length; dy /= length; dz /= length;
+            const float horizontal = std::hypot(dx, dz);
+            const auto relay=relayFlyby(float(step),motion);
+            if (relay.cameraWeight>0.f) {
+                BOO_CHECK(cam.focusDistance < 95.f && cam.fovYRadians >= .45f && cam.fovYRadians < .76f);
+                if (step>=38 && step<=48) {
+                    // At the cutaway hold the tanker and receiver should both fit comfortably
+                    // inside the shot with the focus at their distance.
+                    BOO_CHECK(cam.focusDistance>50.f);
+                    float group[12];
+                    writeModelTransform(group,relay.center.data(),relay.yaw,relay.pitch,relay.bank,1.8f);
+                    for (const auto local : {std::array<float,3>{0,0,0}, std::array<float,3>{.58f,-.8f,-6.45f}}) {
+                        float v[3];
+                        for (int axis=0; axis<3; ++axis) {
+                            const float* row=group+4*axis;
+                            v[axis]=row[0]*local[0]+row[1]*local[1]+row[2]*local[2]+row[3]-cam.eye[axis];
+                        }
+                        const float depth=dx*v[0]+dy*v[1]+dz*v[2];
+                        const float halfHeight=depth*std::tan(.5f*cam.fovYRadians);
+                        BOO_CHECK(std::abs(depth-cam.focusDistance)<10.f);
+                        BOO_CHECK(std::abs((dz*v[0]-dx*v[2])/horizontal)+5.3f < halfHeight*(16.f/9.f));
+                        BOO_CHECK(std::abs((v[1]-dy*depth)/horizontal)+2.1f < halfHeight);
+                    }
+                }
+                continue;
+            }
+            BOO_CHECK(cam.focusDistance<19.f);
+            const float horizonY = 0.5f + 0.5f * dy / (horizontal * std::tan(0.5f * cam.fovYRadians));
+            BOO_CHECK(horizonY > 0.24f && horizonY < 0.35f);
+            if (step == 30) BOO_CHECK(horizonY > 0.32f); // 260s banking shot looks across the bay.
+            const float slopeY = 0.90f * std::tan(0.5f * cam.fovYRadians);
+            const float slopeX = slopeY * (16.0f / 9.0f);
+            float rows[12];
+            writeModelTransform(rows, pose.position, pose.yaw, pose.pitch, pose.roll);
+            for (const auto& hub : kEvtolRotorPivots) {
+                float v[3]{};
+                for (int i = 0; i < 3; ++i) {
+                    const float* row = rows + 4*i;
+                    v[i] = row[0]*hub[0] + row[1]*hub[1] + row[2]*hub[2] + row[3] - cam.eye[i];
+                }
+                const float depth = dx*v[0] + dy*v[1] + dz*v[2];
+                const float right = (dz*v[0] - dx*v[2]) / horizontal;
+                const float up = (v[1] - dy*depth) / horizontal;
+                // A 1.25-unit sphere encloses the mast and swept blades at any rotor phase.
+                BOO_CHECK(std::abs(right) + 1.25f*std::hypot(1.0f, slopeX) < depth*slopeX);
+                BOO_CHECK(std::abs(up) + 1.25f*std::hypot(1.0f, slopeY) < depth*slopeY);
+            }
+        }
+    }
     return true;
 }
 
@@ -688,7 +946,9 @@ bool testShowVisualModeRoutingAndEnamelMicrocosmKit() {
         BOO_CHECK(c0.fovYRadians > 0.2f && c0.fovYRadians < 1.8f);
     }
 
-    for (const int64_t boundary : {1920000LL, 4320000LL, 6720000LL, 9360000LL, 11760000LL, 13200000LL}) {
+    // Check continuous movements within each shot. Camera edits between cities and
+    // the cut out of the ribbon insert at 140 seconds have their own coverage.
+    for (const int64_t boundary : {1920000LL, 4320000LL, 6480000LL, 9360000LL}) {
         const auto a = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary - 1);
         const auto b = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary);
         for (int i = 0; i < 3; ++i) {
@@ -789,8 +1049,24 @@ bool testLateFilmEditionSeekAudioContinuity() {
 bool testFullFilm360sScoreCaptionsAndEditions() {
     using namespace boo;
 
-    // 1. Verify C1 camera continuity across all 6 act boundaries of film_360s.json + reduced-motion dampening
-    for (const int64_t boundary : {2160000LL, 4800000LL, 7200000LL, 9360000LL, 11760000LL, 13200000LL}) {
+    FrameContext cut{};
+    cut.sampleRate = 44100;
+    auto orbitAt = [&](int64_t sample) {
+        cut.samplePosition = sample;
+        return isOrbitalCutaway(ShowVisualMode::FullFilm360s, cut);
+    };
+    BOO_CHECK(!orbitAt(295LL * cut.sampleRate - 1) && orbitAt(295LL * cut.sampleRate));
+    BOO_CHECK(orbitAt(301LL * cut.sampleRate - 1) && !orbitAt(301LL * cut.sampleRate));
+    BOO_CHECK(orbitAt(298LL * cut.sampleRate));
+    BOO_CHECK(!isOrbitalCutaway(ShowVisualMode::M2Trilogy180s, cut));
+    cut.interactive.exploreActive = true;
+    BOO_CHECK(!isOrbitalCutaway(ShowVisualMode::FullFilm360s, cut));
+    cut.interactive.exploreActive = false;
+    cut.interactive.blendWeight = .5f;
+    BOO_CHECK(!isOrbitalCutaway(ShowVisualMode::FullFilm360s, cut));
+
+    // Neighboring terrace compositions blend across these four act boundaries.
+    for (const int64_t boundary : {2160000LL, 4800000LL, 7200000LL, 9360000LL}) {
         const auto a = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary - 1, 48000, 0.5f, false, 1.0f);
         const auto b = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary, 48000, 0.5f, false, 1.0f);
         for (int i = 0; i < 3; ++i) {
@@ -798,10 +1074,19 @@ bool testFullFilm360sScoreCaptionsAndEditions() {
             BOO_CHECK(std::abs(a.target[i] - b.target[i]) < 0.005f);
         }
     }
-    const auto camFullMotion = evaluateShowCamera(ShowVisualMode::FullFilm360s, 2820000, 48000, 0.85f, false, 1.0f);
-    const auto camRedMotion  = evaluateShowCamera(ShowVisualMode::FullFilm360s, 2820000, 48000, 0.85f, false, 0.35f);
-    BOO_CHECK(std::abs(camRedMotion.eye[0]) < std::abs(camFullMotion.eye[0]));
-
+    // Each city holds its own camera until the actual cut.
+    for (const int64_t boundary : {11760000LL, 13200000LL}) {
+        const auto earlier = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary - 480, 48000);
+        const auto before = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary - 1, 48000);
+        const auto after = evaluateShowCamera(ShowVisualMode::FullFilm360s, boundary, 48000);
+        double cutDistanceSquared = 0;
+        for (int i = 0; i < 3; ++i) {
+            BOO_CHECK(std::abs(before.eye[i] - earlier.eye[i]) < 0.1f);
+            const double delta = after.eye[i] - before.eye[i];
+            cutDistanceSquared += delta * delta;
+        }
+        BOO_CHECK(cutDistanceSquared > 1.0);
+    }
     // Verify exact reveal open states at 36.0s (1,728,000), 175.0s (8,400,000), and 342.0s (16,416,000)
     BOO_CHECK(evaluateShowCamera(ShowVisualMode::FullFilm360s, 1728000).revealOpen01 > 0.85f);
     BOO_CHECK(evaluateShowCamera(ShowVisualMode::FullFilm360s, 8400000).revealOpen01 > 0.99f);
@@ -892,7 +1177,31 @@ bool testFullFilm360sScoreCaptionsAndEditions() {
         BOO_CHECK(def.showCaptions);
         BOO_CHECK(std::abs(def.motionScale - 1.0f) < 1e-6f);
 
-        BOO_CHECK(parseCommandLineArgs({"--no-captions", "--reduced-motion", "--enable-spout", "--spout-name", "BooStage_Clean"}, def));
+        BOO_CHECK(def.effectsDetail == 1u);
+        BOO_CHECK(def.pathTracing == PathTracingLevel::Low && def.dlssMode == DlssMode::Quality);
+        BOO_CHECK(parseCommandLineArgs({"--path-tracing", "High", "--dlss", "Balanced"}, def));
+        BOO_CHECK(def.pathTracing == PathTracingLevel::High && def.dlssMode == DlssMode::Balanced);
+        BOO_CHECK(!parseCommandLineArgs({"--dlss", "fastest"}, def));
+        BOO_CHECK(!parseCommandLineArgs({"--path-tracing", "quality"}, def));
+        BOO_CHECK(def.rayReconstruction && def.frameGeneration == FrameGenerationMode::Auto && def.reflex == ReflexMode::On);
+        BOO_CHECK(parseCommandLineArgs({"--ray-reconstruction", "off", "--frame-generation", "4x", "--reflex", "boost"}, def));
+        BOO_CHECK(!def.rayReconstruction && def.frameGeneration == FrameGenerationMode::X4 && def.reflex == ReflexMode::Boost);
+        BOO_CHECK(parseCommandLineArgs({"--frame-generation", "5x"}, def) && def.frameGeneration == FrameGenerationMode::X5);
+        BOO_CHECK(parseCommandLineArgs({"--frame-generation", "6x"}, def) && def.frameGeneration == FrameGenerationMode::X6);
+        BOO_CHECK(!parseCommandLineArgs({"--frame-generation", "7x"}, def));
+        BOO_CHECK(availableFrameGenerationMode(FrameGenerationMode::X6,1) == FrameGenerationMode::X2);
+        BOO_CHECK(availableFrameGenerationMode(FrameGenerationMode::X5,5) == FrameGenerationMode::X5);
+        BOO_CHECK(availableFrameGenerationMode(FrameGenerationMode::X6,0) == FrameGenerationMode::Off);
+        BOO_CHECK(nextFrameGenerationMode(FrameGenerationMode::Auto,0) == FrameGenerationMode::Off);
+        BOO_CHECK(nextFrameGenerationMode(FrameGenerationMode::X2,1) == FrameGenerationMode::Off);
+        BOO_CHECK(nextFrameGenerationMode(FrameGenerationMode::X4,5) == FrameGenerationMode::X5);
+        BOO_CHECK(nextFrameGenerationMode(FrameGenerationMode::X5,5) == FrameGenerationMode::X6);
+        BOO_CHECK(nextFrameGenerationMode(FrameGenerationMode::X6,8) == FrameGenerationMode::Off);
+        BOO_CHECK(!parseCommandLineArgs({"--reflex", "4x"}, def));
+        BOO_CHECK(!parseCommandLineArgs({"--ray-reconstruction", "sometimes"}, def));
+        BOO_CHECK(!parseCommandLineArgs({"--effects-detail", "extreme"}, def));
+        BOO_CHECK(parseCommandLineArgs({"--no-captions", "--reduced-motion", "--enable-spout", "--spout-name", "BooStage_Clean", "--effects-detail", "high"}, def));
+        BOO_CHECK(def.effectsDetail == 2u);
         BOO_CHECK(!def.showCaptions);
         BOO_CHECK(std::abs(def.motionScale - 0.35f) < 1e-5f);
         BOO_CHECK(def.enableSpout);
@@ -964,6 +1273,48 @@ bool testMediaPrivacyRedactionAndFaultFallback() {
     return true;
 }
 
+bool testRecordedSoundtrackFidelity() {
+    using namespace boo;
+    constexpr uint32_t frames = 12000u;
+    constexpr uint32_t block = 1024u;
+    constexpr double radiansPerHz = 6.283185307179586 / 48000.0;
+    std::vector<float> source(frames * 2u);
+    for (uint32_t i = 0; i < frames; ++i) {
+        // A strong bass note and quiet cymbal harmonics sit under distinct left and right attacks.
+        source[i * 2u] = static_cast<float>(0.48 * std::sin(i * 96.0 * radiansPerHz) +
+                                           0.014 * std::sin(i * 15000.0 * radiansPerHz));
+        source[i * 2u + 1u] = static_cast<float>(0.022 * std::sin(i * 11500.0 * radiansPerHz));
+        if (i % 73u == 0u) source[i * 2u] = 0.93f;
+        if (i % 101u == 0u) source[i * 2u + 1u] = -0.81f;
+    }
+
+    for (const bool compact : {false, true}) {
+        CustomAudioTrack48k track{};
+        track.frameCount = frames;
+        if (compact) {
+            track.interleavedPcm16.resize(source.size());
+            std::transform(source.begin(), source.end(), track.interleavedPcm16.begin(),
+                [](float s) { return static_cast<int16_t>(std::lround(s * 32768.0f)); });
+        } else {
+            track.interleavedStereo = source;
+        }
+        AudioSynthesizer48k mixer;
+        mixer.setCustomTrack(&track);
+        mixer.reset(3200u); // Within the recording, clear of the deliberate loop seam.
+        std::vector<float> output(block * 2u);
+        for (const float volume : {1.0f, 0.37f}) {
+            mixer.renderFrames(output.data(), block, false, false, volume); // Settle the volume ramp.
+            const size_t sampleOffset = static_cast<size_t>(mixer.primarySamplePosition()) * 2u;
+            BOO_CHECK(mixer.renderFrames(output.data(), block, false, false, volume) == block);
+            const float tolerance = compact ? 0.00005f : 0.000001f;
+            for (size_t i = 0; i < output.size(); ++i) {
+                BOO_CHECK(std::abs(output[i] - source[sampleOffset + i] * volume) < tolerance);
+            }
+        }
+    }
+    return true;
+}
+
 bool testCustomAudioTrackDecoderAndCrossfade() {
     using namespace boo;
 
@@ -975,16 +1326,17 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     // 2. Missing file & fault-injection privacy redaction
     CustomAudioTrack48k badTrack{};
     std::string errMsg;
-    BOO_CHECK(!loadCustomAudioFile48k("C:\\Users\\secret_composer\\Music\\missing_suno.mp3", badTrack, &errMsg, false));
+    BOO_CHECK(!loadCustomAudioFile48k(LR"(C:\Users\secret_composer\éŸ³æ¨‚\å¤œæ›².mp3)", badTrack, &errMsg, false));
     BOO_CHECK(errMsg.find("secret_composer") == std::string::npos);
     BOO_CHECK(errMsg.find("<USER_HOME>") != std::string::npos);
+    BOO_CHECK(errMsg.find("éŸ³æ¨‚/å¤œæ›².mp3") != std::string::npos);
 
     errMsg.clear();
     BOO_CHECK(!loadCustomAudioFile48k(resolveResourcePath("assets/manifest.json"), badTrack, &errMsg, true));
     BOO_CHECK(!errMsg.empty());
 
     // 3. Generate a temporary 44,100 Hz stereo 16-bit PCM WAV file (0.50s warm chord) and decode to 48,000 Hz stereo float
-    const std::filesystem::path tmpWav = std::filesystem::temp_directory_path() / "boo_test_suno_44k1.wav";
+    const std::filesystem::path tmpWav = std::filesystem::temp_directory_path() / L"boo_test_è‡ºåŒ—å¤œæ›²_44k1.wav";
     {
         constexpr uint32_t kSr = 44100u;
         constexpr uint32_t kFrames = 22050u; // 0.50s
@@ -1030,7 +1382,15 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
         // 0.50s @ 48 kHz ~= 24,000 frames
         BOO_CHECK(custom.frameCount >= 23500u && custom.frameCount <= 24500u);
         BOO_CHECK(custom.interleavedStereo.size() == custom.frameCount * 2u);
-        BOO_CHECK(custom.label == "boo_test_suno_44k1.wav");
+        BOO_CHECK(custom.label == "boo_test_è‡ºåŒ—å¤œæ›²_44k1.wav");
+        // A quiet source keeps its authored level through 44.1 -> 48 kHz conversion.
+        for (size_t channel = 0; channel < 2u; ++channel) {
+            float peak = 0.0f;
+            for (size_t frame = 2400u; frame < 21600u; ++frame) {
+                peak = std::max(peak, std::abs(custom.interleavedStereo[frame * 2u + channel]));
+            }
+            BOO_CHECK(std::abs(peak - 0.45f) < 0.005f);
+        }
     } else {
         // Fallback synthetic custom buffer if running in a headless server container without Media Foundation codecs
         custom.frameCount = 24000u;
@@ -1049,43 +1409,50 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     synth.reset(480000, 0.0f);
 
     std::vector<float> pcm(1024u * 2u, 0.0f);
-    float prevL = 0.0f, prevR = 0.0f, maxStep = 0.0f;
     auto measure = [&](uint32_t frames, AudioBandSnapshot* outB = nullptr) -> bool {
         pcm.assign(static_cast<size_t>(frames) * 2u, 0.0f);
         synth.renderFrames(pcm.data(), frames, false, false, 0.85f, outB);
-        for (uint32_t i = 0; i < frames; ++i) {
-            const float l = pcm[i * 2u + 0u];
-            const float r = pcm[i * 2u + 1u];
-            BOO_CHECK(std::isfinite(l) && std::isfinite(r));
-            maxStep = std::max(maxStep, std::max(std::abs(l - prevL), std::abs(r - prevR)));
-            prevL = l;
-            prevR = r;
-        }
+        for (const float sample : pcm) BOO_CHECK(std::isfinite(sample));
         return true;
     };
 
+    AudioSynthesizer48k uninterrupted;
+    uninterrupted.setDurationSamples(17280000);
+    uninterrupted.reset(480000, 0.0f);
+    std::vector<float> reference(1025u * 2u);
+    uninterrupted.renderFrames(reference.data(), 1025u, false, false, 0.85f);
     BOO_CHECK(measure(1024u));
     synth.setCustomTrack(&custom);
     synth.seekTo(6000u);
     AudioBandSnapshot customBands{};
     BOO_CHECK(measure(1024u, &customBands));
     BOO_CHECK(customBands.rms > 0.02f);
+    for (size_t channel = 0; channel < 2u; ++channel) {
+        BOO_CHECK(std::abs(pcm[channel] - reference[1024u * 2u + channel]) < 0.00001f);
+    }
 
+    const size_t outgoingOffset = static_cast<size_t>(synth.primarySamplePosition()) * 2u;
     synth.setCustomTrack(nullptr);
     synth.seekTo(960000u);
     BOO_CHECK(measure(1024u));
-    BOO_CHECK(maxStep < 0.020f);
+    for (size_t channel = 0; channel < 2u; ++channel) {
+        BOO_CHECK(std::abs(pcm[channel] - custom.interleavedStereo[outgoingOffset + channel] * 0.85f) < 0.00001f);
+    }
 
     // 5. Verify bundled 4-track first-party OST assets, cooperative cancellation, compact PCM16, and playlist cycling
     const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
-        resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
-        resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
-        resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
-        resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+        resolveResourcePath("assets/audio/01_neon_orchid.flac"),
+        resolveResourcePath("assets/audio/02_acid_lotus.flac"),
+        resolveResourcePath("assets/audio/03_velvet_cipher.flac"),
+        resolveResourcePath("assets/audio/04_glass_dragon.flac")
     };
     for (const auto& p : ostPaths) {
         BOO_CHECK(std::filesystem::exists(p));
         BOO_CHECK(std::filesystem::file_size(p) > (3ULL * 1024ULL * 1024ULL));
+        std::ifstream file(p, std::ios::binary);
+        char signature[4]{};
+        BOO_CHECK(file.read(signature, sizeof(signature)));
+        BOO_CHECK(std::string(signature, sizeof(signature)) == "fLaC");
     }
 
     std::atomic<bool> preCancelled{true};
@@ -1093,17 +1460,26 @@ bool testCustomAudioTrackDecoderAndCrossfade() {
     BOO_CHECK(!loadCustomAudioFile48k(ostPaths[0], cancelledTrack, &errMsg, false, &preCancelled, true));
     BOO_CHECK(cancelledTrack.frameCount == 0u);
 
-    CustomAudioTrack48k ost01{};
-    if (loadCustomAudioFile48k(ostPaths[0], ost01, &errMsg, false, nullptr, true)) {
-        BOO_CHECK(ost01.frameCount > (180ULL * 48000ULL)); // > 3 minutes @ 48 kHz
-        BOO_CHECK(ost01.interleavedStereo.empty());
-        BOO_CHECK(ost01.interleavedPcm16.size() == ost01.frameCount * 2u);
-        synth.setCustomTrack(&ost01);
-        synth.seekTo(48000ULL * 30ULL); // 0:30 into Neon Orchid
-        AudioBandSnapshot ostBands{};
-        BOO_CHECK(measure(1024u, &ostBands));
-        BOO_CHECK(ostBands.rms > 0.01f);
-        synth.setCustomTrack(nullptr);
+    if (decodedOk) {
+        for (const auto& path : ostPaths) {
+            CustomAudioTrack48k ost{};
+            BOO_CHECK(loadCustomAudioFile48k(path, ost, &errMsg, false, nullptr, true));
+            BOO_CHECK(ost.frameCount > (180ULL * 48000ULL));
+            BOO_CHECK(ost.interleavedStereo.empty());
+            BOO_CHECK(ost.interleavedPcm16.size() == ost.frameCount * 2u);
+            AudioSynthesizer48k ostMixer;
+            ostMixer.setCustomTrack(&ost);
+            ostMixer.reset(48000ULL * 30ULL);
+            AudioBandSnapshot ostBands{};
+            BOO_CHECK(ostMixer.renderFrames(pcm.data(), 1024u, false, false, 0.85f, &ostBands) == 1024u);
+            BOO_CHECK(ostBands.rms > 0.01f);
+            const size_t sourceOffset = static_cast<size_t>(ostMixer.primarySamplePosition()) * 2u;
+            BOO_CHECK(ostMixer.renderFrames(pcm.data(), 1024u, false, false, 0.85f) == 1024u);
+            for (size_t i = 0; i < pcm.size(); ++i) {
+                const float mastered = static_cast<float>(ost.interleavedPcm16[sourceOffset + i]) / 32768.0f;
+                BOO_CHECK(pcm[i] == mastered * 0.85f);
+            }
+        }
     }
 
     AudioEngine ostEngine;
@@ -1249,13 +1625,24 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 72);
+    BOO_CHECK(keys.size() == 95);
+    BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
 
     UiTextLayer layer;
     size_t problems = 0;
     for (const std::string& tag : languages) {
-        if (tag == "en-US") continue;
         BOO_CHECK(catalog.load(dir, tag));
+        const auto& signs = cityBlimpSigns(catalog.languageTag());
+        BOO_CHECK(signs.languageTag == tag);
+        const auto checkFace = [&](const BlimpSignFace& face, const char* key) {
+            const auto* text = catalog.active() ? catalog.find(key) : catalog.findEnglish(key);
+            return text && face.text == *text && face.width > 0 && face.height > 0 &&
+                   face.rows.size() == ((face.width+3)/4)*face.height &&
+                   face.rows.find_first_not_of('0') != std::string_view::npos;
+        };
+        BOO_CHECK(checkFace(signs.front,"blimp.bloomLate"));
+        BOO_CHECK(checkFace(signs.back,"blimp.stayWild"));
+        if (tag == "en-US") continue;
         BOO_CHECK(catalog.active() && catalog.languageTag() == tag);
         BOO_CHECK(catalog.rightToLeft() == (tag == "ar-SA"));
         for (const std::string& key : keys) {
@@ -1269,7 +1656,6 @@ bool testUiStringCatalogs() {
             if (key == "hud.all") ok = keeps(L"[") && keeps(L"]");
             if (key == "hud.ost.synth") ok = keeps(L"RTX");
             if (key == "hud.ost.custom") ok = keeps(L"MP3+");
-            if (key == "hud.live_gpu") ok = keeps(L"GPU");
             if (!ok) { std::cout << "  " << tag << " " << key << " lost a protected token\n"; ++problems; }
         }
         if (layer.ready()) {
@@ -1303,18 +1689,36 @@ bool testUiStringCatalogs() {
 
 } // namespace
 
+#include "city_module_tests.hpp"
+#include "flock_formation_tests.hpp"
+#include "workout_governor_tests.hpp"
+#include "startup_progress_tests.hpp"
+#include "physx_suite_tests.hpp"
+
 int main() {
     boo::Logger::instance().setConsoleEnabled(false);
 
+    runTest("SanctuaryParcelHandoff", testSanctuaryParcelHandoff);
+    runTest("CityModuleLodTransitions", testCityModuleLodTransitions);
+    runTest("CityModulesPreserveAuthoredKits", testCityModulesPreserveAuthoredKits);
+    runTest("FlockFormations", testFlockFormations);
+    runTest("WorkoutGovernor", testWorkoutGovernor);
+    runTest("StartupProgress", testStartupProgress);
+    runTest("PhysxSuite", testPhysxSuite);
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
+    runTest("FilmOrbits", testFilmOrbits);
+    runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);
     runTest("FullFilm360sScoreCaptionsAndEditions", testFullFilm360sScoreCaptionsAndEditions);
     runTest("LateFilmEditionSeekAudioContinuity", testLateFilmEditionSeekAudioContinuity);
     runTest("MediaPrivacyRedactionAndFaultFallback", testMediaPrivacyRedactionAndFaultFallback);
     runTest("CustomAudioTrackDecoderAndCrossfade", testCustomAudioTrackDecoderAndCrossfade);
+    runTest("RecordedSoundtrackFidelity", testRecordedSoundtrackFidelity);
     runTest("JsonParserAndSerializer", testJsonParserAndSerializer);
+    runTest("PublicWorldLocators", testPublicWorldLocators);
     runTest("ProductionCueSheetsAndManifest", testProductionCueSheetsAndManifest);
+    runTest("ManifestProvenanceAndByteIntegrity", testManifestProvenanceAndByteIntegrity);
     runTest("InvalidCueFixturesRejected", testInvalidCueFixturesRejected);
     runTest("TimelineClockArithmeticAndFailover", testTimelineClockArithmeticAndFailover);
     runTest("PrecisionTransport", testPrecisionTransport);

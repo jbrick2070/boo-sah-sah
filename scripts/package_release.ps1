@@ -70,10 +70,18 @@ Copy-Item -Force (Join-Path $RepoRoot "assets\shaders\*.hlsl") (Join-Path $Stage
 Copy-Item -Force (Join-Path $RepoRoot "assets\meshes\*.bmesh") (Join-Path $StageDir "assets\meshes\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\textures\*.btex") (Join-Path $StageDir "assets\textures\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\models\madame_n_*") (Join-Path $StageDir "assets\models\")
-Copy-Item -Force (Join-Path $RepoRoot "assets\audio\*.mp3") (Join-Path $StageDir "assets\audio\")
+$soundtrack = (Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "assets\manifest.json") | ConvertFrom-Json).assets |
+    Where-Object { $_.kind -eq 'audio' }
+foreach ($track in $soundtrack) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $track.path) -Destination (Join-Path $StageDir $track.path) -ErrorAction Stop
+}
 Copy-Item -Force (Join-Path $RepoRoot "assets\cues\*.json") (Join-Path $StageDir "assets\cues\")
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\strings") | Out-Null
 Copy-Item -Force (Join-Path $RepoRoot "assets\strings\*.json") (Join-Path $StageDir "assets\strings\")
+New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\neural") | Out-Null
+Copy-Item -Force (Join-Path $RepoRoot "assets\neural\*.bin") (Join-Path $StageDir "assets\neural\")
+New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "assets\physics") | Out-Null
+Copy-Item -Force (Join-Path $RepoRoot "assets\physics\*.bphys") (Join-Path $StageDir "assets\physics\")
 Copy-Item -Force (Join-Path $RepoRoot "assets\manifest.json") (Join-Path $StageDir "assets\manifest.json")
 
 # 4. Runtime configuration & quality presets
@@ -104,9 +112,21 @@ if ((-not $ExcludeOpenVinoRuntime) -and (Test-Path $VenvOvDir)) {
             Copy-Item -Force $srcDll (Join-Path $OvStage $dll)
         }
     }
-    $OvLicense = Get-ChildItem (Join-Path $RepoRoot ".venv\Lib\site-packages\openvino-*.dist-info\*LICENSE*") -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($OvLicense) {
-        Copy-Item -Force $OvLicense.FullName (Join-Path $OvStage "LICENSE-OpenVINO-Apache-2.0.txt")
+    $OvMetadata = Get-ChildItem -LiteralPath (Join-Path $RepoRoot ".venv\Lib\site-packages") -Directory -Filter 'openvino-*.dist-info' | Select-Object -First 1
+    if (-not $OvMetadata) { throw "OpenVINO runtime found, but its wheel metadata is missing." }
+    $OvLicenseRoot = Join-Path $OvMetadata.FullName 'licenses'
+    if (-not (Test-Path -LiteralPath $OvLicenseRoot -PathType Container)) { $OvLicenseRoot = $OvMetadata.FullName }
+    $OvLicense = Get-ChildItem -LiteralPath $OvLicenseRoot -File -Filter 'LICENSE*' | Select-Object -First 1
+    if (-not $OvLicense) { throw "OpenVINO wheel has no license under $OvLicenseRoot." }
+    Copy-Item -LiteralPath $OvLicense.FullName -Destination (Join-Path $OvStage 'LICENSE-OpenVINO-Apache-2.0.txt')
+    # Current wheels put notices in licenses/licensing. Older wheels can carry them next to LICENSE.
+    $notices = Get-ChildItem -LiteralPath $OvLicenseRoot -File -Recurse |
+        Where-Object { $_.Name -match 'third[-_ ]party|^NOTICE' }
+    foreach ($notice in $notices) {
+        $relative = $notice.FullName.Substring($OvLicenseRoot.Length + 1)
+        $destination = Join-Path $OvStage $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+        Copy-Item -LiteralPath $notice.FullName -Destination $destination
     }
     Write-Host "==> Staged compact OpenVINO NPU runtime sidecar into openvino\" -ForegroundColor Cyan
 }
@@ -116,24 +136,61 @@ if ((-not $ExcludeOpenVinoRuntime) -and (Test-Path $VenvOvDir)) {
 #     enabling progressive NRD REFERENCE accumulation up to 4096 SPP in Interactive Explore Studio mode.
 $NrdDllSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\bin\NRD.dll"
 $NrdLicSrc = Join-Path $RepoRoot "third_party\nvidia_nrd\LICENSE-NVIDIA-NRD.txt"
+$NrdStage = Join-Path $StageDir "nrd"
+New-Item -ItemType Directory -Force -Path $NrdStage | Out-Null
+# The compiled M2 shader contains RTXDI code even when the NRD DLL is omitted.
+Copy-Item -LiteralPath $NrdLicSrc -Destination (Join-Path $NrdStage "LICENSE-NVIDIA-NRD.txt") -ErrorAction Stop
 if ((-not $ExcludeNrdRuntime) -and (Test-Path $NrdDllSrc)) {
-    $NrdStage = Join-Path $StageDir "nrd"
-    New-Item -ItemType Directory -Force -Path $NrdStage | Out-Null
     Copy-Item -Force $NrdDllSrc (Join-Path $NrdStage "NRD.dll")
-    if (Test-Path $NrdLicSrc) {
-        Copy-Item -Force $NrdLicSrc (Join-Path $NrdStage "LICENSE-NVIDIA-NRD.txt")
-    }
     Write-Host "==> Staged dynamic NVIDIA NRD v4.18.0 DXIL sidecar into nrd\" -ForegroundColor Cyan
+}
+
+# Include only the production NGX runtime and its notice in builds configured with DLSS.
+$DlssBuild = Join-Path $BuildDir 'dlss'
+if (Test-Path -LiteralPath (Join-Path $DlssBuild 'nvngx_dlss.dll')) {
+    $DlssStage = Join-Path $StageDir 'dlss'
+    New-Item -ItemType Directory -Force -Path $DlssStage | Out-Null
+    $dlssFiles = @('nvngx_dlss.dll', 'LICENSE-NVIDIA-DLSS.txt')
+    if (Test-Path -LiteralPath (Join-Path $DlssBuild 'nvngx_dlssd.dll')) { $dlssFiles += 'nvngx_dlssd.dll' }
+    foreach ($name in $dlssFiles) {
+        Copy-Item -LiteralPath (Join-Path $DlssBuild $name) -Destination $DlssStage -ErrorAction Stop
+    }
+}
+
+$StreamlineBuild = Join-Path $BuildDir 'streamline'
+if (Test-Path -LiteralPath (Join-Path $StreamlineBuild 'sl.interposer.dll')) {
+    $StreamlineStage = Join-Path $StageDir 'streamline'
+    New-Item -ItemType Directory -Force -Path $StreamlineStage | Out-Null
+    foreach ($name in 'sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll',
+             'nvngx_dlssg.dll', 'license.txt', '3rd-party-licenses.md', 'nvngx_dlss.license.txt', 'reflex.license.txt') {
+        Copy-Item -LiteralPath (Join-Path $StreamlineBuild $name) -Destination $StreamlineStage -ErrorAction Stop
+    }
 }
 
 # 6. Documentation, changelog, and licenses
 Copy-Item -Force (Join-Path $RepoRoot "README.md") (Join-Path $StageDir "README.md")
 Copy-Item -Force (Join-Path $RepoRoot "LICENSES.md") (Join-Path $StageDir "LICENSES.md")
+Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE"), (Join-Path $RepoRoot "LICENSE-ASSETS.md") -Destination $StageDir -ErrorAction Stop
+$MapDataDir = Join-Path $StageDir 'map-data'
+New-Item -ItemType Directory -Path $MapDataDir | Out-Null
+foreach ($file in 'taipei_xinyi_buildings.json', 'TAIPEI-MAP-NOTICE.txt') {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "tools/data/$file") -Destination $MapDataDir
+}
 Copy-Item -Force (Join-Path $RepoRoot "CHANGELOG.md") (Join-Path $StageDir "CHANGELOG.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\USER_GUIDE.md") (Join-Path $StageDir "docs\USER_GUIDE.md")
+Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\film_shot_list.md") -Destination (Join-Path $StageDir "docs")
 Copy-Item -Force (Join-Path $RepoRoot "docs\SPEC_v4.md") (Join-Path $StageDir "docs\SPEC_v4.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\quality_upgrade_report.md") (Join-Path $StageDir "docs\quality_upgrade_report.md")
 Copy-Item -Force (Join-Path $RepoRoot "docs\quality_timings.json") (Join-Path $StageDir "docs\quality_timings.json")
+
+# Resolve cues and registered release assets entirely within the assembled layout.
+Push-Location -LiteralPath $StageDir
+try {
+    & (Join-Path $StageDir "boo_sah_sah.exe") --validate-cues --no-activate | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Staged asset or cue verification failed before packing." }
+} finally {
+    Pop-Location
+}
 
 Write-Host "==> Packing single-file Windows installer: $SetupPath" -ForegroundColor Cyan
 $packProc = Start-Process -FilePath $StubExe -ArgumentList @("--pack", "`"$StubExe`"", "`"$StageDir`"", "`"$SetupPath`"") -Wait -PassThru -NoNewWindow
@@ -234,6 +291,14 @@ try {
         throw "Uninstaller left tracked files: $($Remaining -join ', ')"
     }
     if (-not (Test-Path -LiteralPath $UserFile)) { throw 'Uninstaller deleted untracked user data.' }
+    $InstalledFolders = $TrackedFiles | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique
+    foreach ($Folder in $InstalledFolders) {
+        if (!$Folder) { continue }
+        $InstalledPath = Join-Path $VerifyDir $Folder
+        if ((Test-Path -LiteralPath $InstalledPath -PathType Container) -and !(Get-ChildItem -LiteralPath $InstalledPath -Force)) {
+            throw "Uninstaller left an empty package directory: $Folder"
+        }
+    }
     $Succeeded = $true
 } finally {
     $env:PATH = $SavedPath

@@ -26,6 +26,10 @@ These stay on your PC. None of them is sent to the publisher or to anyone else.
 - **Your own music or video file**, if you choose one, is read from your PC to play in the film. It is not copied or uploaded.
 - **Diagnostic logs and benchmark reports** are written to your PC only if you ask for them. They describe your graphics hardware and the app's performance.
 
+## Opening a Demo-Verse world
+
+In versions with the Demo-Verse portal, you can enter a public world address and choose to open it in your installed visitor or browser. Boo Sah Sah passes the address to Windows only after you choose that action. The receiving app can then connect to the selected host under its own privacy practices. The handoff includes only the public address. Film playback, camera images and hardware readings stay on your PC.
+
 ## Microsoft Store
 
 If you get the app from the Microsoft Store, Microsoft handles the download and may collect information under its own privacy statement. The publisher receives only the anonymous, combined statistics the Store gives every developer, such as the number of downloads.

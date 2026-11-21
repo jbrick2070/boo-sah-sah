@@ -33,12 +33,13 @@ constexpr double kPi    = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
 constexpr double kInvSr = 1.0 / 48000.0;
 
-std::string propWideToUtf8(const wchar_t* wstr) {
+std::string wideToUtf8(const wchar_t* wstr) {
     if (!wstr || !*wstr) return {};
     const int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 1) return {};
-    std::string out(static_cast<size_t>(len - 1), '\0');
+    std::string out(static_cast<size_t>(len), '\0');
     WideCharToMultiByte(CP_UTF8, 0, wstr, -1, out.data(), len, nullptr, nullptr);
+    out.pop_back();
     return out;
 }
 
@@ -207,7 +208,7 @@ bool loadCustomAudioFile48k(
         if (outError) *outError = "Audio decode cancelled";
         return false;
     }
-    const std::string safeName = redactUserPath(filePath.string());
+    const std::string safeName = redactUserPath(wideToUtf8(filePath.c_str()));
     if (injectFault) {
         if (outError) *outError = "Audio file fault injected (" + safeName + ")";
         return false;
@@ -401,7 +402,7 @@ bool loadCustomAudioFile48k(
                                         const float b = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
                                         const float c = -0.5f * p0 + 0.5f * p2;
                                         const float v = ((a * frac + b) * frac + c) * frac + p1;
-                                        outTrack.interleavedStereo[static_cast<size_t>(d) * 2u + ch] = std::clamp(v, -1.0f, 1.0f);
+                                        outTrack.interleavedStereo[static_cast<size_t>(d) * 2u + ch] = v;
                                     }
                                 }
                                 if (!cancelled) {
@@ -412,26 +413,27 @@ bool loadCustomAudioFile48k(
                             if (cancelled || (cancelRequested && cancelRequested->load(std::memory_order_relaxed))) {
                                 outTrack = {};
                             } else if (outTrack.frameCount >= 480u) {
-                                // Peak-normalize safely so mastered MP3s & quiet WAVs both sit cleanly at ~0.92 peak
+                                // Preserve the level relationships between masters. Apply a single
+                                // gain to both channels only when decoded peaks exceed full scale.
                                 float peak = 0.0f;
                                 for (float s : outTrack.interleavedStereo) {
                                     peak = std::max(peak, std::abs(s));
                                 }
-                                if (peak > 1e-4f) {
-                                    const float normScale = std::clamp(0.92f / peak, 0.35f, 3.5f);
+                                if (peak > 1.0f) {
+                                    const float normScale = 1.0f / peak;
                                     for (float& s : outTrack.interleavedStereo) {
-                                        s = std::clamp(s * normScale, -0.98f, 0.98f);
+                                        s *= normScale;
                                     }
                                 }
                                 if (compactPcm16) {
                                     outTrack.interleavedPcm16.resize(outTrack.interleavedStereo.size());
                                     for (size_t k = 0; k < outTrack.interleavedStereo.size(); ++k) {
-                                        const float clamped = std::clamp(outTrack.interleavedStereo[k], -0.999f, 0.999f);
-                                        outTrack.interleavedPcm16[k] = static_cast<int16_t>(std::lrintf(clamped * 32767.0f));
+                                        const long pcm = std::lrintf(outTrack.interleavedStereo[k] * 32768.0f);
+                                        outTrack.interleavedPcm16[k] = static_cast<int16_t>(std::clamp(pcm, -32768L, 32767L));
                                     }
                                     std::vector<float>().swap(outTrack.interleavedStereo);
                                 }
-                                outTrack.label = filePath.filename().string();
+                                outTrack.label = wideToUtf8(filePath.filename().c_str());
                                 ok = true;
                             }
                         }
@@ -592,7 +594,7 @@ void AudioSynthesizer48k::reset(uint64_t seedSample, float initialGain) noexcept
 
     residualLeft_ = 0.0f;
     residualRight_ = 0.0f;
-    residualMono_ = 0.0f;
+    residualMusicLeft_ = residualMusicRight_ = residualSynthWeight_ = 0.0f;
     residualPos_ = 64;
 
     lp180_ = 0.0f;
@@ -661,11 +663,16 @@ void AudioSynthesizer48k::seekTo(uint64_t targetSample) noexcept {
                 minIdx = i;
             }
         }
-        float evL = 0.0f, evR = 0.0f, evM = 0.0f;
-        evaluateVoiceSample(voices_[minIdx], evL, evR, evM);
-        residualLeft_  += evL * minW;
-        residualRight_ += evR * minW;
-        residualMono_  += evM * minW;
+        float evL = 0.0f, evR = 0.0f;
+        evaluateVoiceSample(voices_[minIdx], evL, evR);
+        if (voices_[minIdx].voiceTrack) {
+            residualMusicLeft_ += evL * minW;
+            residualMusicRight_ += evR * minW;
+        } else {
+            residualLeft_ += evL * minW;
+            residualRight_ += evR * minW;
+            residualSynthWeight_ += minW;
+        }
         residualPos_ = 0;
         chosen = minIdx;
     }
@@ -687,10 +694,9 @@ void AudioSynthesizer48k::seekTo(uint64_t targetSample) noexcept {
 void AudioSynthesizer48k::evaluateVoiceSample(
     VoiceSlot& v,
     float& outLeft,
-    float& outRight,
-    float& outMono) noexcept {
+    float& outRight) noexcept {
     // 1. Bundled 4-Track Original Soundtrack or User-Imported MP3 / WAV / FLAC / M4A
-    const CustomAudioTrack48k* trk = v.voiceTrack ? v.voiceTrack : customTrack_;
+    const CustomAudioTrack48k* trk = v.voiceTrack;
     const bool hasPcm16 = (trk != nullptr) && (trk->interleavedPcm16.size()  >= trk->frameCount * 2u);
     const bool hasFlt32 = (trk != nullptr) && (trk->interleavedStereo.size() >= trk->frameCount * 2u);
     if (v.voiceTrack != nullptr && trk->frameCount > 0u && (hasPcm16 || hasFlt32)) {
@@ -707,21 +713,17 @@ void AudioSynthesizer48k::evaluateVoiceSample(
                 seam = 0.5f - 0.5f * std::cos(static_cast<float>(kPi) * u);
             }
         }
-        constexpr float kCustomGain = 4.2f;
         float rawL = 0.0f;
         float rawR = 0.0f;
         if (hasPcm16) {
-            rawL = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 0u]) * (1.0f / 32767.0f);
-            rawR = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 1u]) * (1.0f / 32767.0f);
+            rawL = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 0u]) * (1.0f / 32768.0f);
+            rawR = static_cast<float>(trk->interleavedPcm16[static_cast<size_t>(idx) * 2u + 1u]) * (1.0f / 32768.0f);
         } else {
             rawL = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 0u];
             rawR = trk->interleavedStereo[static_cast<size_t>(idx) * 2u + 1u];
         }
-        const float sL = rawL * seam * kCustomGain;
-        const float sR = rawR * seam * kCustomGain;
-        outLeft  = sL;
-        outRight = sR;
-        outMono  = 0.08f * (sL + sR);
+        outLeft = rawL * seam;
+        outRight = rawR * seam;
         return;
     }
 
@@ -983,7 +985,6 @@ void AudioSynthesizer48k::evaluateVoiceSample(
 
     outLeft  = static_cast<float>(chL);
     outRight = static_cast<float>(chR);
-    outMono  = static_cast<float>(0.5 * (chL + chR));
 }
 
 uint32_t AudioSynthesizer48k::renderFrames(
@@ -1002,7 +1003,7 @@ uint32_t AudioSynthesizer48k::renderFrames(
     constexpr float kAlpha2400 = 0.269605f; // 2400 Hz 1-pole LPF @ 48 kHz
 
     const float clampedVol = std::isfinite(masterVolume01) ? std::clamp(masterVolume01, 0.0f, 1.0f) : 0.0f;
-    const float desiredGain = (paused || muted) ? 0.0f : (clampedVol * 0.14f);
+    const float desiredGain = (paused || muted) ? 0.0f : clampedVol;
     if (std::fabs(desiredGain - rampTargetGain_) > 1e-6f) {
         rampStartGain_ = currentGain_;
         rampTargetGain_ = desiredGain;
@@ -1034,7 +1035,8 @@ uint32_t AudioSynthesizer48k::renderFrames(
 
         float mixL = 0.0f;
         float mixR = 0.0f;
-        float mixMono = 0.0f;
+        float musicL = 0.0f, musicR = 0.0f;
+        float synthWeight = 0.0f;
 
         if (shouldAdvanceVoices) {
             for (auto& v : voices_) {
@@ -1063,11 +1065,16 @@ uint32_t AudioSynthesizer48k::renderFrames(
                     v.currentWeight = 1.0f;
                 }
 
-                float vL = 0.0f, vR = 0.0f, vM = 0.0f;
-                evaluateVoiceSample(v, vL, vR, vM);
-                mixL    += vL * w;
-                mixR    += vR * w;
-                mixMono += vM * w;
+                float vL = 0.0f, vR = 0.0f;
+                evaluateVoiceSample(v, vL, vR);
+                if (v.voiceTrack) {
+                    musicL += vL * w;
+                    musicR += vR * w;
+                } else {
+                    mixL += vL * w;
+                    mixR += vR * w;
+                    synthWeight += w;
+                }
                 ++v.phaseSample;
             }
         }
@@ -1077,44 +1084,41 @@ uint32_t AudioSynthesizer48k::renderFrames(
             const float s = 0.5f * (1.0f + std::cos(static_cast<float>(kPi) * u));
             mixL    += residualLeft_ * s;
             mixR    += residualRight_ * s;
-            mixMono += residualMono_ * s;
+            musicL += residualMusicLeft_ * s;
+            musicR += residualMusicRight_ * s;
+            synthWeight += residualSynthWeight_ * s;
             ++residualPos_;
             if (residualPos_ >= 64u) {
-                residualLeft_ = residualRight_ = residualMono_ = 0.0f;
+                residualLeft_ = residualRight_ = 0.0f;
+                residualMusicLeft_ = residualMusicRight_ = residualSynthWeight_ = 0.0f;
             }
         }
 
-        float finalL = mixL;
-        float finalR = mixR;
-        if (customTrack_ != nullptr) {
-            // Preserve full 20 kHz studio master clarity for imported MP3/WAV/FLAC tracks
-            finalL = 0.96f * std::tanh(mixL * 0.85f);
-            finalR = 0.96f * std::tanh(mixR * 0.85f);
-            if (hall_) {
-                hall_->silkL = finalL;
-                hall_->silkR = finalR;
-            }
-        } else if (hall_) {
-            if (shouldAdvanceVoices) {
-                float wetL = 0.0f, wetR = 0.0f;
-                hall_->process(mixL, mixR, wetL, wetR);
-                const float revL = 0.84f * std::tanh((mixL * 0.82f + wetL * 0.34f) * 1.45f);
-                const float revR = 0.84f * std::tanh((mixR * 0.82f + wetR * 0.34f) * 1.45f);
-                hall_->silkL += 0.34f * (revL - hall_->silkL);
-                hall_->silkR += 0.34f * (revR - hall_->silkR);
-            }
-            finalL = hall_->silkL;
-            finalR = hall_->silkR;
-            mixMono = 0.5f * (finalL + finalR);
+        // Process the procedural score in its own hall. Fade the processed
+        // score against dry stereo music when a switch overlaps the two.
+        if (hall_ && synthWeight > 1e-6f) {
+            mixL /= synthWeight;
+            mixR /= synthWeight;
+            float wetL = 0.0f, wetR = 0.0f;
+            hall_->process(mixL, mixR, wetL, wetR);
+            const float revL = 0.84f * std::tanh((mixL * 0.82f + wetL * 0.34f) * 1.45f);
+            const float revR = 0.84f * std::tanh((mixR * 0.82f + wetR * 0.34f) * 1.45f);
+            hall_->silkL += 0.34f * (revL - hall_->silkL);
+            hall_->silkR += 0.34f * (revR - hall_->silkR);
+            mixL = hall_->silkL * synthWeight;
+            mixR = hall_->silkR * synthWeight;
         }
 
-        outInterleavedStereo[i * 2 + 0] = finalL * currentGain_;
-        outInterleavedStereo[i * 2 + 1] = finalR * currentGain_;
+        constexpr float kSynthTrim = 0.14f;
+        outInterleavedStereo[i * 2 + 0] = std::clamp((musicL + kSynthTrim * mixL) * currentGain_, -1.0f, 1.0f);
+        outInterleavedStereo[i * 2 + 1] = std::clamp((musicR + kSynthTrim * mixR) * currentGain_, -1.0f, 1.0f);
         if (currentGain_ > 1e-6f) {
             hasRenderedAnyAudio_ = true;
         }
 
-        const float envMono = paused ? (mixMono * ((clampedVol > 1e-5f) ? (currentGain_ / (clampedVol * 0.14f)) : 0.0f)) : mixMono;
+        // Keep the visual followers at their authored sensitivity independently of playback gain.
+        const float mixMono = 0.5f * (mixL + mixR) + 0.336f * (musicL + musicR);
+        const float envMono = paused ? (mixMono * ((clampedVol > 1e-5f) ? (currentGain_ / clampedVol) : 0.0f)) : mixMono;
         lp180_  += kAlpha180 * (envMono - lp180_);
         lp2400_ += kAlpha2400 * (envMono - lp2400_);
         const float lowBand  = lp180_;
@@ -1240,7 +1244,7 @@ bool AudioEngine::openDefaultEndpoint(uint64_t initialSeedSample, int64_t initia
         PROPVARIANT varName;
         PropVariantInit(&varName);
         if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &varName)) && varName.vt == VT_LPWSTR) {
-            endpointName_ = propWideToUtf8(varName.pwszVal);
+            endpointName_ = wideToUtf8(varName.pwszVal);
         }
         PropVariantClear(&varName);
     }
@@ -1930,6 +1934,10 @@ void AudioEngine::audioThreadMain() noexcept {
             }
         }
 
+        // Priming WASAPI with silence must not advance the film ahead of its first song.
+        // Later track switches keep the established transport running during a decode.
+        const bool awaitingOpeningTrack = waitingForPreload && playedWriteCursor == 0;
+        const bool transportHeld = isPaused || awaitingOpeningTrack;
         const bool isMuted = muted_.load(std::memory_order_relaxed) || waitingForPreload;
         const float masterVol = masterVolume_.load(std::memory_order_relaxed);
         const bool ambientPlay = isPaused && exploreAmbient_.load(std::memory_order_relaxed);
@@ -1938,14 +1946,14 @@ void AudioEngine::audioThreadMain() noexcept {
         const uint32_t synthAdvanced = synth.renderFrames(
             reinterpret_cast<float*>(rawBuf),
             availableFrames,
-            isPaused && !ambientPlay,
+            awaitingOpeningTrack || (isPaused && !ambientPlay),
             isMuted,
             masterVol,
             &bands);
         if (appliedTrack != nullptr) {
             lastSongSamplePos_.store(synth.primarySamplePosition(), std::memory_order_relaxed);
         }
-        const uint32_t timelineAdvanced = isPaused ? 0u : synthAdvanced;
+        const uint32_t timelineAdvanced = transportHeld ? 0u : synthAdvanced;
 
         rmsEnvelope_.store(bands.rms, std::memory_order_relaxed);
 
@@ -1978,7 +1986,7 @@ void AudioEngine::audioThreadMain() noexcept {
         playedWriteCursor = nextPlayedCursor;
         submittedFrames48k_.store(playedWriteCursor, std::memory_order_release);
 
-        publishPresentationClock(isPaused, padding + availableFrames);
+        publishPresentationClock(transportHeld, padding + availableFrames);
     }
 
     if (mmcssHandle) {

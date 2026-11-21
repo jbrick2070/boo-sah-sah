@@ -19,13 +19,15 @@ namespace boo {
 
 // Slot ids are shared with assets/shaders/m1_taipei_slice.hlsl (UI_LBL_*). Keep both lists in step.
 enum class UiLabel : uint32_t {
-    Prev, Play, Pause, Next, ModeFilm, ModeFree, LiveGpu, ColSize, ColRate,
+    Prev, Play, Pause, Next, ModeFilm, ModeFree, Hardware, ColSize, ColRate,
     StateLive, StateSub, StateOff, StateFault, Bench, CamFree, CamFilm, Lamp, Wipe, Marbles,
     Sun, Azimuth, Mute, Music, Reset, NextScene, Solo, All,
     Act1, Act2, Act3, Act4, Act5, Act6, Act7,
     SceneBathroom, SceneFaucet, SceneLeaves, SceneOrchid, SceneEnamel, SceneSanctuary, SceneCustom,
     AovAlbedo, AovNormal, AovRoughMetal, AovDirect, AovIndirect, AovReflect, AovRayHeat,
-    LiveCamera, OstSynth, OstCustom,
+    LiveCamera, OstSynth, OstCustom, StateScript, StateWarming, StateIdle,
+    PathTracing, Unavailable, Low, Medium, High, Quality, Balanced, Performance,
+    RealTimeGraphics, Automatic, Enabled, Boost, RayReconstruction, FrameGeneration, RenderFps, DisplayFps, DlssUpscaling,
     Count
 };
 
@@ -42,13 +44,13 @@ const UiLabelSpec& uiLabelSpec(UiLabel label) noexcept;
 struct UiTextAtlasLayout {
     static constexpr uint32_t kWidth = 3072;
     static constexpr uint32_t kLabelCols = 4;
-    static constexpr uint32_t kLabelRows = 16;
+    static constexpr uint32_t kLabelRows = 18;
     static constexpr uint32_t kLabelCellW = 160;   // x uiScale
     static constexpr uint32_t kLabelCellH = 20;    // x uiScale
     static constexpr uint32_t kMaxUiScale = 3;
-    static constexpr uint32_t kCaptionTop = kLabelRows * kLabelCellH * kMaxUiScale; // 960
+    static constexpr uint32_t kCaptionTop = kLabelRows * kLabelCellH * kMaxUiScale;
     static constexpr uint32_t kCaptionMaxH = 224;
-    static constexpr uint32_t kHeight = kCaptionTop + kCaptionMaxH;                 // 1184
+    static constexpr uint32_t kHeight = kCaptionTop + kCaptionMaxH;
     // Label text box relative to the glyph origin the shader uses: starts 2.5 units above it, 11 units tall.
     static constexpr float kBoxTopUnits = 2.5f;
     static constexpr float kBoxHeightUnits = 11.0f;

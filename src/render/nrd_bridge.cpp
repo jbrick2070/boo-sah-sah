@@ -195,6 +195,14 @@ void NrdBridge::shutdown() noexcept {
     s.height = 0;
 }
 
+void NrdBridge::resetHistory() noexcept {
+    if (!impl_) return;
+    impl_->nrdFrameIndex = 0;
+    impl_->refCleared = false;
+    impl_->reblurCleared = false;
+    impl_->prevJitter[0] = impl_->prevJitter[1] = 0.0f;
+}
+
 bool NrdBridge::isAvailable() const noexcept {
     return impl_ && impl_->ready;
 }

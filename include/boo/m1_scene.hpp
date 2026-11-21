@@ -7,10 +7,33 @@ namespace boo {
 
 struct Bmesh;
 struct M1CameraState;
-M1CameraState evaluateTrilogyCamera(int64_t samplePosition, int32_t sampleRate = 48000, bool reducedFlash = false) noexcept;
+M1CameraState evaluateTrilogyCamera(int64_t samplePosition, int32_t sampleRate = 48000, bool reducedFlash = false, float motionScale = 1.0f) noexcept;
+
+struct EvtolPose {
+    float position[3]{};
+    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    float hover = 0.0f, touchdown = 0.0f;
+    float rotorTilt() const noexcept { return 0.86f - 0.82f * hover; }
+};
+
+inline constexpr float kEvtolRotorPivots[6][3] = {
+    {-3.05f, 0.36f, -1.65f}, {3.05f, 0.36f, -1.65f},
+    {-4.10f, 0.40f,  0.15f}, {4.10f, 0.40f,  0.15f},
+    {-2.60f, 0.46f,  1.95f}, {2.60f, 0.46f,  1.95f}
+};
+
+EvtolPose evaluateEvtolPose(ShowVisualMode mode, float filmSeconds) noexcept;
+bool isOrbitalCutaway(ShowVisualMode mode, const FrameContext& frame) noexcept;
+inline constexpr double kCrownOrbitStartSeconds = 301.0;
+inline constexpr double kCrownOrbitEndSeconds = 331.0;
+// The full film borrows the river camera from the trilogy. A negative sample keeps its usual view.
+int64_t shanghaiRiverSample(ShowVisualMode mode, const FrameContext& frame) noexcept;
+void writeModelTransform(float rows[12], const float position[3], float yaw, float pitch, float roll, float scale = 1.0f) noexcept;
 
 // Procedural smooth-curved stage & enamel microcosm geometry kit (kit 4) for M3-M6 Solos & 360s Full Film.
 Bmesh buildEnamelMicrocosmKit();
+
+enum class FilmCameraInsert : uint8_t { None, CanopyRibbon, ParcelDock, BlackKites };
 
 struct M1CameraState {
     float eye[3]{0.0f, 1.35f, -14.0f};
@@ -20,6 +43,9 @@ struct M1CameraState {
     float revealOpen01 = 0.0f;  // [0..1] enamel monolith / microcosm opening factor
     float emissivePulse = 0.0f; // Bounded flash-safe musical accent in [0.0, 0.06] (0.0 under --reduced-flash)
     uint32_t shotIndex = 0;     // Act / shot index
+    float focusDistance = 0.0f; // Camera-to-cockpit distance in the scene distance buffer's units
+    float focusWeight = 0.0f;   // 0 selects the normal scene autofocus
+    FilmCameraInsert insert = FilmCameraInsert::None;
 };
 
 struct LetterboxViewport {

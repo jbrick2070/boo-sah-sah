@@ -41,6 +41,38 @@ struct RuntimeDiagnosticsSummary {
     FrametimeStats cpuFrameStats{};
     FrametimeStats gpuFrameStats{};
     GpuPassTimingsMs lastGpuPassTimings{};
+    RendererFeatureState pathTracing = RendererFeatureState::Unavailable;
+    RendererFeatureState superResolution = RendererFeatureState::Unavailable;
+    RendererFeatureState rayReconstruction = RendererFeatureState::Unavailable;
+    uint32_t dlssInputWidth = 0;
+    uint32_t dlssInputHeight = 0;
+    FrameGenerationStats presentation{};
+    uint32_t maxFramesPresentedPerRender = 0;
+    NeuralRenderingStats neural{};
+    std::string gpuSensorsDevice;
+    std::string gpuSensorsReason;
+    std::string gpuSensorsMatch;
+    uint32_t gpuSensorsNvidiaCount = 0;
+    GpuSensorReading gpuSensorsLast{};
+    GpuSensorSummary gpuSensorsRun{};
+    uint32_t gpuWorkout = 0;
+    uint32_t flockFormation = 0;
+    uint32_t flockSpecies = 0;
+    bool birdCam = false;
+    uint32_t birdCount = 0;
+    // The workout's frame-rate floor: what the dial asked for and what the machine could fly.
+    uint32_t workoutRequested = 0;     // birds the level asks for
+    uint32_t workoutReleased = 0;      // workout birds flying at the end of the run
+    float workoutFloorFps = 0.0f;      // 0 = no floor
+    bool workoutAtFloor = false;       // the floor, not the dial, was limiting the flock
+    uint32_t workoutSteadyBirds = 0;   // last flock measured holding the floor
+    float workoutSteadyFps = 0.0f;     // and the frame rate it held
+    uint32_t workoutPeakBirds = 0;     // largest flock measured holding the floor
+    double workoutMicrosecondsPerBird = 0.0; // frame time one more bird costs on this machine
+    uint32_t workoutCapacity = 0;      // birds the buffers had grown to hold
+    uint32_t physxGenre = 0;           // PhysX suite genre at the end of the run
+    PhysxStats physx{};                // the active genre's figures
+    PhysxRuntimeInfo physxRuntime{};   // the shared PhysX runtime
     std::array<LivePillarTelemetry, 4> lastLivePillars{};
     float lastNpuInferMs = 0.0f;
     float lastNpuResultAgeMs = 0.0f;

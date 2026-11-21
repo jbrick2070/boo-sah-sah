@@ -1,4 +1,5 @@
 #include "boo/btex.hpp"
+#include "boo/startup_progress.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -92,6 +93,7 @@ bool loadBtex(const std::filesystem::path& path, Btex& output, std::string* erro
     std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
     file.seekg(0);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), fileSize)) return fail("Truncated texture file");
+    startupAssetLoaded(path);
 
     const uint8_t* p = bytes.data();
     if (std::memcmp(p, "BTEX001\0", 8) != 0 || readU32(p + 8) != 1u || readU32(p + 12) != 64u) {

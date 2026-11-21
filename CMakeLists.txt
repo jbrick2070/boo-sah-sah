@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.28)
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" BOO_RELEASE_VERSION LIMIT_COUNT 1)
 project(BooSahSah
-    VERSION 1.0.0
+    VERSION "${BOO_RELEASE_VERSION}"
     DESCRIPTION "BOO SAH SAH — The Glass Orchid Protocol"
     LANGUAGES CXX RC
 )
@@ -26,6 +28,8 @@ option(ENABLE_OPENVINO "Enable optional Intel OpenVINO NPU/CPU plugin build (not
 option(ENABLE_NVENC    "Enable optional NVIDIA Video Codec SDK plugin build (default OFF)" OFF)
 option(ENABLE_SPOUT    "Enable optional Spout2 D3D12 sender build (default OFF)" OFF)
 option(BOO_BUILD_TESTS "Build unit and hardware integration tests" ON)
+option(ENABLE_DLSS "Use the official NVIDIA NGX SDK when installed by tools/fetch_dlss.py" ON)
+set(BOO_DLSS_SDK "${CMAKE_SOURCE_DIR}/build/dependencies/nvidia_dlss" CACHE PATH "Pinned NVIDIA DLSS SDK")
 
 if(BASE_ONLY)
     set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)
@@ -311,7 +315,83 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSUnpackNrdReblur -DBOO_NRD_UNPACK=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
-add_custom_target(boo_shaders DEPENDS
+set(BOO_DLSS_SHADER_OUTPUTS)
+function(boo_dlss_shader name source profile entry)
+    set(output "${BOO_OUT_SHADER_DIR}/${name}.cso")
+    add_custom_command(OUTPUT "${output}"
+        COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ${profile} -E ${entry} ${ARGN} -Ges -WX -O3
+            "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" -Fo "${output}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" VERBATIM)
+    set(BOO_DLSS_SHADER_OUTPUTS ${BOO_DLSS_SHADER_OUTPUTS} "${output}" PARENT_SCOPE)
+endfunction()
+boo_dlss_shader(dlss_resolve dlss_resolve cs_6_0 CSResolve)
+boo_dlss_shader(m2_motion_vs m2_mesh vs_6_0 VSSceneMotion)
+boo_dlss_shader(m2_motion_ps m2_mesh ps_6_0 PSSceneMotion)
+boo_dlss_shader(m2_motion_cutout_ps m2_mesh ps_6_0 PSSceneMotion -DBOO_ALPHA_CUTOUT=1)
+boo_dlss_shader(m2_sky_motion_ps m2_mesh ps_6_0 PSSkyMotion)
+boo_dlss_shader(m1_present_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
+# Neural rendering suite (src/render/neural_rendering.cpp)
+boo_dlss_shader(neural_clear_cs neural_rendering cs_6_0 CSClearStats)
+boo_dlss_shader(neural_ntc_decode_cs neural_rendering cs_6_0 CSNtcDecode)
+boo_dlss_shader(neural_nrc_init_cs neural_rendering cs_6_0 CSNrcInit)
+boo_dlss_shader(neural_nrc_train_cs neural_rendering cs_6_0 CSNrcTrain)
+boo_dlss_shader(neural_nrc_update_cs neural_rendering cs_6_0 CSNrcUpdate)
+boo_dlss_shader(neural_nrc_infer_cs neural_rendering cs_6_0 CSNrcInfer)
+boo_dlss_shader(neural_composite_cs neural_rendering cs_6_0 CSNeuralComposite)
+boo_dlss_shader(neural_nrc_pack_cs neural_rendering cs_6_0 CSNrcPackF16)
+
+# Tensor-core neural rendering: D3D12 Agility SDK 1.721 preview + DXC preview (Shader Model 6.10 LinAlg).
+# Test-rig builds only: the preview runtime needs Windows Developer Mode and is not allowed in Store packages.
+# tools/fetch_neural_sdk.py downloads both into build/dependencies.
+option(ENABLE_LINALG_PREVIEW "Tensor-core neural rendering via the D3D12 Agility SDK preview (not for Store builds)" OFF)
+set(BOO_AGILITY_SDK "${CMAKE_SOURCE_DIR}/build/dependencies/d3d12_agility" CACHE PATH "D3D12 Agility SDK 1.721 preview")
+set(BOO_DXC_PREVIEW "${CMAKE_SOURCE_DIR}/build/dependencies/dxc_preview" CACHE PATH "DXC with Shader Model 6.10")
+set(BOO_HAS_LINALG OFF)
+if(ENABLE_LINALG_PREVIEW)
+    if(EXISTS "${BOO_AGILITY_SDK}/build/native/include/d3d12.h" AND EXISTS "${BOO_AGILITY_SDK}/build/native/bin/x64/D3D12Core.dll"
+       AND EXISTS "${BOO_DXC_PREVIEW}/bin/x64/dxc.exe" AND EXISTS "${BOO_DXC_PREVIEW}/inc/hlsl/dx/linalg.h")
+        set(BOO_HAS_LINALG ON)
+        message(STATUS "Tensor-core neural rendering: ON (Agility SDK preview + DXC preview)")
+        foreach(pair "neural_ntc_decode_tc_cs;CSNtcDecode" "neural_nrc_infer_tc_cs;CSNrcInfer" "neural_composite_tc_cs;CSNeuralComposite")
+            list(GET pair 0 tc_name)
+            list(GET pair 1 tc_entry)
+            set(tc_out "${BOO_OUT_SHADER_DIR}/${tc_name}.cso")
+            add_custom_command(OUTPUT "${tc_out}"
+                COMMAND "${BOO_DXC_PREVIEW}/bin/x64/dxc.exe" -nologo -I "${BOO_DXC_PREVIEW}/inc/hlsl" -T cs_6_10 -enable-16bit-types
+                    -DBOO_NEURAL_LINALG=1 -E ${tc_entry} -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/neural_rendering.hlsl" -Fo "${tc_out}"
+                DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/neural_rendering.hlsl" VERBATIM)
+            list(APPEND BOO_DLSS_SHADER_OUTPUTS "${tc_out}")
+        endforeach()
+    else()
+        message(WARNING "ENABLE_LINALG_PREVIEW is ON but the preview SDKs are missing; run tools/fetch_neural_sdk.py")
+    endif()
+endif()
+
+# NVIDIA PhysX suite. Part one is smoke: NVIDIA Flow, built from the PhysX SDK checkout by
+# tools/fetch_physx_sdk.py into build/dependencies. Test-rig builds only for now; without it the
+# feature compiles to a stub that reports itself unavailable.
+option(ENABLE_PHYSX "NVIDIA PhysX suite (Flow smoke) from the PhysX SDK checkout in build/dependencies" OFF)
+set(BOO_PHYSX_SDK "${CMAKE_SOURCE_DIR}/build/dependencies/physx-sdk" CACHE PATH "NVIDIA PhysX SDK checkout with Flow built")
+set(BOO_FLOW_BIN "${BOO_PHYSX_SDK}/flow/_build/windows-x86_64/release")
+set(BOO_HAS_FLOW OFF)
+if(ENABLE_PHYSX)
+    if(EXISTS "${BOO_PHYSX_SDK}/flow/include/nvflowext/NvFlowLoader.h" AND EXISTS "${BOO_FLOW_BIN}/nvflow.dll"
+       AND EXISTS "${BOO_FLOW_BIN}/nvflowext.dll")
+        set(BOO_HAS_FLOW ON)
+        message(STATUS "PhysX suite: NVIDIA Flow smoke ON")
+        set(flow_cso "${BOO_OUT_SHADER_DIR}/flow_smoke_cs.cso")
+        # PNanoVDB.h, the NanoVDB reader, comes from the SDK checkout; it is not copied into this repository.
+        add_custom_command(OUTPUT "${flow_cso}"
+            COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSSmokeMarch -I "${BOO_PHYSX_SDK}/flow/include/nvflow/nanovdb"
+                -Ges -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/flow_smoke.hlsl" -Fo "${flow_cso}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/flow_smoke.hlsl" VERBATIM)
+        list(APPEND BOO_DLSS_SHADER_OUTPUTS "${flow_cso}")
+    else()
+        message(WARNING "ENABLE_PHYSX is ON but NVIDIA Flow is not built; run tools/fetch_physx_sdk.py")
+    endif()
+endif()
+
+add_custom_target(boo_shaders DEPENDS ${BOO_DLSS_SHADER_OUTPUTS}
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
@@ -374,6 +454,9 @@ add_library(boo_core STATIC
     src/core/clock.cpp
     src/core/cues.cpp
     src/core/capabilities.cpp
+    src/core/gpu_sensors.cpp
+    src/core/startup_progress.cpp
+    src/core/baked_physics.cpp
     src/core/health.cpp
     src/inference/scripted_director.cpp
     src/inference/openvino_director.cpp
@@ -387,13 +470,25 @@ add_library(boo_core STATIC
     src/render/btex.cpp
     src/render/nrd_bridge.cpp
     src/render/trilogy_renderer.cpp
+    src/render/city_modules.cpp
     src/render/m1_taipei_slice.cpp
+    src/render/dlss_bridge.cpp
+    src/render/neural_rendering.cpp
+    src/render/flow_smoke.cpp
+    src/physics/physx_suite.cpp
+    src/physics/physx_rigid.cpp
+    src/physics/physx_marbles.cpp
+    src/physics/physx_soft.cpp
+    src/physics/physx_route_test.cpp
+    src/physics/physx_fluid.cpp
+    src/render/frame_generation.cpp
     src/render/ui_text.cpp
     src/media/media_foundation_input.cpp
     src/integrations/spout_sender.cpp
     src/bench/benchmarks.cpp
     src/app/settings.cpp
     src/app/window.cpp
+    src/app/world_portal.cpp
     src/app/localization.cpp
     src/app/diagnostics.cpp
     "${M0_FALLBACK_VS_HPP}"
@@ -406,8 +501,86 @@ target_include_directories(boo_core PUBLIC
 )
 boo_apply_compiler_flags(boo_core)
 
+set(BOO_STREAMLINE_SDK "${CMAKE_SOURCE_DIR}/build/dependencies/nvidia_streamline" CACHE PATH "NVIDIA Streamline x64 release")
+if(EXISTS "${BOO_STREAMLINE_SDK}/include/sl.h" AND EXISTS "${BOO_STREAMLINE_SDK}/bin/x64/sl.dlss_g.dll")
+    target_compile_definitions(boo_core PRIVATE BOO_HAS_STREAMLINE=1)
+    target_include_directories(boo_core SYSTEM PRIVATE "${BOO_STREAMLINE_SDK}/include")
+    set(sl_files)
+    foreach(sl_file sl.interposer.dll sl.common.dll sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll nvngx_dlss.license.txt reflex.license.txt)
+        list(APPEND sl_files "${BOO_STREAMLINE_SDK}/bin/x64/${sl_file}")
+    endforeach()
+    add_custom_target(boo_stage_streamline
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/streamline"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${sl_files} "${BOO_STREAMLINE_SDK}/license.txt" "${BOO_STREAMLINE_SDK}/3rd-party-licenses.md" "${CMAKE_BINARY_DIR}/streamline" VERBATIM)
+    add_dependencies(boo_core boo_stage_streamline)
+endif()
+
+set(BOO_DLSS_DLL "${BOO_DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
+if(ENABLE_DLSS AND EXISTS "${BOO_DLSS_DLL}" AND EXISTS "${BOO_DLSS_SDK}/include/nvsdk_ngx.h")
+    set(BOO_HAS_DLSS ON)
+    target_compile_definitions(boo_core PRIVATE BOO_HAS_DLSS=1)
+    if(EXISTS "${BOO_DLSS_SDK}/include/nvsdk_ngx_helpers_dlssd_d3d.h" AND EXISTS "${BOO_DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlssd.dll")
+        set(BOO_HAS_DLSS_RR ON)
+        target_compile_definitions(boo_core PRIVATE BOO_HAS_DLSS_RR=1)
+    endif()
+    target_include_directories(boo_core SYSTEM PRIVATE "${BOO_DLSS_SDK}/include")
+    set(ngx_lib_dir "${BOO_DLSS_SDK}/lib/Windows_x86_64/x64")
+    target_link_libraries(boo_core PUBLIC optimized "${ngx_lib_dir}/nvsdk_ngx_s.lib" debug "${ngx_lib_dir}/nvsdk_ngx_s_dbg.lib")
+endif()
+
+if(BOO_HAS_LINALG)
+    target_compile_definitions(boo_core PRIVATE BOO_HAS_LINALG=1)
+    # Only the neural suite sees the preview d3d12.h; the rest of the engine keeps the Windows SDK headers.
+    set_source_files_properties(src/render/neural_rendering.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${BOO_AGILITY_SDK}/build/native/include")
+    add_custom_target(boo_stage_agility
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/D3D12"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${BOO_AGILITY_SDK}/build/native/bin/x64/D3D12Core.dll" "${BOO_AGILITY_SDK}/build/native/bin/x64/d3d12SDKLayers.dll"
+            "${BOO_AGILITY_SDK}/LICENSE.txt" "${CMAKE_BINARY_DIR}/D3D12" VERBATIM)
+    add_dependencies(boo_core boo_stage_agility)
+endif()
+
+# The PhysX SDK itself (step 1 of the suite: the shared runtime). Built by tools/fetch_physx_sdk.py
+# with the static C runtime, to match this project.
+set(BOO_PHYSX_BIN "${BOO_PHYSX_SDK}/physx/bin/win.x86_64.vc143.mt/release")
+set(BOO_HAS_PHYSX OFF)
+if(ENABLE_PHYSX AND EXISTS "${BOO_PHYSX_SDK}/physx/include/PxPhysicsAPI.h" AND EXISTS "${BOO_PHYSX_BIN}/PhysX_64.dll")
+    set(BOO_HAS_PHYSX ON)
+    message(STATUS "PhysX suite: PhysX SDK runtime ON")
+    target_compile_definitions(boo_core PRIVATE BOO_HAS_PHYSX=1)
+    set_source_files_properties(src/physics/physx_suite.cpp src/physics/physx_rigid.cpp src/physics/physx_marbles.cpp src/physics/physx_soft.cpp src/physics/physx_route_test.cpp src/physics/physx_fluid.cpp PROPERTIES INCLUDE_DIRECTORIES "${BOO_PHYSX_SDK}/physx/include")
+    target_link_libraries(boo_core PUBLIC
+        "${BOO_PHYSX_BIN}/PhysX_64.lib" "${BOO_PHYSX_BIN}/PhysXCommon_64.lib" "${BOO_PHYSX_BIN}/PhysXFoundation_64.lib"
+        "${BOO_PHYSX_BIN}/PhysXExtensions_static_64.lib" "${BOO_PHYSX_BIN}/PhysXPvdSDK_static_64.lib")
+    add_custom_target(boo_stage_physx
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${BOO_PHYSX_BIN}/PhysX_64.dll" "${BOO_PHYSX_BIN}/PhysXCommon_64.dll" "${BOO_PHYSX_BIN}/PhysXFoundation_64.dll"
+            "${BOO_PHYSX_BIN}/PhysXGpu_64.dll" "${CMAKE_BINARY_DIR}" VERBATIM)
+    add_dependencies(boo_core boo_stage_physx)
+    # The offline bake tool for the film's physics tracks (assets/physics).
+    add_executable(boo_physx_bake tools/physx_bake/physx_bake.cpp)
+    target_include_directories(boo_physx_bake PRIVATE "${BOO_PHYSX_SDK}/physx/include")
+    target_link_libraries(boo_physx_bake PRIVATE boo_core)
+    boo_apply_compiler_flags(boo_physx_bake)
+elseif(ENABLE_PHYSX)
+    message(WARNING "ENABLE_PHYSX is ON but the PhysX SDK is not built; run tools/fetch_physx_sdk.py")
+endif()
+
+if(BOO_HAS_FLOW)
+    target_compile_definitions(boo_core PRIVATE BOO_HAS_FLOW=1)
+    # Only the smoke bridge sees NVIDIA Flow's headers.
+    set_source_files_properties(src/render/flow_smoke.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${BOO_PHYSX_SDK}/flow/include/nvflowext;${BOO_PHYSX_SDK}/flow/include/nvflow")
+    add_custom_target(boo_stage_flow
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${BOO_FLOW_BIN}/nvflow.dll" "${BOO_FLOW_BIN}/nvflowext.dll" "${CMAKE_BINARY_DIR}" VERBATIM)
+    add_dependencies(boo_core boo_stage_flow)
+endif()
+
 # Link strictly against inbox Windows 11 system libraries
 target_link_libraries(boo_core PUBLIC
+    bcrypt
     d3d12
     dxgi
     dxguid
@@ -422,6 +595,7 @@ target_link_libraries(boo_core PUBLIC
     user32
     gdi32
     shell32
+    shlwapi
     d2d1            # localized on-screen text (system fonts only)
     dwrite
     windowscodecs
@@ -429,12 +603,15 @@ target_link_libraries(boo_core PUBLIC
 
 # Stage runtime data directories into build folder for convenient direct launch
 add_custom_target(boo_stage_assets ALL
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/shaders" "${CMAKE_BINARY_DIR}/assets/shaders"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/meshes" "${CMAKE_BINARY_DIR}/assets/meshes"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/textures" "${CMAKE_BINARY_DIR}/assets/textures"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/models" "${CMAKE_BINARY_DIR}/assets/models"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_SOURCE_DIR}/assets/audio" "${CMAKE_BINARY_DIR}/assets/audio"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/cues" "${CMAKE_BINARY_DIR}/assets/cues"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/strings" "${CMAKE_BINARY_DIR}/assets/strings"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/neural" "${CMAKE_BINARY_DIR}/assets/neural"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/assets/physics" "${CMAKE_BINARY_DIR}/assets/physics"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/assets/manifest.json" "${CMAKE_BINARY_DIR}/assets/manifest.json"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${CMAKE_BINARY_DIR}/config"
     DEPENDS boo_shaders
@@ -442,7 +619,10 @@ add_custom_target(boo_stage_assets ALL
 )
 
 # 1. Main Milestone M1 Demoscene Application (Native WIN32 GUI subsystem — zero console window)
-add_executable(boo_sah_sah WIN32 src/app/main.cpp assets/icons/app_icon.rc)
+add_executable(boo_sah_sah WIN32 src/app/main.cpp src/app/world_portal.rc assets/icons/app_icon.rc)
+if(BOO_HAS_LINALG)
+    target_compile_definitions(boo_sah_sah PRIVATE BOO_HAS_LINALG=1) # exports D3D12SDKVersion / D3D12SDKPath
+endif()
 target_link_options(boo_sah_sah PRIVATE "/ENTRY:mainCRTStartup")
 target_include_directories(boo_sah_sah PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_sah_sah PRIVATE boo_core)
@@ -463,6 +643,7 @@ boo_apply_compiler_flags(boo_bench)
 
 # 3b. Native Single-File Windows Installer / Uninstaller Stub (inbox cabinet.dll LZMS SFX)
 add_executable(boo_installer_stub WIN32 tools/installer/setup_main.cpp assets/icons/app_icon.rc)
+target_compile_definitions(boo_installer_stub PRIVATE BOO_RELEASE_VERSION="${PROJECT_VERSION}")
 target_include_directories(boo_installer_stub PRIVATE "${CMAKE_SOURCE_DIR}/assets/icons")
 target_link_libraries(boo_installer_stub PRIVATE
     cabinet
@@ -482,6 +663,9 @@ if(BOO_BUILD_TESTS)
 
     add_executable(boo_unit_tests tests/unit/unit_main.cpp)
     target_link_libraries(boo_unit_tests PRIVATE boo_core)
+    if(BOO_HAS_PHYSX)
+        target_compile_definitions(boo_unit_tests PRIVATE BOO_UNIT_HAS_PHYSX=1)
+    endif()
     add_dependencies(boo_unit_tests boo_stage_assets)
     boo_apply_compiler_flags(boo_unit_tests)
 
@@ -490,6 +674,10 @@ if(BOO_BUILD_TESTS)
 
     add_test(NAME BooCueValidation COMMAND boo_cue_validate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(BooCueValidation PROPERTIES LABELS "unit;validation")
+    add_test(NAME BooWarpPlayback
+        COMMAND "${CMAKE_COMMAND}" "-DAPP=$<TARGET_FILE:boo_sah_sah>" "-DOUT=${CMAKE_BINARY_DIR}/warp-test"
+                -P "${CMAKE_SOURCE_DIR}/tests/integration/warp_playback.cmake")
+    set_tests_properties(BooWarpPlayback PROPERTIES LABELS "integration;software" TIMEOUT 90)
 
     add_executable(boo_integration_tests tests/integration/integration_main.cpp)
     target_link_libraries(boo_integration_tests PRIVATE boo_core windowscodecs gdi32)
@@ -509,6 +697,18 @@ if(BOO_BUILD_TESTS)
 endif()
 
 # Stage optional NVIDIA NRD dynamic sidecar (nrd/NRD.dll) next to executables if present (zero static PE import!)
+if(BOO_HAS_DLSS)
+    add_custom_target(boo_stage_dlss
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/dlss"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${BOO_DLSS_DLL}" "${CMAKE_BINARY_DIR}/dlss/nvngx_dlss.dll"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${BOO_DLSS_SDK}/LICENSE.txt" "${CMAKE_BINARY_DIR}/dlss/LICENSE-NVIDIA-DLSS.txt"
+        VERBATIM)
+    add_dependencies(boo_core boo_stage_dlss)
+    if(BOO_HAS_DLSS_RR)
+        add_custom_command(TARGET boo_stage_dlss POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${BOO_DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlssd.dll" "${CMAKE_BINARY_DIR}/dlss/nvngx_dlssd.dll" VERBATIM)
+    endif()
+endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/nvidia_nrd/bin/NRD.dll")
     add_custom_command(TARGET boo_sah_sah POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:boo_sah_sah>/nrd"

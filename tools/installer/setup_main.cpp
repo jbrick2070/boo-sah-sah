@@ -330,7 +330,7 @@ void writeUninstallRegistry(const fs::path& installDir, uint64_t totalInstalledB
     const std::wstring quietUninstCmd = L"\"" + uninstallExe.wstring() + L"\" --uninstall --silent";
 
     setStr(L"DisplayName", kAppTitle);
-    setStr(L"DisplayVersion", L"1.0.0");
+    setStr(L"DisplayVersion", L"" BOO_RELEASE_VERSION);
     setStr(L"Publisher", L"BOO SAH SAH Project");
     setStr(L"InstallLocation", installDir.wstring());
     setStr(L"DisplayIcon", appExe.wstring());
@@ -354,7 +354,10 @@ bool safeDestination(const fs::path& path) {
     return true;
 }
 
-bool appIsRunning() {
+bool appIsRunning(const fs::path& directory) {
+    const auto executable = directory / kAppExeName;
+    std::error_code ec;
+    if (!fs::exists(executable, ec) && !ec) return false;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return true; // Cannot prove a safe upgrade.
     PROCESSENTRY32W entry{};
@@ -362,7 +365,22 @@ bool appIsRunning() {
     bool running = false;
     if (Process32FirstW(snapshot, &entry)) {
         do {
-            if (_wcsicmp(entry.szExeFile, kAppExeName) == 0) { running = true; break; }
+            if (_wcsicmp(entry.szExeFile, kAppExeName) != 0) continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+            if (!process) {
+                if (GetLastError() == ERROR_INVALID_PARAMETER) continue; // Exited during enumeration.
+                running = true;
+                break;
+            }
+            std::wstring image(32768, L'\0');
+            DWORD length = static_cast<DWORD>(image.size());
+            const BOOL queried = QueryFullProcessImageNameW(process, 0, image.data(), &length);
+            CloseHandle(process);
+            image.resize(length);
+            if (!queried || fs::equivalent(executable, image, ec) || ec) {
+                running = true;
+                break;
+            }
         } while (Process32NextW(snapshot, &entry));
     }
     CloseHandle(snapshot);
@@ -465,7 +483,7 @@ bool performInstall(const InstallOptions& opts, std::wstring& outError, InstallP
     if (!lock.acquired) { outError = L"Another BOO SAH SAH setup is running. Wait for it to finish and try again."; return false; }
     InstallProgress localProgress;
     InstallProgress& progress = suppliedProgress ? *suppliedProgress : localProgress;
-    if (appIsRunning()) {
+    if (appIsRunning(opts.installDir)) {
         outError = L"Close BOO SAH SAH before installing or upgrading, then try again.";
         return false;
     }
@@ -754,7 +772,7 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
     SetupLock lock;
     if (!lock.acquired) return 8;
     if (!targetDir.is_absolute() || targetDir == targetDir.root_path() || !safeDestination(targetDir)) return 3;
-    if (appIsRunning()) {
+    if (appIsRunning(targetDir)) {
         if (!silent) MessageBoxW(nullptr, L"Close BOO SAH SAH before uninstalling, then try again.", kSetupWindowTitle, MB_ICONWARNING | MB_OK);
         return 4;
     }
@@ -812,6 +830,7 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
     }
 
     bool removalFailed = false;
+    std::set<fs::path> installedDirectories;
     for (const auto& rel : relFiles) {
         if (_wcsicmp(rel.c_str(), kUninstallExe) == 0) continue; // Keep a retry route until all content was removed.
         const fs::path full = targetDir / rel;
@@ -823,6 +842,8 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
         if (!safeDestination(full)) { removalFailed = true; continue; }
         fs::remove(full, ec);
         if (ec) removalFailed = true;
+        for (auto parent = rel.parent_path(); !parent.empty(); parent = parent.parent_path())
+            installedDirectories.insert(parent);
     }
     if (removalFailed) return 6; // Keep manifest so the uninstall can be retried.
     if (!safeDestination(uninstallExe)) return 6;
@@ -837,21 +858,11 @@ int runUninstallMode(const fs::path& targetDir, bool silent, bool forceSkipRegis
     fs::remove(manifestPath, ec);
     if (ec) return 6;
 
-    // Prune known empty subdirectories bottom-up without ever touching untracked user files
-    const wchar_t* kKnownSubdirs[] = {
-        L"assets\\shaders",
-        L"assets\\meshes",
-        L"assets\\models",
-        L"assets\\cues",
-        L"assets",
-        L"config",
-        L"docs",
-        L"openvino"};
-    for (const wchar_t* sub : kKnownSubdirs) {
-        const fs::path p = targetDir / sub;
-        if (fs::exists(p, ec) && fs::is_empty(p, ec)) {
-            fs::remove(p, ec);
-        }
+    // Component-wise path ordering puts descendants after their parents.
+    // Prune from the leaves, and preserve directories that still contain user files.
+    for (auto it = installedDirectories.rbegin(); it != installedDirectories.rend(); ++it) {
+        const fs::path p = targetDir / *it;
+        if (safeDestination(p) && fs::is_directory(p, ec) && fs::is_empty(p, ec)) fs::remove(p, ec);
     }
 
     if (registeredInRegistry && !forceSkipRegistry) {

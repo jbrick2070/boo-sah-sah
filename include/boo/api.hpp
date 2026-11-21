@@ -55,6 +55,63 @@ enum class Edition : uint8_t {
     Midnight = 1
 };
 
+enum class RendererFeatureState : uint8_t { Unavailable, Off, Active, Idle };
+enum class PathTracingLevel : uint8_t { Off, Low, Medium, High };
+enum class DlssMode : uint8_t { Off, Quality, Balanced, Performance };
+enum class FrameGenerationMode : uint8_t { Off, Auto, X2, X3, X4, X5, X6 };
+FrameGenerationMode availableFrameGenerationMode(FrameGenerationMode request, uint32_t maxGenerated) noexcept;
+FrameGenerationMode nextFrameGenerationMode(FrameGenerationMode current, uint32_t maxGenerated) noexcept;
+enum class ReflexMode : uint8_t { Off, On, Boost };
+
+// Neural rendering suite (include/boo/neural_rendering.hpp). Solo shows one feature on its own.
+enum class NeuralFeature : uint8_t { Shading = 0, Textures = 1, RadianceCache = 2 };
+inline constexpr size_t kNeuralFeatureCount = 3;
+enum class NeuralSolo : uint8_t { None = 0, Shading = 1, Textures = 2, RadianceCache = 3 };
+// Centre and size of the bird flock on the last frame; valid is false in shots without birds.
+struct FlockFocus {
+    bool valid = false;
+    float center[3]{};
+    float radius = 0.0f;      // covers most of the flock
+    float headingYaw = 0.0f;  // lead bird's heading
+    uint32_t species = 0;     // 0 black kite (Milvus migrans), 1 great egret (Ardea alba)
+    float air[3]{};           // centre of the birds' airspace in this city (the first thermal rises here)
+    uint32_t kettles = 0;     // thermals the kettling kites are using; 0 unless the flock is kettling
+};
+
+// A building of the city as a solid box in world coordinates (metres, Y up), for PhysX collision and
+// for testing the film's bird routes against the buildings.
+struct CityCollisionBox {
+    float center[3]{};
+    float half[3]{};
+    float rotation[4]{0.0f, 0.0f, 0.0f, 1.0f}; // quaternion x, y, z, w
+};
+
+// PhysX rigid bodies to draw this frame (the PhysX suite's rigid genre). Spheres drawn with the
+// renderer's marble meshes: body i uses marble look `look[i]`, and bodies sharing a look are contiguous.
+struct PhysxBodyFrame {
+    uint32_t count = 0;
+    const float* poses = nullptr;         // 8 floats a body: position xyz, rotation quaternion xyzw, radius
+    const float* previousPoses = nullptr; // the same a frame earlier, for motion vectors; null on the first frame
+    const float* stretch = nullptr;       // optional, 3 floats a body: scale along its own x, y, z (a soft body's ellipsoid)
+    const float* previousStretch = nullptr;
+    uint32_t lookStart[7]{};              // bodies [lookStart[k], lookStart[k+1]) use marble look k (6 looks)
+};
+
+struct NeuralRenderingControls {
+    bool enabled = false;       // Master switch; off leaves every frame untouched
+    bool shading = true;        // Neural shading: MLP film grade applied to the scene
+    bool textures = true;       // Neural texture compression: latent grid + decoder MLP
+    bool radianceCache = true;  // Neural radiance cache: MLP trained online every frame
+    bool tensorCores = true;    // Use the SM 6.10 tensor-core path when the build and GPU support it
+    NeuralSolo solo = NeuralSolo::None;
+
+    bool runs(NeuralFeature f) const noexcept {
+        if (solo != NeuralSolo::None && static_cast<uint8_t>(solo) == static_cast<uint8_t>(f) + 1u) return true;
+        if (!enabled) return false;
+        return f == NeuralFeature::Shading ? shading : (f == NeuralFeature::Textures ? textures : radianceCache);
+    }
+};
+
 enum class QualityPresetId : uint8_t {
     Safe           = 0,
     Balanced       = 1,
@@ -66,7 +123,8 @@ enum class AbCompareEngine : uint8_t {
     RT     = 0,
     CUDA   = 1,
     Tensor = 2,
-    Codec  = 3
+    Codec  = 3,
+    NPU    = 4
 };
 
 enum class ShowVisualMode : uint8_t {
@@ -158,6 +216,24 @@ struct AudioReactiveState {
     float level = 0.0f; // overall loudness [0,1]
 };
 
+struct DirectorComparisonControls {
+    float bloomStrength = 0.35f;
+    float irisAngle = 0.5f;
+    float lightTension = 0.25f;
+    float spectralShift = 0.15f;
+    float cutAccent = 0.0f;
+};
+
+// The workout flock this frame. The app's WorkoutGovernor (boo/workout_governor.hpp) fills it in;
+// the default is no extra birds, which is the authored film.
+struct WorkoutFlock {
+    uint32_t birds = 0;   // birds to draw
+    uint32_t grown = ~0u; // birds below this index are full size (all of them unless a batch is arriving)
+    float front = 0.f;    // arrival front: a newer bird grows in as the front passes it
+    float band = 1.f;     // birds the front covers while one bird grows in
+    float size = 0.f;     // `birds` as it changes smoothly while a batch arrives
+};
+
 struct FrameContext {
     InteractiveView interactive{};
     uint64_t presentationFrame = 0;
@@ -177,6 +253,7 @@ struct FrameContext {
     float moodPaletteAccent = 0.5f;
     float moodBloomStrength = 0.35f;
     float moodCutAccent = 0.0f;
+    DirectorComparisonControls scriptedDirectorComparison{};
     Edition edition = Edition::Family;
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     uint32_t hudMode = 0; // Full, compact, A/B, off
@@ -184,7 +261,23 @@ struct FrameContext {
     bool showCaptions = false;
     bool reducedFlash = false;
     float motionScale = 1.0f;
+    uint32_t effectsDetail = 1; // 0 sparse, 1 standard, 2 dense
+    PathTracingLevel pathTracing = PathTracingLevel::Low;
+    DlssMode dlssMode = DlssMode::Quality;
+    bool rayReconstruction = true;
+    FrameGenerationMode frameGeneration = FrameGenerationMode::Auto;
+    ReflexMode reflex = ReflexMode::On;
+    NeuralRenderingControls neural{};
+    uint32_t physxGenre = 0;     // PhysX suite genre (boo/physx_genres.hpp). Live only; the film itself has none
+    const PhysxBodyFrame* physxBodies = nullptr; // the rigid genre's bodies, owned by the app for this frame
+    uint32_t gpuWorkout = 0;     // workout dial level 0..10 (what the user asked for)
+    WorkoutFlock workout{};      // the birds that level has released so far
+    uint32_t flockFormation = 0; // FlockFormation (src/render/bird_flight.hpp) for the workout flock
 };
+
+inline uint32_t effectiveEffectsDetail(const FrameContext& frame) noexcept {
+    return frame.qualityPreset == QualityPresetId::Safe ? 0u : frame.effectsDetail;
+}
 
 struct IEffect {
     virtual ~IEffect() = default;

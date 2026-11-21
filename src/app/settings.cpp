@@ -1,7 +1,9 @@
 #include "boo/settings.hpp"
 #include "boo/json.hpp"
+#include "boo/physx_genres.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
@@ -32,6 +34,15 @@ bool parseBoolVal(std::string_view raw, bool& out) {
     return false;
 }
 
+bool parseEffectsDetail(std::string_view raw, uint32_t& out) {
+    const std::string value = toLower(trim(raw));
+    if (value == "low") out = 0;
+    else if (value == "normal") out = 1;
+    else if (value == "high") out = 2;
+    else return false;
+    return true;
+}
+
 std::string unquoteTomlString(std::string_view v) {
     std::string t = trim(v);
     if (t.size() >= 2 && ((t.front() == '"' && t.back() == '"') || (t.front() == '\'' && t.back() == '\''))) {
@@ -39,7 +50,63 @@ std::string unquoteTomlString(std::string_view v) {
     }
     return t;
 }
+
+constexpr std::array<std::string_view, 6> kFlockNames{"cluster", "vee", "echelon", "column", "front", "kettle"};
+// The PhysX suite's genre keys, in dial order (boo/physx_genres.hpp).
+constexpr auto kPhysxNames = [] {
+    std::array<std::string_view, kPhysxGenreCount> names{};
+    for (uint32_t i = 0; i < kPhysxGenreCount; ++i) names[i] = kPhysxGenres[i].key;
+    return names;
+}();
+
+// 0 switches the floor off; otherwise somewhere a frame rate can sensibly be held.
+float clampWorkoutFloor(float fps) {
+    if (!(fps > 0.0f)) return 0.0f;
+    return std::clamp(fps, 10.0f, 240.0f);
+}
+
+template <typename T, size_t N>
+bool readMode(std::string_view raw, const std::array<std::string_view, N>& names, T& mode) {
+    const auto it = std::find(names.begin(), names.end(), toLower(trim(raw)));
+    if (it == names.end()) return false;
+    mode = static_cast<T>(it - names.begin());
+    return true;
+}
+
+bool parseGraphicsMode(std::string_view key, std::string_view raw, AppSettings& settings, std::string* error) {
+    constexpr std::array<std::string_view, 4> tracing{"off", "low", "medium", "high"};
+    constexpr std::array<std::string_view, 4> dlss{"off", "quality", "balanced", "performance"};
+    constexpr std::array<std::string_view, 7> generation{"off", "auto", "2x", "3x", "4x", "5x", "6x"};
+    constexpr std::array<std::string_view, 3> reflex{"off", "on", "boost"};
+    bool valid = false;
+    if (key == "path_tracing" || key == "--path-tracing") valid = readMode(raw, tracing, settings.pathTracing);
+    if (key == "dlss" || key == "--dlss") valid = readMode(raw, dlss, settings.dlssMode);
+    if (key == "frame_generation" || key == "--frame-generation") valid = readMode(raw, generation, settings.frameGeneration);
+    if (key == "reflex" || key == "--reflex") valid = readMode(raw, reflex, settings.reflex);
+    if (key == "ray_reconstruction" || key == "--ray-reconstruction") valid = parseBoolVal(raw, settings.rayReconstruction);
+    constexpr std::array<std::string_view, 4> neuralSolo{"none", "shading", "textures", "cache"};
+    if (key == "neural_rendering" || key == "--neural") valid = parseBoolVal(raw, settings.neural.enabled);
+    if (key == "neural_shading" || key == "--neural-shading") valid = parseBoolVal(raw, settings.neural.shading);
+    if (key == "neural_textures" || key == "--neural-textures") valid = parseBoolVal(raw, settings.neural.textures);
+    if (key == "neural_radiance_cache" || key == "--neural-radiance-cache") valid = parseBoolVal(raw, settings.neural.radianceCache);
+    if (key == "neural_solo" || key == "--neural-solo") valid = readMode(raw, neuralSolo, settings.neural.solo);
+    if (key == "neural_tensor_cores" || key == "--neural-tensor-cores") valid = parseBoolVal(raw, settings.neural.tensorCores);
+    if (!valid && error) *error = "Invalid value for " + std::string(key) + ": " + std::string(raw);
+    return valid;
+}
 } // namespace
+
+void applyTestRigProfile(AppSettings& s) noexcept {
+    s.disableRT = s.disableCUDA = s.disableTensor = false;
+    s.effectsDetail = 2;
+    s.pathTracing = PathTracingLevel::High;
+    s.dlssMode = DlssMode::Quality;
+    s.rayReconstruction = true;
+    s.frameGeneration = FrameGenerationMode::X6; // Clamped at runtime to what the GPU and driver offer
+    s.reflex = ReflexMode::Boost;
+    s.neural = NeuralRenderingControls{};
+    s.neural.enabled = true;
+}
 
 bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSettings, std::string* outError) {
     std::ifstream ifs(path);
@@ -81,6 +148,12 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
 
         if (fullKey == "app.title") ioSettings.title = unquoteTomlString(val);
         else if (fullKey == "app.edition") parseEdition(unquoteTomlString(val), ioSettings.edition);
+        else if (fullKey == "display.effects_detail") {
+            if (!parseEffectsDetail(unquoteTomlString(val), ioSettings.effectsDetail)) {
+                if (outError) *outError = "display.effects_detail must be low, normal or high";
+                return false;
+            }
+        }
         else if (fullKey == "app.playback_mode") parsePlaybackMode(unquoteTomlString(val), ioSettings.playbackMode);
         else if (fullKey == "app.cue_file") ioSettings.cuePath = unquoteTomlString(val);
         else if (fullKey == "app.manifest_file") ioSettings.manifestPath = unquoteTomlString(val);
@@ -92,6 +165,13 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
         else if (fullKey == "display.vsync") parseBoolVal(val, ioSettings.vsync);
         else if (fullKey == "display.quality_preset") parseQualityPreset(unquoteTomlString(val), ioSettings.qualityPreset);
         else if (fullKey == "display.show_overlay") parseBoolVal(val, ioSettings.showOverlay);
+        else if (fullKey == "display.dashboard") {
+            constexpr std::array<std::string_view, 3> panels{"full", "mini", "hidden"};
+            if (!readMode(unquoteTomlString(val), panels, ioSettings.dashboardPanel)) {
+                if (outError) *outError = "Invalid value for dashboard: " + val;
+                return false;
+            }
+        }
         else if (fullKey == "display.captions") parseBoolVal(val, ioSettings.showCaptions);
         else if (fullKey == "display.language") ioSettings.language = unquoteTomlString(val);
         else if (fullKey == "display.reduced_flash") parseBoolVal(val, ioSettings.reducedFlash);
@@ -108,6 +188,38 @@ bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSett
             if (!af.empty()) ioSettings.audioInputPath = af;
         }
         else if (fullKey == "hardware.enable_signal_hijack") parseBoolVal(val, ioSettings.enableSignalHijack);
+        else if (fullKey == "hardware.path_tracing" || fullKey == "hardware.dlss" || fullKey == "hardware.frame_generation" ||
+                 fullKey == "hardware.reflex" || fullKey == "hardware.ray_reconstruction" ||
+                 fullKey == "hardware.neural_rendering" || fullKey == "hardware.neural_shading" ||
+                 fullKey == "hardware.neural_textures" || fullKey == "hardware.neural_radiance_cache" ||
+                 fullKey == "hardware.neural_solo" || fullKey == "hardware.neural_tensor_cores") {
+            if (!parseGraphicsMode(key, unquoteTomlString(val), ioSettings, outError)) return false;
+        }
+        else if (fullKey == "hardware.flock_formation") {
+            if (!readMode(unquoteTomlString(val), kFlockNames, ioSettings.flockFormation)) {
+                if (outError) *outError = "Invalid value for flock_formation: " + val;
+                return false;
+            }
+        }
+        else if (fullKey == "hardware.bird_cam") parseBoolVal(val, ioSettings.birdCam);
+        else if (fullKey == "hardware.physx") {
+            if (!readMode(unquoteTomlString(val), kPhysxNames, ioSettings.physxGenre)) {
+                if (outError) *outError = "Invalid value for physx: " + val;
+                return false;
+            }
+        }
+        else if (fullKey == "hardware.gpu_workout") {
+            try { ioSettings.gpuWorkout = static_cast<uint32_t>(std::clamp(std::stoi(trim(val)), 0, 10)); }
+            catch (...) { if (outError) *outError = "Invalid value for gpu_workout: " + val; return false; }
+        }
+        else if (fullKey == "hardware.workout_floor_fps") {
+            try { ioSettings.workoutFloorFps = clampWorkoutFloor(std::stof(trim(val))); }
+            catch (...) { if (outError) *outError = "Invalid value for workout_floor_fps: " + val; return false; }
+        }
+        else if (fullKey == "hardware.test_rig") {
+            bool rig = false;
+            if (parseBoolVal(val, rig) && rig) applyTestRigProfile(ioSettings);
+        }
         else if (fullKey == "hardware.disable_rt") parseBoolVal(val, ioSettings.disableRT);
         else if (fullKey == "hardware.disable_cuda") parseBoolVal(val, ioSettings.disableCUDA);
         else if (fullKey == "hardware.disable_tensor") parseBoolVal(val, ioSettings.disableTensor);
@@ -162,6 +274,12 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
                 if (outError) *outError = "Unknown quality preset: " + *v;
                 return false;
             }
+        } else if (a == "--effects-detail") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            if (!parseEffectsDetail(*v, ioSettings.effectsDetail)) {
+                if (outError) *outError = "Expected --effects-detail low, normal or high";
+                return false;
+            }
         } else if (a == "--edition") {
             const auto* v = requireNext(i, a); if (!v) return false;
             if (!parseEdition(*v, ioSettings.edition)) {
@@ -200,6 +318,47 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.injectAudioFail = (a == "--inject-audio-fail");
         } else if (a == "--enable-signal-hijack") {
             ioSettings.enableSignalHijack = true;
+        } else if (a == "--path-tracing" || a == "--dlss" || a == "--ray-reconstruction" ||
+                   a == "--frame-generation" || a == "--reflex" || a == "--neural" || a == "--neural-shading" ||
+                   a == "--neural-textures" || a == "--neural-radiance-cache" || a == "--neural-solo" ||
+                   a == "--neural-tensor-cores") {
+            const auto* value = requireNext(i, a);
+            if (!value || !parseGraphicsMode(a, *value, ioSettings, outError)) return false;
+        } else if (a == "--dashboard") {
+            const auto* value = requireNext(i, a);
+            constexpr std::array<std::string_view, 3> panels{"full", "mini", "hidden"};
+            if (!value || !readMode(*value, panels, ioSettings.dashboardPanel)) {
+                if (outError && value) *outError = "Invalid value for --dashboard: " + *value;
+                return false;
+            }
+        } else if (a == "--flock") {
+            const auto* value = requireNext(i, a);
+            if (!value || !readMode(*value, kFlockNames, ioSettings.flockFormation)) {
+                if (outError && value) *outError = "Invalid value for --flock: " + *value;
+                return false;
+            }
+        } else if (a == "--bird-cam") {
+            ioSettings.birdCam = true;
+        } else if (a == "--physx-route-test") {
+            ioSettings.physxRouteTest = true;
+        } else if (a == "--physx") {
+            const auto* value = requireNext(i, a);
+            if (!value || !readMode(*value, kPhysxNames, ioSettings.physxGenre)) {
+                if (outError && value) *outError = "Invalid value for --physx: " + *value;
+                return false;
+            }
+        } else if (a == "--gpu-workout") {
+            const auto* value = requireNext(i, a);
+            if (!value) return false;
+            try { ioSettings.gpuWorkout = static_cast<uint32_t>(std::clamp(std::stoi(*value), 0, 10)); }
+            catch (...) { if (outError) *outError = "Invalid value for --gpu-workout: " + *value; return false; }
+        } else if (a == "--workout-floor-fps") {
+            const auto* value = requireNext(i, a);
+            if (!value) return false;
+            try { ioSettings.workoutFloorFps = clampWorkoutFloor(std::stof(*value)); }
+            catch (...) { if (outError) *outError = "Invalid value for --workout-floor-fps: " + *value; return false; }
+        } else if (a == "--test-rig") {
+            applyTestRigProfile(ioSettings);
         } else if (a == "--disable-rt") {
             ioSettings.disableRT = true;
         } else if (a == "--disable-cuda") {
@@ -311,6 +470,7 @@ std::string buildCliHelpText() {
         "  --mode <full|solo_rt|solo_tensor|solo_npu|solo_cuda|finale_loop>\n"
         "  --edition <family|midnight> Story edition\n"
         "  --preset <safe|balanced|showcase|4k_experimental>\n"
+        "  --effects-detail <low|normal|high>  Particle density and fractal detail (7 cycles, Safe uses low)\n"
         "  --width <px> --height <px>  Window client size (default: 1920x1080)\n"
         "  --fullscreen / --windowed   Display mode\n"
         "  --vsync <0|1> / --no-vsync  Vertical sync toggle (default: on)\n"
@@ -327,7 +487,35 @@ std::string buildCliHelpText() {
         "  --force-silent-clock        Use monotonic QPC silence-fallback clock\n\n"
         "Hardware Fault Injection & Overrides (SPEC_v4 Section 8.3):\n"
         "  --disable-rt                Disable DXR raytracing\n"
-        "  --disable-cuda              Disable CUDA compute\n"
+        "  --path-tracing <level>      Off, Low, Medium or High diffuse path tracing (8 cycles)\n"
+        "  --dlss <mode>               Off, Quality, Balanced or Performance DLSS SR (9 cycles)\n"
+        "  --ray-reconstruction <on|off>   DLSS Ray Reconstruction (0 toggles)\n"
+        "  --frame-generation <mode>   Off, Auto, or 2x through 6x (Shift+9 cycles supported ratios)\n"
+        "  --reflex <mode>             Off, On or Boost (Shift+8 cycles)\n"
+        "  --dashboard <full|mini|hidden>  Upper-left dashboard size (backtick ` cycles; [-] [+] [x] buttons)\n"
+        "  --neural <on|off>           Neural rendering suite master switch (Shift+N toggles)\n"
+        "  --neural-shading <on|off>   Neural shading: MLP film grade on every pixel\n"
+        "  --neural-textures <on|off>  Neural texture compression: latent grid + decoder MLP\n"
+        "  --neural-radiance-cache <on|off>  Neural radiance cache trained online every frame\n"
+        "  --neural-solo <none|shading|textures|cache>  Show one neural feature on its own\n"
+        "  --neural-tensor-cores <on|off>  Run the networks on tensor cores (SM 6.10 preview builds;\n"
+        "                              Shift-click the NEURAL heading to compare)\n"
+        "  --gpu-workout <0-10>        Add a flock of extra ray-traced birds to load the GPU: 40 at level 1,\n"
+        "                              32,000 at level 9, and at 10 as many as hold the frame-rate floor\n"
+        "                              (0 = authored film; dashboard WORKOUT [-] [+])\n"
+        "  --workout-floor-fps <fps>   Frame rate the workout never goes under (default 24, film speed;\n"
+        "                              0 = no floor, release exactly what the level asks for)\n"
+        "  --flock <cluster|vee|echelon|column|front|kettle>  Flight formation of the workout flock (Shift+F cycles)\n"
+        "  --bird-cam                  Camera follows the birds instead of the film's shots (Shift+B)\n"
+        "  --physx <off|smoke|rigid|fluid|soft>  PhysX suite, live (Shift+P dials through the genres; builds with the\n"
+        "                              PhysX SDK only): smoke is NVIDIA Flow marking the birds' thermals; rigid\n"
+        "                              pours PhysX GPU rigid bodies over the city's buildings; fluid is a PhysX\n"
+        "                              GPU position-based-fluid cloudburst pouring off the buildings\n"
+        "  --physx-route-test          Sweep every bird route through the city's buildings with PhysX queries,\n"
+        "                              log each place a bird would pass through a building, and exit\n"
+        "  --test-rig                  Every GPU feature on: DXR, CUDA, Tensor, path tracing High, DLSS,\n"
+        "                              Ray Reconstruction, max frame generation, Reflex Boost, all neural\n"
+        "  --disable-cuda             Disable CUDA compute\n"
         "  --disable-tensor            Disable Tensor math\n"
         "  --disable-npu               Disable NPU inference\n"
         "  --disable-nvenc             Disable NVENC codec\n"
@@ -357,13 +545,16 @@ std::string buildCliHelpText() {
         "  --export-diagnostics <json> Write local Hardware Orchestra diagnostics JSON\n"
         "  --log-file <path>           Write structured log file\n\n"
         "Keyboard & Interactive RTX Showcase Controls:\n"
+        "  Ctrl+L: Review a Demo-Verse world link, then choose a visitor or the public web page\n"
         "  F / RMB-Drag: Toggle Interactive Explore 6-DOF Camera (WASDQE + Mouse + Wheel FOV + Gamepad)\n"
         "  F2-F7: Hero Macro Presets | Alt+LMB Drag / [ ]: Live Sun Time-of-Day | J: Lamps | H: Draggable RTX Split | F8: Reset\n"
         "  ,/.: Paused frame step | Left/Right: Seek 2s (Shift: 10s) | G: Reveal pre-roll\n"
         "  -/=: Volume | F12: Clean BMP + JSON | Tab: Full/Compact/A-B/Off | K: Captions\n"
         "  Space: Play/Pause | R: Restart | N/P: Next/Prev Act | L: Loop | M: Mute\n"
         "  Q: Quality Preset | X/C/T/U/V: Toggle Pillars | O: Spout2 | W: Webcam Stop | E: Edition\n"
-        "  B: Run Live RT/CUDA/Tensor/NVENC Numerical Benchmark | F11: Fullscreen | Esc: Exit\n";
+        "  B: Run Live RT/CUDA/Tensor/NVENC Numerical Benchmark\n"
+        "  F11, Alt+Enter or the FULL SCREEN button (top right): full screen\n"
+        "  Esc: leave full screen; from a window, exit\n";
 }
 
 std::vector<QualityPresetSpec> loadQualityPresets(const std::filesystem::path& path) {

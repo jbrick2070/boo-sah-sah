@@ -1,4 +1,6 @@
 #include "boo/render.hpp"
+#include "boo/startup_progress.hpp"
+#include "boo/dlss_bridge.hpp"
 #include "boo/logging.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -45,6 +47,13 @@ std::string hrHex(HRESULT hr) {
 } // namespace
 
 struct D3D12Context::Impl {
+    FrameGeneration frameGeneration;
+    bool directNgxInitialized = false;
+    ComPtr<IDXGIFactory2> fgFactory;
+    ComPtr<ID3D12Device> fgDevice;
+    ComPtr<ID3D12Resource> fgHudless,fgUiAlpha;
+    ComPtr<ID3D12DescriptorHeap> fgRtv;
+    bool fgTargetsBound=false;
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter3> adapter3;
     ComPtr<ID3D12Device> device;
@@ -101,6 +110,7 @@ bool D3D12Context::initialize(
     shutdown();
     impl_ = std::make_unique<Impl>();
     impl_->headless = (hwnd == nullptr);
+    if (!impl_->headless && !forceWarp) impl_->frameGeneration.load();
 
     if (enableDebugLayer) {
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
@@ -191,7 +201,22 @@ bool D3D12Context::initialize(
     D3D12_COMMAND_QUEUE_DESC queueDesc{};
     queueDesc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
     queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    hr = impl_->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&impl_->commandQueue));
+    if (!impl_->headless && !forceWarp && impl_->frameGeneration.attach(impl_->device.Get())) {
+        void* factory=impl_->factory.Get();void* device=impl_->device.Get();
+        if (impl_->frameGeneration.upgrade(&factory) && factory!=impl_->factory.Get())
+            impl_->fgFactory.Attach(static_cast<IDXGIFactory2*>(factory));
+        if (impl_->frameGeneration.upgrade(&device) && device!=impl_->device.Get())
+            impl_->fgDevice.Attach(static_cast<ID3D12Device*>(device));
+        if (!impl_->fgFactory || !impl_->fgDevice) {
+            impl_->frameGeneration.disablePresentation();impl_->fgDevice.Reset();impl_->fgFactory.Reset();
+        }
+    }
+    auto* queueDevice=impl_->fgDevice ? impl_->fgDevice.Get() : impl_->device.Get();
+    hr = queueDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&impl_->commandQueue));
+    if(FAILED(hr) && impl_->fgDevice) {
+        impl_->frameGeneration.disablePresentation();impl_->fgFactory.Reset();impl_->fgDevice.Reset();
+        hr=impl_->device->CreateCommandQueue(&queueDesc,IID_PPV_ARGS(&impl_->commandQueue));
+    }
     if (FAILED(hr)) {
         if (outError) *outError = "CreateCommandQueue failed (" + hrHex(hr) + ")";
         return false;
@@ -277,6 +302,9 @@ bool D3D12Context::initialize(
     };
 
     HRESULT lastSwapHr = E_FAIL;
+    for (int attempt=0;attempt<(impl_->fgFactory ? 2 : 1) && !impl_->swapChain;++attempt) {
+    auto* factory=attempt==0 && impl_->fgFactory ? impl_->fgFactory.Get() : impl_->factory.Get();
+    if (attempt==1) impl_->frameGeneration.disablePresentation();
     for (DXGI_FORMAT fmt : candidateFormats) {
         for (UINT flags : candidateFlags) {
             DXGI_SWAP_CHAIN_DESC1 scDesc{};
@@ -292,7 +320,7 @@ bool D3D12Context::initialize(
             // Keep both candidate COM pointers strictly scoped so failed 10-bit checks
             // release all flip-model swapchain references on hwnd before retrying 8-bit!
             ComPtr<IDXGISwapChain1> candSc1;
-            lastSwapHr = impl_->factory->CreateSwapChainForHwnd(
+            lastSwapHr = factory->CreateSwapChainForHwnd(
                 impl_->commandQueue.Get(),
                 hwnd,
                 &scDesc,
@@ -331,6 +359,7 @@ bool D3D12Context::initialize(
         }
     }
 
+    }
     if (!impl_->swapChain) {
         if (outError) *outError = "CreateSwapChainForHwnd failed (" + hrHex(lastSwapHr) + ")";
         return false;
@@ -348,6 +377,7 @@ bool D3D12Context::initialize(
         std::string("Swapchain initialized: ") +
             (impl_->backBufferFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? "10-bit R10G10B10A2_UNORM (Rec.709 G2.2 SDR)" : "8-bit R8G8B8A8_UNORM") +
             " | WaitableLatency=" + (impl_->waitableHandle ? "ON(max=2)" : "OFF"));
+    startupCheckpoint();
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
     rtvHeapDesc.NumDescriptors = kFrameCount;
@@ -377,6 +407,8 @@ bool D3D12Context::initialize(
 void D3D12Context::shutdown() noexcept {
     if (!impl_) return;
     retireGpuForShutdown();
+    impl_->frameGeneration.shutdown();
+    if (impl_->directNgxInitialized) shutdownNgxDevice(impl_->device.Get());
     if (impl_->waitableHandle) {
         CloseHandle(impl_->waitableHandle);
         impl_->waitableHandle = nullptr;
@@ -516,7 +548,9 @@ bool D3D12Context::resize(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) return true;
     if (width == width_ && height == height_) return true;
 
+    impl_->frameGeneration.invalidate();
     waitForGpu();
+    impl_->fgHudless.Reset();impl_->fgUiAlpha.Reset();impl_->fgTargetsBound=false;
     if (!checkDeviceHealthy()) return false;
     for (uint32_t i = 0; i < kFrameCount; ++i) {
         impl_->renderTargets[i].Reset();
@@ -599,6 +633,8 @@ bool D3D12Context::beginFrame() {
     }
     if (!checkDeviceHealthy()) return false;
 
+    // A missing timestamp must not repeat the preceding slot's measurement.
+    impl_->lastPassTimings = {};
     // Read resolved 5-point GPU timestamps from this retired frame slot (zero GPU stall)
     if (requiredFence > 0 && impl_->timestampReadback && impl_->gpuTimestampFreq > 0) {
         const uint32_t slot = impl_->frameIndex;
@@ -674,6 +710,7 @@ bool D3D12Context::beginFrame() {
     impl_->commandList->RSSetScissorRects(1, &scissor);
 
     impl_->frameOpen = true;
+    impl_->frameGeneration.beginRender();
     return true;
 }
 
@@ -682,6 +719,51 @@ void D3D12Context::bindSwapchainRenderTarget() noexcept {
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtvHandle.ptr += static_cast<SIZE_T>(impl_->frameIndex) * impl_->rtvDescriptorSize;
     impl_->commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+}
+
+void D3D12Context::beginSimulation(FrameGenerationMode mode,ReflexMode reflex) {if(impl_ && impl_->swapChain) impl_->frameGeneration.beginSimulation(mode,reflex);}
+void D3D12Context::endSimulation() {if(impl_) impl_->frameGeneration.endSimulation();}
+FrameGenerationStats D3D12Context::frameGenerationStats() const noexcept {return impl_ ? impl_->frameGeneration.stats() : FrameGenerationStats{};}
+bool D3D12Context::frameGenerationInputsNeeded() const noexcept {return impl_ && impl_->frameOpen && impl_->swapChain && impl_->frameGeneration.needsInputs();}
+void D3D12Context::setFrameGenerationScene(const M1CameraState& camera,void* depth,void* motion,uint32_t w,uint32_t h,const float* jitter,bool reset) {
+    if(frameGenerationInputsNeeded()) impl_->frameGeneration.scene(camera,static_cast<ID3D12Resource*>(depth),static_cast<ID3D12Resource*>(motion),w,h,jitter,reset);
+}
+bool D3D12Context::bindFrameGenerationTargets() {
+    if(!frameGenerationInputsNeeded() || !impl_->frameGeneration.hasScene()) return false;
+    auto& s=*impl_;
+    if(!s.fgHudless || !s.fgUiAlpha) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.NumDescriptors=2;hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        if(!s.fgRtv && FAILED(s.device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.fgRtv)))) return false;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;heap.CreationNodeMask=heap.VisibleNodeMask=1;
+        auto tex=s.renderTargets[s.frameIndex]->GetDesc();tex.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        ComPtr<ID3D12Resource> hudless,alpha;
+        if(FAILED(s.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&tex,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&hudless)))) return false;
+        tex.Format=DXGI_FORMAT_R8_UNORM;
+        if(FAILED(s.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&tex,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&alpha)))) return false;
+        auto rtv=s.fgRtv->GetCPUDescriptorHandleForHeapStart();s.device->CreateRenderTargetView(hudless.Get(),nullptr,rtv);
+        rtv.ptr+=s.rtvDescriptorSize;s.device->CreateRenderTargetView(alpha.Get(),nullptr,rtv);
+        s.fgHudless=std::move(hudless);s.fgUiAlpha=std::move(alpha);
+    }
+    std::array<D3D12_RESOURCE_BARRIER,2> barriers{};
+    for(size_t i=0;i<2;++i) {
+        barriers[i].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[i].Transition={i ? s.fgUiAlpha.Get() : s.fgHudless.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET};
+    }
+    s.commandList->ResourceBarrier(2,barriers.data());
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE,3> handles{};handles[0]=s.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    handles[0].ptr+=SIZE_T(s.frameIndex)*s.rtvDescriptorSize;handles[1]=s.fgRtv->GetCPUDescriptorHandleForHeapStart();handles[2]=handles[1];handles[2].ptr+=s.rtvDescriptorSize;
+    s.commandList->OMSetRenderTargets(3,handles.data(),FALSE,nullptr);s.fgTargetsBound=true;return true;
+}
+void D3D12Context::finishFrameGenerationInputs() {
+    if(!impl_ || !impl_->fgTargetsBound) return;
+    auto& s=*impl_;s.fgTargetsBound=false;
+    std::array<D3D12_RESOURCE_BARRIER,2> barriers{};
+    for(size_t i=0;i<2;++i) {
+        barriers[i].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[i].Transition={i ? s.fgUiAlpha.Get() : s.fgHudless.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    }
+    s.commandList->ResourceBarrier(2,barriers.data());
+    s.frameGeneration.tag(s.commandList.Get(),s.fgHudless.Get(),s.fgUiAlpha.Get());
 }
 
 void D3D12Context::writePassTimestamp(uint32_t passSlot1To3) noexcept {
@@ -739,7 +821,9 @@ bool D3D12Context::endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs)
 
     const UINT syncInterval = vsync ? 1u : 0u;
     const UINT presentFlags = (!vsync && impl_->allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    impl_->frameGeneration.beforePresent();
     const HRESULT hr = impl_->swapChain->Present(syncInterval, presentFlags);
+    impl_->frameGeneration.afterPresent(hr==S_OK);
 
     QueryPerformanceCounter(&t1);
     const double presentWallMs =
@@ -815,6 +899,11 @@ uint64_t D3D12Context::queryEstimatedAppVramBytes() const noexcept {
 
 void* D3D12Context::deviceRaw() const noexcept {
     return impl_ ? impl_->device.Get() : nullptr;
+}
+bool D3D12Context::ensureNgxRuntime(const std::filesystem::path& folder) {
+    if (!impl_ || !impl_->device || isWarp_) return false;
+    if (!impl_->directNgxInitialized) impl_->directNgxInitialized = initializeNgxDevice(impl_->device.Get(),folder);
+    return impl_->directNgxInitialized;
 }
 
 void* D3D12Context::commandQueueRaw() const noexcept {

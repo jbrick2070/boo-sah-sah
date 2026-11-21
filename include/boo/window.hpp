@@ -21,6 +21,9 @@ enum class TransportCommand : uint8_t {
     ToggleLoop,
     ToggleMute,
     CycleQualityPreset,
+    CycleEffectsDetail,
+    CyclePathTracing, CycleDlss,
+    ToggleRayReconstruction, CycleFrameGeneration, CycleReflex,
     ToggleEdition,
     ToggleCaptions,
     ToggleOverlay,
@@ -33,7 +36,9 @@ enum class TransportCommand : uint8_t {
     ToggleSpoutRuntime,
     ToggleCameraRuntime,
     CycleAbCompareEngine,
+    CompareRT, CompareCUDA, CompareTensor, CompareCodec, CompareNPU, CloseComparison,
     ToggleFullscreen,
+    LeaveFullscreen, // Esc while full screen: back to the window, never out of the app
     SelectModeFull,
     SelectModeRT,
     SelectModeTensor,
@@ -67,6 +72,12 @@ enum class TransportCommand : uint8_t {
     PrevMusicTrack,
     OpenAudioFileDialog,
     ClearCustomAudio,
+    // Neural rendering suite (dashboard NEURAL rows, Shift+N)
+    ToggleNeuralRendering, ToggleNeuralTensorCores,
+    CycleDashboardPanel, DashboardFull, DashboardMini, DashboardHidden,
+    GpuWorkoutDown, GpuWorkoutUp, CycleFlockFormation, ToggleBirdCam, CyclePhysxGenre,
+    ToggleNeuralShading, ToggleNeuralTextures, ToggleNeuralCache,
+    SoloNeuralShading, SoloNeuralTextures, SoloNeuralCache,
     Quit
 };
 
@@ -124,6 +135,9 @@ public:
     // GDI "Loading..." screen shown from window creation until the first frame is presented.
     void showLoading();
     void hideLoading() noexcept { loading_ = false; }
+    // The loading bar: how full it is (0..1) and the line of figures under it. Repaints at once,
+    // without pumping messages, so it can be called from the middle of start-up.
+    void setLoadingProgress(float fraction, std::wstring detail);
     bool paintLoadingFromWndProc();
     void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
     void fitFullscreenToMonitor();
@@ -172,6 +186,8 @@ private:
     std::deque<std::wstring> droppedFiles_;
     std::wstring graphicsFailureText_;
     bool loading_ = false;
+    float loadingFraction_ = -1.0f; // below zero: no bar yet
+    std::wstring loadingDetail_;
 };
 
 } // namespace boo

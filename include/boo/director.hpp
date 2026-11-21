@@ -72,6 +72,7 @@ struct OpenVinoDirectorConfig {
     bool allowDevVenvDiscovery = true;
     bool simulateMissingRuntimeForTest = false;
     int64_t inferTimeoutMs = 250;
+    int64_t npuInferTimeoutMs = 0; // Optional async deadline on a verified NPU; zero uses inferTimeoutMs.
 };
 
 struct NeuralInferenceSample {
@@ -79,6 +80,11 @@ struct NeuralInferenceSample {
     float confidence = 1.0f;
     std::array<float, 5> controls{0.35f, 0.50f, 0.25f, 0.15f, 0.0f}; // bloom, iris, tension, spectral, cut
     float latencyMs = 0.0f;
+};
+
+struct NeuralInferenceFailure {
+    std::string reason;
+    bool timedOut = false;
 };
 
 // Checks whether openvino_c.dll is dynamically discoverable (app dir, system PATH, or local .venv).
@@ -96,7 +102,8 @@ public:
     OpenVinoDirector& operator=(const OpenVinoDirector&) = delete;
 
     HardwareResult initialize(const OpenVinoDirectorConfig& config);
-    bool infer(const DirectorFeatureVector& features, NeuralInferenceSample& outSample, bool injectTimeout = false);
+    bool infer(const DirectorFeatureVector& features, NeuralInferenceSample& outSample,
+               bool injectTimeout = false, NeuralInferenceFailure* failure = nullptr);
     void shutdown() noexcept;
 
     bool isReady() const noexcept;
@@ -113,6 +120,7 @@ struct AsyncDirectorTelemetry {
     HardwareResult hardwareResult{};
     float lastInferMs = 0.0f;
     float resultAgeMs = 0.0f;
+    float completedRateHz = 0.0f; // Successful completions in the trailing second of the active route.
     uint64_t completedInferences = 0;
     uint32_t timeoutCount = 0;
 };
@@ -140,11 +148,13 @@ public:
 
     void reset(uint64_t seed) noexcept;
     void setDisableNpu(bool disable) noexcept;
+    bool retryIfDegraded() noexcept;
     void setInjectTimeout(bool inject) noexcept;
 
     DirectorMoodState evaluateFrame(
         const FrameContext& ctx,
-        const SceneCue* activeCue) noexcept;
+        const SceneCue* activeCue,
+        DirectorMoodState* scriptedBaseline = nullptr) noexcept;
 
     AsyncDirectorTelemetry telemetry() const noexcept;
     void shutdown() noexcept;

@@ -204,6 +204,7 @@ HardwareResult M0TestVisualEffect::probeAndInitialize() {
         return res;
     }
 
+    if (queryLiveEngineStatus(EngineKind::RT, res)) return res;
     res.capabilityDetected = true;
     res.successfullyExecutedTestWork = true;
     res.status = usingEmbeddedBytecode_ ? BackendStatus::Degraded : BackendStatus::Substituted;
@@ -214,6 +215,20 @@ HardwareResult M0TestVisualEffect::probeAndInitialize() {
                                   ? "Rendering guaranteed non-blackscreen precompiled safe fallback visual."
                                   : "Rendering M0 Glass Orchid procedural D3D12 test visual + telemetry HUD.";
     return res;
+}
+
+bool M0TestVisualEffect::queryLiveEngineStatus(EngineKind kind, HardwareResult& result) const noexcept {
+    if (!ownsLiveEngineStatus(kind) || !impl_ || !impl_->pso) return false;
+    result = {};
+    result.engine = kind;
+    result.requestedBackend = "D3D12_Raster";
+    result.activeBackend = "D3D12_WARP_Procedural";
+    result.detectedHardwareDetail = d3d_.adapterName();
+    result.status = BackendStatus::Substituted;
+    result.health = HealthState::ActiveSubstitute;
+    result.diagnosticCode = usingEmbeddedBytecode_ ? "WARP_EMBEDDED_FALLBACK" : "WARP_PROCEDURAL_DIAGNOSTIC";
+    result.humanReadableReason = "Software rasterization on Microsoft WARP. Hardware ray tracing is inactive.";
+    return true;
 }
 
 void M0TestVisualEffect::preload(double /*atFilmTime*/) {}
@@ -256,6 +271,8 @@ void M0TestVisualEffect::render(const FrameContext& ctx) {
     if (ctx.edition == Edition::Midnight)      flags |= (1u << 5);
     if (hud_.benchRunning)                     flags |= (1u << 6);
     if (hud_.benchHasResults)                  flags |= (1u << 7);
+    if (d3d_.isWarp() && ctx.reducedFlash)     flags |= (1u << 8);
+    if (d3d_.isWarp() && ctx.motionScale < 0.99f) flags |= (1u << 9);
     cb.flags = flags;
     cb.presetId = static_cast<uint32_t>(ctx.qualityPreset);
 

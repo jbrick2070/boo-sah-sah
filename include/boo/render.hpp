@@ -4,9 +4,15 @@
 #include "boo/audio.hpp"
 #include "boo/benchmark.hpp"
 #include "boo/capabilities.hpp"
+#include "boo/city_draw_stats.hpp"
 #include "boo/director.hpp"
 #include "boo/health.hpp"
+#include "boo/frame_generation.hpp"
+#include "boo/gpu_sensors.hpp"
 #include "boo/live_accelerators.hpp"
+#include "boo/neural_rendering.hpp"
+#include "boo/flow_smoke.hpp"
+#include "boo/physx_suite.hpp"
 #include "boo/settings.hpp"
 
 #include <array>
@@ -29,6 +35,20 @@ struct GpuPassTimingsMs {
     double presentPassMs = 0.0;
 };
 
+enum class DirectorHudBackend : uint32_t { Off, Warming, Npu, Cpu, Scripted, Faulted };
+
+inline DirectorHudBackend classifyDirectorHudBackend(const HardwareResult& result) noexcept {
+    if (result.health == HealthState::Probing) return DirectorHudBackend::Warming;
+    if (result.status == BackendStatus::Faulted) return DirectorHudBackend::Faulted;
+    if (result.status == BackendStatus::Unavailable || result.diagnosticCode == "DISABLED_BY_FLAG")
+        return DirectorHudBackend::Off;
+    if (result.successfullyExecutedTestWork) {
+        if (result.status == BackendStatus::Accelerated) return DirectorHudBackend::Npu;
+        if (result.activeBackend.starts_with("OpenVINO_CPU")) return DirectorHudBackend::Cpu;
+    }
+    return DirectorHudBackend::Scripted;
+}
+
 // Telemetry packet uploaded each frame to the procedural D3D12 HUD shader
 // to render crisp on-screen numbers, progress bars, engine badges, audio spectrum, and benchmark gauges.
 struct HudTelemetrySnapshot {
@@ -42,6 +62,12 @@ struct HudTelemetrySnapshot {
     float p95FrameMs = 1.0f;
     std::array<float, 16> recentGpuMs{};
     float volumePercent = -1.0f;
+    RendererFeatureState frameGenerationState = RendererFeatureState::Unavailable;
+    uint32_t maxGeneratedFrames = 0;
+    uint32_t framesActuallyPresented = 0;
+    RendererFeatureState reflexState = RendererFeatureState::Unavailable;
+    float renderedFps = 0.f;
+    float displayedFps = 0.f;
     float vramUsedMb = 128.0f;
     float vramBudgetMb = 12288.0f;
     bool audioClockActive = false;
@@ -65,6 +91,8 @@ struct HudTelemetrySnapshot {
     bool codecSignalHijackActive = false;
     bool liveCameraActive = false;
     std::array<LivePillarTelemetry, 4> livePillars{};
+    DirectorHudBackend directorBackend = DirectorHudBackend::Off;
+    float directorRateHz = 0.0f;
     float npuInferMs = 0.0f;
     float npuResultAgeMs = 0.0f;
     uint64_t npuCompletedInferences = 0;
@@ -78,6 +106,22 @@ struct HudTelemetrySnapshot {
     std::array<float, 4> benchFallbackValues{0.0f, 0.0f, 0.0f, 0.0f};  // HLSL substitute comparison values
     std::array<float, 4> benchBarFill01{0.0f, 0.0f, 0.0f, 0.0f};       // Normalized [0..1] progress/meter fill
     std::array<uint32_t, 4> benchVerifiedFlags{0, 0, 0, 0};
+
+    // Neural rendering dashboard rows (top-left table, below Real-Time Graphics)
+    NeuralRenderingStats neural{};
+    uint32_t dashboardPanel = 0; // 0 full table, 1 mini strip, 2 hidden tab
+    GpuSensorReading gpuSensors{}; // NVML temperature, power, clocks, load; CPU load
+    uint32_t gpuWorkout = 0;       // workout dial level 0..10
+    uint32_t flockFormation = 0;   // FlockFormation index
+    uint32_t flockSpecies = 0;     // 0 black kite, 1 great egret
+    bool birdCam = false;          // bird camera on
+    uint32_t birdCount = 0;        // birds drawn last frame (authored + workout flock)
+    uint32_t workoutState = 0;     // 0 steady, 1 releasing birds, 2 held back by the frame-rate floor
+    uint32_t workoutFloorFps = 0;  // the floor, whole frames a second (0 = none)
+    bool fullscreen = false;       // the window covers the whole display
+    uint32_t physxGenre = 0;       // PhysX suite genre on the dial (boo/physx_genres.hpp)
+    PhysxStats physx{};            // the active genre's figures
+    float fullscreenPill = 0.0f;   // opacity of the top-right FULL SCREEN / EXIT FULL SCREEN pill
 };
 
 class D3D12Context {
@@ -102,6 +146,13 @@ public:
 
     bool resize(uint32_t width, uint32_t height);
     bool beginFrame();
+    void beginSimulation(FrameGenerationMode mode,ReflexMode reflex);
+    void endSimulation();
+    FrameGenerationStats frameGenerationStats() const noexcept;
+    bool frameGenerationInputsNeeded() const noexcept;
+    void setFrameGenerationScene(const M1CameraState& camera,void* depth,void* motion,uint32_t width,uint32_t height,const float* jitter,bool reset);
+    bool bindFrameGenerationTargets();
+    void finishFrameGenerationInputs();
     void bindSwapchainRenderTarget() noexcept;
     void writePassTimestamp(uint32_t passSlot1To3) noexcept;
     bool endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs);
@@ -126,6 +177,7 @@ public:
     void* deviceRaw() const noexcept;
     void* commandQueueRaw() const noexcept;
     void* commandListRaw() const noexcept;
+    bool ensureNgxRuntime(const std::filesystem::path& folder);
 
     uint32_t width() const noexcept { return width_; }
     uint32_t height() const noexcept { return height_; }
@@ -162,7 +214,10 @@ public:
     M0TestVisualEffect(D3D12Context& d3d, bool forceEmbeddedFallbackShader, bool simulateInitFailure = false);
     ~M0TestVisualEffect() override;
 
-    const char* name() const noexcept override { return fallbackMode_ ? "M0_SafeFallbackVisual" : "M0_GlassOrchidTestVisual"; }
+    const char* name() const noexcept override {
+        if (d3d_.isWarp() && !fallbackMode_) return "WARP_ProceduralDiagnostic";
+        return fallbackMode_ ? "M0_SafeFallbackVisual" : "M0_GlassOrchidTestVisual";
+    }
     HardwareResult probeAndInitialize() override;
     void preload(double atFilmTime) override;
     void resetTo(double filmTime) override;
@@ -171,6 +226,8 @@ public:
 
     void setHudTelemetry(const HudTelemetrySnapshot& snapshot) noexcept override { hud_ = snapshot; }
     bool isUsingEmbeddedFallbackShader() const noexcept override { return usingEmbeddedBytecode_; }
+    bool ownsLiveEngineStatus(EngineKind kind) const noexcept override { return kind == EngineKind::RT && d3d_.isWarp(); }
+    bool queryLiveEngineStatus(EngineKind kind, HardwareResult& outStatus) const noexcept override;
 
 private:
     struct Impl;
@@ -245,7 +302,22 @@ public:
     uint32_t canvasWidth() const noexcept;
     uint32_t canvasHeight() const noexcept;
     uint32_t lastVerifiedRayHits() const noexcept;
+    RendererFeatureState pathTracingState() const noexcept;
+    NeuralRenderingStats neuralRenderingStats() const;
+    FlowSmokeStats physxSmokeStats() const; // PhysX suite: NVIDIA Flow smoke
+    RendererFeatureState dlssState() const noexcept;
+    RendererFeatureState rayReconstructionState() const noexcept;
+    uint32_t dlssInputWidth() const noexcept;
+    uint32_t dlssInputHeight() const noexcept;
     uint32_t activeDenoiseMode() const noexcept;
+    uint32_t birdCount() const noexcept;
+    uint32_t workoutBirdCapacity() const noexcept; // workout birds the buffers have room for
+    const std::vector<CityCollisionBox>& cityCollision(uint32_t* act) const noexcept; // see TrilogyMeshRenderer
+    std::vector<CityCollisionBox> buildCityCollision(uint32_t act);
+    bool reserveWorkoutBirds(uint32_t birds);      // make room for more; call between frames
+    FlockFocus flockFocus() const noexcept;
+    bool hasAllAuthoredSceneAssets() const noexcept;
+    CityDrawStats lastCityDrawStats() const noexcept;
 
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(

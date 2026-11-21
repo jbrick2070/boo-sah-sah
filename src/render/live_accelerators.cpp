@@ -244,6 +244,10 @@ static const char* kLiveCudaParticlesPtx = R"PTX(
     .reg .b32  %r<24>;
     .reg .b64  %rd<6>;
     .reg .f32  %f<48>;
+    .reg .f32 %progress, %theta, %cosTheta, %sinTheta, %phi, %cosPhi, %sinPhi;
+    .reg .f32 %diskRadius, %helixRadius, %helixY, %minor, %ringRadius, %ringY;
+    .reg .f32 %weight, %weightRate, %deltaRadius, %deltaY, %radius, %radialRate;
+    .reg .f32 %azimuthSpeed, %minorSpeed, %scratch;
 
     mov.u32 %r0, %ctaid.x;
     mov.u32 %r1, %ntid.x;
@@ -286,7 +290,7 @@ static const char* kLiveCudaParticlesPtx = R"PTX(
     cvt.rn.f32.u32 %f5, %r12;
     mul.f32 %f5, %f5, 0f37800000; // h3 in [0,1)
 
-    // Mode 1 (Particle Mutiny M3 / Act 5): 100k-262k seeded double-helix <-> crown torus morph
+    // Mode 1 (Particle Mutiny M3 / Act 4): 100k-262k seeded double-helix <-> crown torus morph
     setp.ne.u32 %p5, %r17, 0;
     @%p5 bra INIT_MUTINY;
 
@@ -322,7 +326,7 @@ INIT_POLLEN:
     cvt.rn.f32.u32 %f7, %r14;
     sub.f32 %f8, %f6, %f7;                // age01 in [0, 1)
 
-    // Hollow toroidal sanctuary halo rising around Glass Orchid hub (0, 7.80, 5.50) — leaves center blossom & Taipei 101 clear!
+    // Hollow toroidal sanctuary halo rising around Glass Orchid hub (0, 7.80, 5.50).
     fma.rn.f32 %f17, %f0, 0f3F0CCCCD, 0f00000000; // slow orbital spin
     fma.rn.f32 %f18, %f3, 0f40C90FDB, %f17;       // angle = h1 * 2pi + spin
     fma.rn.f32 %f19, %f4, 0f40200000, 0f4029999A; // radius = 2.65 + h2 * 2.50 (r in [2.65, 5.15])
@@ -351,55 +355,69 @@ INIT_POLLEN:
     bra SUBSTEP_START;
 
 INIT_MUTINY:
-    // --- Mode 1: Particle Mutiny Choreographed Mint Double-Helix <-> Crown Torus Morph ---
-    fma.rn.f32 %f6, %f0, 0f3E23D70A, %f5;         // phase = time * 0.16 + h3
-    cvt.rzi.u32.f32 %r14, %f6;
-    cvt.rn.f32.u32 %f7, %r14;
-    sub.f32 %f8, %f6, %f7;                        // age01 in [0, 1)
-
-    mul.f32 %f40, %f0, 0f3EB33333;                // time * 0.35
-    cos.approx.f32 %f40, %f40;
-    fma.rn.f32 %f40, %f40, 0fBF000000, 0f3F000000;// morph in [0, 1]
-
-    // Formation A: Counter-rotating twin sanctuary helix
-    and.b32 %r18, %r3, 1;
+    // A particle advances along one of two helices. One longitudinal parameter
+    // drives both height and azimuth. Fade at the ends before wrapping to the base.
+    fma.rn.f32 %progress, %f0, 0f3D23D70A, %f2;
+    cvt.rmi.f32.f32 %f7, %progress;
+    sub.f32 %f8, %progress, %f7;
+    and.b32 %r18, %r3, 4;                         // independent of tracer/species bits
     setp.ne.u32 %p6, %r18, 0;
-    selp.f32 %f41, 0f40490FDB, 0f00000000, %p6;
-    fma.rn.f32 %f18, %f3, 0f41490FDB, %f41;
-    fma.rn.f32 %f18, %f0, 0f3F933333, %f18;
-    cos.approx.f32 %f20, %f18;
-    sin.approx.f32 %f21, %f18;
-    fma.rn.f32 %f19, %f4, 0f40500000, 0f3FA00000; // radA = 1.25 + h2 * 3.25
-    mul.f32 %f22, %f20, %f19;                     // ax
-    fma.rn.f32 %f23, %f2, 0f40C66666, 0f403CCCCD; // ay = 2.95 + h0 * 6.20 (above sanctuary pool y=2.665)
-    fma.rn.f32 %f24, %f21, %f19, 0f40B00000;      // az = 5.50 + sin(angA) * radA
+    selp.f32 %theta, 0f40490FDB, 0f00000000, %p6;
+    fma.rn.f32 %theta, %f8, 0f41490FDB, %theta;
+    fma.rn.f32 %theta, %f0, 0f3E75C28F, %theta;
+    cos.approx.f32 %cosTheta, %theta;
+    sin.approx.f32 %sinTheta, %theta;
 
-    // Formation B: Concentric enamel crown torus shell around (0, 5.55, 5.50)
-    fma.rn.f32 %f25, %f0, 0fBF59999A, 0f00000000;
-    fma.rn.f32 %f25, %f3, 0f40C90FDB, %f25;       // theta
-    fma.rn.f32 %f26, %f0, 0f3FD33333, 0f00000000;
-    fma.rn.f32 %f26, %f2, 0f40C90FDB, %f26;       // phi
-    cos.approx.f32 %f27, %f25;
-    sin.approx.f32 %f28, %f25;
-    cos.approx.f32 %f29, %f26;
-    sin.approx.f32 %f30, %f26;
-    fma.rn.f32 %f31, %f4, 0f3FC00000, 0f3F000000; // minorR = 0.50 + h2 * 1.50
-    fma.rn.f32 %f32, %f29, %f31, 0f40700000;      // ringR  = 3.75 + cos(phi) * minorR
-    mul.f32 %f33, %f27, %f32;                     // bx
-    fma.rn.f32 %f34, %f30, %f31, 0f40B1999A;      // by
-    fma.rn.f32 %f35, %f28, %f32, 0f40B00000;      // bz
+    // Uniform disk around each centerline: h1 sets the transverse direction
+    // and sqrt(h2) gives even area density across the 0.24-radius tube.
+    mul.f32 %phi, %f3, 0f40C90FDB;
+    cos.approx.f32 %cosPhi, %phi;
+    sin.approx.f32 %sinPhi, %phi;
+    sqrt.approx.f32 %diskRadius, %f4;
+    mul.f32 %diskRadius, %diskRadius, 0f3E75C28F;
+    fma.rn.f32 %helixRadius, %diskRadius, %cosPhi, 0f4039999A;
+    fma.rn.f32 %helixY, %f8, 0f40C66666, 0f403CCCCD;
+    fma.rn.f32 %helixY, %diskRadius, %sinPhi, %helixY;
 
-    sub.f32 %f36, %f33, %f22;
-    fma.rn.f32 %f10, %f40, %f36, %f22;
-    sub.f32 %f36, %f34, %f23;
-    fma.rn.f32 %f11, %f40, %f36, %f23;
-    sub.f32 %f36, %f35, %f24;
-    fma.rn.f32 %f12, %f40, %f36, %f24;
+    // Hold the major azimuth through the morph, so the streams never fold
+    // through the axis. The torus has a thin 0.78..0.90 shell about radius 3.75.
+    fma.rn.f32 %phi, %f0, 0f3F3851EC, %phi;
+    cos.approx.f32 %cosPhi, %phi;
+    sin.approx.f32 %sinPhi, %phi;
+    fma.rn.f32 %minor, %f5, 0f3DF5C28F, 0f3F47AE14;
+    fma.rn.f32 %ringRadius, %minor, %cosPhi, 0f40700000;
+    fma.rn.f32 %ringY, %minor, %sinPhi, 0f40B1999A;
 
-    neg.f32 %f13, %f21;
-    mul.f32 %f13, %f13, 0f3FE00000;
-    fma.rn.f32 %f14, %f30, 0f3F400000, 0f3EE66666;
-    mul.f32 %f15, %f20, 0f3FE00000;
+    mul.f32 %scratch, %f0, 0f3EB33333;
+    cos.approx.f32 %weight, %scratch;
+    sin.approx.f32 %weightRate, %scratch;
+    fma.rn.f32 %weight, %weight, 0fBF000000, 0f3F000000;
+    mul.f32 %weightRate, %weightRate, 0f3E333333;
+    sub.f32 %deltaRadius, %ringRadius, %helixRadius;
+    sub.f32 %deltaY, %ringY, %helixY;
+    fma.rn.f32 %radius, %weight, %deltaRadius, %helixRadius;
+    mul.f32 %f10, %radius, %cosTheta;
+    fma.rn.f32 %f11, %weight, %deltaY, %helixY;
+    fma.rn.f32 %f12, %radius, %sinTheta, 0f40B00000;
+
+    // Differentiate the moving cylindrical coordinates before applying curl.
+    // theta' = 4*pi*0.04 + 0.24, helixY' = 6.2*0.04, and phi' = 0.72.
+    mul.f32 %azimuthSpeed, %radius, 0f3F3E1EA0;
+    mul.f32 %minorSpeed, %minor, 0f3F3851EC;
+    mul.f32 %minorSpeed, %minorSpeed, %weight;
+    mul.f32 %radialRate, %weightRate, %deltaRadius;
+    neg.f32 %scratch, %sinPhi;
+    fma.rn.f32 %radialRate, %minorSpeed, %scratch, %radialRate;
+    mul.f32 %f13, %azimuthSpeed, %sinTheta;
+    neg.f32 %f13, %f13;
+    fma.rn.f32 %f13, %radialRate, %cosTheta, %f13;
+    sub.f32 %f14, 0f3F800000, %weight;
+    mul.f32 %f14, %f14, 0f3E7DF3B6;
+    fma.rn.f32 %f14, %weightRate, %deltaY, %f14;
+    fma.rn.f32 %f14, %minorSpeed, %cosPhi, %f14;
+    mul.f32 %f15, %azimuthSpeed, %cosTheta;
+    fma.rn.f32 %f15, %radialRate, %sinTheta, %f15;
+
     and.b32 %r19, %r3, 3;
     setp.eq.u32 %p7, %r19, 0;
     fma.rn.f32 %f42, %f5, 0f3EE66666, 0f3F0CCCCD;

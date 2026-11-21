@@ -13,6 +13,19 @@
 
 namespace boo {
 
+FrameGenerationMode availableFrameGenerationMode(FrameGenerationMode request, uint32_t maxGenerated) noexcept {
+    if (request == FrameGenerationMode::Off || request == FrameGenerationMode::Auto) return request;
+    if (!maxGenerated) return FrameGenerationMode::Off;
+    const auto maxMultiplier = 1u + std::min(maxGenerated, 5u);
+    return static_cast<FrameGenerationMode>(std::min(static_cast<uint32_t>(request), maxMultiplier));
+}
+
+FrameGenerationMode nextFrameGenerationMode(FrameGenerationMode current, uint32_t maxGenerated) noexcept {
+    const uint32_t last = 1u + std::min(maxGenerated, 5u);
+    return static_cast<uint32_t>(current) >= last ? FrameGenerationMode::Off
+        : static_cast<FrameGenerationMode>(static_cast<uint32_t>(current) + 1u);
+}
+
 namespace {
 std::string toLowerAscii(std::string_view s) {
     std::string out(s);
@@ -95,6 +108,7 @@ const char* toString(AbCompareEngine engine) noexcept {
         case AbCompareEngine::CUDA:   return "CUDA";
         case AbCompareEngine::Tensor: return "Tensor";
         case AbCompareEngine::Codec:  return "Codec";
+        case AbCompareEngine::NPU:    return "NPU";
     }
     return "RT";
 }

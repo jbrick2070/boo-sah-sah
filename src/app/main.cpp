@@ -7,6 +7,7 @@
 #include "boo/cues.hpp"
 #include "boo/diagnostics.hpp"
 #include "boo/director.hpp"
+#include "boo/gpu_sensors.hpp"
 #include "boo/health.hpp"
 #include "boo/localization.hpp"
 #include "boo/logging.hpp"
@@ -15,8 +16,20 @@
 #include "boo/render.hpp"
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
+#include "boo/startup_progress.hpp"
+#include "boo/physx_genres.hpp"
+#include "boo/physx_suite.hpp"
+#include "boo/physx_rigid.hpp"
+#include "boo/physx_marbles.hpp"
+#include "boo/dawn_bathroom.hpp"
+#include "boo/physx_fluid.hpp"
+#include "boo/physx_soft.hpp"
+#include "boo/physx_route_test.hpp"
+#include "../render/bird_flight.hpp"
 #include "boo/ui_text.hpp"
 #include "boo/window.hpp"
+#include "boo/workout_governor.hpp"
+#include "../render/bird_flight.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -37,8 +50,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -59,6 +74,87 @@ std::filesystem::path userCaptureFolder() {
     }
     CoTaskMemFree(pictures);
     return out;
+}
+
+// The dashboard row's figures for the genre on the dial.
+boo::PhysxStats physxStatsFor(uint32_t genre, const boo::FlowSmokeStats& smoke, const boo::PhysxRuntimeInfo& runtime,
+                              const boo::PhysxRigidGenre* rigid = nullptr, const boo::PhysxFluidGenre* fluid = nullptr,
+                              const boo::PhysxSoftGenre* soft = nullptr) {
+    using namespace boo;
+    PhysxStats out;
+    out.genre = genre < kPhysxGenreCount ? genre : 0u;
+    if (out.genre == static_cast<uint32_t>(PhysxGenre::Smoke)) {
+        // RendererFeatureState: Unavailable 0, Off 1, Active 2, Idle 3 (Idle is "starting" here).
+        out.state = static_cast<uint32_t>(smoke.state);
+        out.backend = smoke.backend;
+        out.reason = smoke.reason;
+        out.stepCpuMs = smoke.simulateCpuMs;
+        out.stepGpuMs = smoke.simulateGpuMs;
+        out.renderGpuMs = smoke.renderGpuMs;
+        out.counters[0] = static_cast<float>(static_cast<double>(smoke.activeVoxels) / 1000.0);
+        out.counters[1] = static_cast<float>(smoke.activeBlocks);
+        out.counters[2] = smoke.gridMegabytes;
+        out.counters[3] = static_cast<float>(smoke.sources);
+        out.counterNames[0] = "thousand_voxels";
+        out.counterNames[1] = "sparse_blocks";
+        out.counterNames[2] = "grid_mb";
+        out.counterNames[3] = "sources";
+        out.gpuMemoryMegabytes = smoke.flowMemoryMegabytes;
+        out.steps = smoke.steps;
+    } else if (out.genre == static_cast<uint32_t>(PhysxGenre::Rigid) && rigid) {
+        out = rigid->stats();
+    } else if (out.genre == static_cast<uint32_t>(PhysxGenre::Fluid) && fluid) {
+        out = fluid->stats();
+    } else if (out.genre == static_cast<uint32_t>(PhysxGenre::Soft) && soft) {
+        out = soft->stats();
+    } else if (out.genre != 0u && physxGenreInfo(out.genre).usesPhysxSdk) {
+        out.state = runtime.state == PhysxRuntimeState::Ready ? 2u : runtime.state == PhysxRuntimeState::Starting ? 3u : 0u;
+        out.reason = runtime.reason;
+    } else {
+        out.state = 1u; // off
+    }
+    return out;
+}
+
+// <LocalAppData>\BOO SAH SAH\startup-memory.txt: what the last start loaded and how much GPU memory
+// it reached, so the loading bar's totals are this machine's own. Empty on failure.
+std::filesystem::path startupMemoryFile() {
+    PWSTR local = nullptr;
+    std::filesystem::path out;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &local)) && local) {
+        out = std::filesystem::path(local) / L"BOO SAH SAH" / L"startup-memory.txt";
+    }
+    CoTaskMemFree(local);
+    return out;
+}
+
+// The figures under the loading bar. Numbers and units only, so they need no translation:
+// megabytes read of the total, megabytes whose SHA-256 matched the manifest, and system and GPU
+// memory in use against what the last start reached.
+std::wstring loadingDetail(const boo::StartupProgressView& v) {
+    constexpr double kMb = 1024.0 * 1024.0, kGb = kMb * 1024.0;
+    wchar_t text[260]{};
+    int at = 0;
+    if (v.assetBytesTotal > 0) {
+        at += std::swprintf(text + at, std::size(text) - at, L"%.0f / %.0f MB", v.assetBytesLoaded / kMb, v.assetBytesTotal / kMb);
+        at += std::swprintf(text + at, std::size(text) - at, L"     SHA-256 verified  %.0f MB", v.assetBytesVerified / kMb);
+        if (v.assetsMismatched > 0) at += std::swprintf(text + at, std::size(text) - at, L"     %u mismatched", v.assetsMismatched);
+    }
+    if (v.ramBytes > 0) {
+        if (v.ramBytesExpected > 0) {
+            at += std::swprintf(text + at, std::size(text) - at, L"     RAM  %.2f / %.2f GB", v.ramBytes / kGb, v.ramBytesExpected / kGb);
+        } else {
+            at += std::swprintf(text + at, std::size(text) - at, L"     RAM  %.2f GB", v.ramBytes / kGb);
+        }
+    }
+    if (v.gpuBytes > 0) {
+        if (v.gpuBytesExpected > 0) {
+            at += std::swprintf(text + at, std::size(text) - at, L"     GPU  %.2f / %.2f GB", v.gpuBytes / kGb, v.gpuBytesExpected / kGb);
+        } else {
+            at += std::swprintf(text + at, std::size(text) - at, L"     GPU  %.2f GB", v.gpuBytes / kGb);
+        }
+    }
+    return std::wstring(text, static_cast<size_t>(std::max(at, 0)));
 }
 
 bool openNativeAudioFilePicker(void* hwndRaw, std::filesystem::path& outPath) {
@@ -181,7 +277,9 @@ boo::M1TaipeiSliceEffect* createAndRegisterShowEffects(
 
     const boo::ShowVisualMode showMode = boo::resolveShowVisualMode(cueSheet, settings.playbackMode);
     auto fallbackVisual = std::make_unique<boo::M0TestVisualEffect>(d3d, true, false);
-    if (!settings.legacyM0Visual && showMode != boo::ShowVisualMode::LegacyM0) {
+    // The film's full HUD and mesh shaders require a hardware adapter. WARP uses
+    // the timeline-driven procedural visual for both explicit and automatic fallback.
+    if (!d3d.isWarp() && !settings.legacyM0Visual && showMode != boo::ShowVisualMode::LegacyM0) {
         auto primaryM1 = std::make_unique<boo::M1TaipeiSliceEffect>(
             d3d,
             initialSpec,
@@ -302,6 +400,25 @@ struct InteractiveExploreController {
     uint32_t marbleCount = 0;
     uint32_t marbleSpawnGen = 0;
     bool marblesMoving = false;
+    // Set once PhysX's runtime is ready (test-rig builds): the marbles then roll on PhysX, and the
+    // built-in solver below is the fallback.
+    boo::PhysxMarbles* physxMarbles = nullptr;
+    int physxMarbleWorld = -1; // 1 bathroom, 0 altar: the world the PhysX scene was last given
+
+    // Hands the marbles as they are now to PhysX, in the bathroom's world or the altar's.
+    void handMarblesToPhysx(bool inDawnBathroom) noexcept {
+        if (!physxMarbles) return;
+        std::array<boo::MarbleState, boo::InteractiveView::kMaxMarbles> states{};
+        for (uint32_t i = 0; i < marbleCount; ++i) {
+            const MarbleBody& m = marbles[i];
+            std::copy_n(m.pos, 3, states[i].position);
+            std::copy_n(m.vel, 3, states[i].velocity);
+            std::copy_n(m.rotQuat, 4, states[i].rotation);
+            states[i].radius = m.radius;
+        }
+        physxMarbles->reset(inDawnBathroom, states.data(), marbleCount);
+        physxMarbleWorld = inDawnBathroom ? 1 : 0;
+    }
 
     uint32_t accumFrame = 0;
     bool hasPrevState = false;
@@ -315,6 +432,31 @@ struct InteractiveExploreController {
 
     DragTarget dragTarget = DragTarget::None;
     WORD prevPadButtons = 0;
+
+    // The full-screen pill in the top-right corner: FULL SCREEN in a window, EXIT FULL SCREEN when
+    // full screen. It is always there while the HUD is up. With the HUD off it comes back whenever
+    // the mouse moves, and for a few seconds on entering full screen, so there is always an obvious
+    // way out. The present shader draws it; these are the same rectangle.
+    static constexpr float kFullscreenPillWindowed = 86.0f, kFullscreenPillExit = 150.0f;
+    float fullscreenPillOpacity = 0.0f;
+    float pillMouseX = -1.0f, pillMouseY = -1.0f;
+    bool pillWasFullscreen = false;
+    std::chrono::steady_clock::time_point pillShownUntil{};
+
+    void updateFullscreenPill(const boo::WindowInputSnapshot& snap, const boo::AppWindow& window, bool hudShown) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool moved = pillMouseX >= 0.0f &&
+                           (std::abs(snap.mouseX - pillMouseX) + std::abs(snap.mouseY - pillMouseY)) > 0.5f;
+        pillMouseX = snap.mouseX;
+        pillMouseY = snap.mouseY;
+        const bool entered = window.isFullscreen() && !pillWasFullscreen;
+        pillWasFullscreen = window.isFullscreen();
+        if (moved) pillShownUntil = std::max(pillShownUntil, now + std::chrono::milliseconds(3000));
+        if (entered) pillShownUntil = std::max(pillShownUntil, now + std::chrono::milliseconds(5000));
+        const float left = std::chrono::duration<float>(pillShownUntil - now).count();
+        // Fade over the last half second.
+        fullscreenPillOpacity = hudShown ? 1.0f : std::clamp(left * 2.0f, 0.0f, 1.0f);
+    }
     DynamicXInput xinput;
 
     void recomputeSunDir() noexcept {
@@ -367,37 +509,14 @@ struct InteractiveExploreController {
         for (auto& m : marbles) {
             m = MarbleBody{};
         }
+        if (physxMarbles) physxMarbles->reset(physxMarbleWorld == 1, nullptr, 0u);
         marbleCount = 0u;
         marblesMoving = false;
         hasPrevState = false;
     }
 
-    static float evalBasinU(float px, float pz) noexcept {
-        const float ax = std::abs(px + 0.180f) / 0.252f;
-        const float az = std::abs(pz - 6.245f) / 0.182f;
-        return std::pow(std::pow(ax, 2.38f) + std::pow(az, 2.38f), 1.0f / 2.38f);
-    }
-
-    static float evalCountertopHeight(float px, float pz) noexcept {
-        const float u = evalBasinU(px, pz);
-        if (u <= 0.135f) {
-            return 3.575f;
-        }
-        if (u <= 0.160f) {
-            const float s = (u - 0.135f) / 0.025f;
-            return 3.575f * (1.0f - s) + 3.569f * s;
-        }
-        if (u <= 0.985f) {
-            const float t = std::clamp((u - 0.160f) / 0.825f, 0.0f, 1.0f);
-            return 3.569f + 0.114f * std::pow(t, 2.32f);
-        }
-        if (u <= 1.065f) {
-            const float s = std::clamp((u - 0.985f) / 0.080f, 0.0f, 1.0f);
-            const float sm = s * s * (3.0f - 2.0f * s);
-            return 3.683f * (1.0f - sm) + 3.550f * sm;
-        }
-        return 3.550f;
-    }
+    static float evalBasinU(float px, float pz) noexcept { return boo::dawnBasinU(px, pz); }
+    static float evalCountertopHeight(float px, float pz) noexcept { return boo::dawnCountertopHeight(px, pz); }
 
     void spawnMarbles(bool inDawnBathroom) noexcept {
         static constexpr uint32_t kPalette[6] = {3u, 4u, 35u, 8u, 23u, 31u};
@@ -458,6 +577,7 @@ struct InteractiveExploreController {
             }
             for (int c = 0; c < 3; ++c) m.prevPos[c] = m.pos[c];
         }
+        handMarblesToPhysx(inDawnBathroom);
     }
 
     void stepMarbles(float wallDt, bool inDawnBathroom) noexcept {
@@ -467,6 +587,22 @@ struct InteractiveExploreController {
         }
         for (uint32_t i = 0; i < marbleCount; ++i) {
             for (int c = 0; c < 3; ++c) marbles[i].prevPos[c] = marbles[i].pos[c];
+        }
+        if (physxMarbles) {
+            // The film crossing into or out of the dawn bathroom changes the world they roll in.
+            if (physxMarbleWorld != (inDawnBathroom ? 1 : 0)) handMarblesToPhysx(inDawnBathroom);
+            std::array<boo::MarbleState, boo::InteractiveView::kMaxMarbles> states{};
+            const bool moving = physxMarbles->step(wallDt, states.data(), marbleCount);
+            for (uint32_t i = 0; i < marbleCount; ++i) {
+                MarbleBody& m = marbles[i];
+                std::copy_n(states[i].position, 3, m.pos);
+                std::copy_n(states[i].velocity, 3, m.vel);
+                std::copy_n(states[i].rotation, 4, m.rotQuat);
+            }
+            if (!moving)
+                for (uint32_t i = 0; i < marbleCount; ++i) std::copy_n(marbles[i].pos, 3, marbles[i].prevPos);
+            marblesMoving = moving;
+            return;
         }
 
         const float dt = std::clamp(wallDt, 0.001f, 0.033f) / 8.0f;
@@ -788,6 +924,10 @@ struct InteractiveExploreController {
         boo::AppWindow& window,
         const boo::AppSettings& settings,
         uint32_t hudMode,
+        bool hasHardwareTable,
+        std::array<bool, 5> graphicsAvailable,
+        bool volumeVisible,
+        bool benchmarkVisible,
         BooXInputGamepad& outPad,
         bool& outHasPad) {
         outHasPad = xinput.poll(outPad);
@@ -830,6 +970,8 @@ struct InteractiveExploreController {
         const float barMinY = (hudMode == 1u) ? (h - 60.0f * u) : (h - 104.0f * u);
         const float tlMinX  = 82.0f * u;
         const float tlSizeX = std::max(90.0f, w * 0.20f);
+        const float statsRight = tlMinX + tlSizeX + 44.0f * u + 90.0f * u;
+        const bool enginePillsVisible = w - 245.0f * u > statsRight;
 
         // Right-click on the 5 bottom-right Engine Pills toggles that single engine in place,
         // and right-click on Row 2 [TRK1..4] steps backward through the built-in soundtrack!
@@ -838,7 +980,7 @@ struct InteractiveExploreController {
                 snap.mouseX >= barMinX + 310.0f * u && snap.mouseX <= barMinX + 350.0f * u &&
                 snap.mouseY >= barMinY + 27.0f * u  && snap.mouseY <= barMinY + 49.0f * u) {
                 window.pushCommandFromWndProc(boo::TransportCommand::PrevMusicTrack);
-            } else if (settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
+            } else if (settings.showOverlay && enginePillsVisible && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
                 const float rightBase = w - 245.0f * u;
                 const float pTop = h - 34.0f * u;
                 if (snap.mouseY >= pTop && snap.mouseY <= pTop + 22.0f * u) {
@@ -860,11 +1002,116 @@ struct InteractiveExploreController {
             }
         }
 
+        updateFullscreenPill(snap, window, settings.showOverlay && hudMode != 3u);
+
         if (snap.lmbJustPressed) {
             bool consumed = false;
+            // These coordinates mirror the hardware table and the A/B selector in the present shader.
+            static constexpr boo::TransportCommand compareCommands[] = {
+                boo::TransportCommand::CompareRT, boo::TransportCommand::CompareCUDA, boo::TransportCommand::CompareTensor,
+                boo::TransportCommand::CompareCodec, boo::TransportCommand::CompareNPU, boo::TransportCommand::CloseComparison
+            };
+            const float pillW = (window.isFullscreen() ? kFullscreenPillExit : kFullscreenPillWindowed) * u;
+            const bool onFullscreenPill = hasHardwareTable && fullscreenPillOpacity > 0.2f && w >= 480.0f && h >= 300.0f &&
+                snap.mouseX >= w - 14.0f * u - pillW && snap.mouseX < w - 14.0f * u &&
+                snap.mouseY >= 14.0f * u && snap.mouseY < 32.0f * u;
+            if (onFullscreenPill) {
+                window.pushCommandFromWndProc(boo::TransportCommand::ToggleFullscreen);
+                consumed = true;
+            } else if (hasHardwareTable && settings.showOverlay && hudMode < 2u && w >= 480.0f && h >= 300.0f) {
+                const bool wide = hudMode == 0u && w >= 330.0f * u && (!benchmarkVisible || w >= 610.0f * u);
+                const float x = snap.mouseX / u - 14.0f;
+                const float y = snap.mouseY / u - (volumeVisible ? 44.0f : 14.0f);
+                const float tableW = wide ? 306.0f : 220.0f;
+                // Panel buttons mirror the present shader: [-] in the full header, [+]/[x] on the mini strip,
+                // and the HUD+ tab when hidden.
+                if (settings.dashboardPanel == 2u) {
+                    if (x >= 0 && x < 44.0f && y >= 0 && y < 16.0f) {
+                        window.pushCommandFromWndProc(boo::TransportCommand::DashboardFull);
+                        consumed = true;
+                    }
+                } else if (settings.dashboardPanel == 1u) {
+                    if (x >= 0 && x < 228.0f && y >= 0 && y < 62.0f) {
+                        const bool hideButton = x >= 211.0f && x < 225.0f && y >= 3.0f && y < 17.0f;
+                        window.pushCommandFromWndProc(hideButton ? boo::TransportCommand::DashboardHidden
+                                                                 : boo::TransportCommand::DashboardFull);
+                        consumed = true;
+                    }
+                } else if (x >= tableW - 20.0f && x < tableW - 6.0f && y >= 3.0f && y < 17.0f) {
+                    window.pushCommandFromWndProc(boo::TransportCommand::DashboardMini);
+                    consumed = true;
+                } else if (x >= 0 && x < tableW && y >= 19 && y < 119) {
+                    const auto row = static_cast<unsigned>((y - 19) / 20);
+                    const bool sanctuaryShortcut = row == 4 && x >= 32 && x < 55;
+                    window.pushCommandFromWndProc(sanctuaryShortcut ? boo::TransportCommand::SelectModeNPU : compareCommands[row]);
+                    consumed = true;
+                } else if (x >= 92 && x < 120 && y >= 1 && y < 19) {
+                    window.pushCommandFromWndProc(boo::TransportCommand::CycleAbCompareEngine);
+                    consumed = true;
+                } else if (x >= 4 && x < (wide ? 302 : 216) && y >= 139.f) {
+                    constexpr boo::TransportCommand featureCommands[] = {
+                        boo::TransportCommand::CyclePathTracing, boo::TransportCommand::CycleDlss,
+                        boo::TransportCommand::ToggleRayReconstruction, boo::TransportCommand::CycleFrameGeneration,
+                        boo::TransportCommand::CycleReflex};
+                    // Rows mirror the present shader: five graphics rows, the NEURAL heading, three neural rows.
+                    const float rowH = wide ? 22.f : 18.f;
+                    const float neuralTop = 139.f + 5.f * rowH;
+                    const float neuralRowsTop = neuralTop + 20.f;
+                    if (y < neuralTop) {
+                        const auto row = static_cast<unsigned>((y - 139.f) / rowH);
+                        if (row < graphicsAvailable.size()) {
+                            if (graphicsAvailable[row]) window.pushCommandFromWndProc(featureCommands[row]);
+                            consumed = true;
+                        }
+                    } else if (y < neuralRowsTop) {
+                        window.pushCommandFromWndProc(snap.shiftDown ? boo::TransportCommand::ToggleNeuralTensorCores
+                                                                     : boo::TransportCommand::ToggleNeuralRendering);
+                        consumed = true;
+                    } else if (const float workoutTop = neuralRowsTop + 3.f * rowH + 20.f + 36.f; y >= workoutTop + 20.f) {
+                        // FLOCK row: the name cycles the formation, the CAM pill toggles the bird camera.
+                        if (y >= workoutTop + 40.f && y < workoutTop + 60.f) {
+                            // PHYSX row: dial through the genres.
+                            window.pushCommandFromWndProc(boo::TransportCommand::CyclePhysxGenre);
+                            consumed = true;
+                        } else if (y < workoutTop + 40.f) {
+                            window.pushCommandFromWndProc(x >= tableW - 62.f ? boo::TransportCommand::ToggleBirdCam
+                                                                             : boo::TransportCommand::CycleFlockFormation);
+                            consumed = true;
+                        }
+                    } else if (y >= workoutTop) {
+                        // WORKOUT row: [-] and [+] (the rest of the row does nothing).
+                        if (y >= workoutTop + 3.f && y < workoutTop + 18.f && x >= tableW - 56.f && x < tableW - 20.f) {
+                            window.pushCommandFromWndProc(x < tableW - 38.f ? boo::TransportCommand::GpuWorkoutDown
+                                                                           : boo::TransportCommand::GpuWorkoutUp);
+                        }
+                        consumed = true;
+                    } else if (y < neuralRowsTop + 3.f * rowH) {
+                        constexpr boo::TransportCommand toggles[] = {boo::TransportCommand::ToggleNeuralShading,
+                            boo::TransportCommand::ToggleNeuralTextures, boo::TransportCommand::ToggleNeuralCache};
+                        constexpr boo::TransportCommand solos[] = {boo::TransportCommand::SoloNeuralShading,
+                            boo::TransportCommand::SoloNeuralTextures, boo::TransportCommand::SoloNeuralCache};
+                        const auto row = std::min(2u, static_cast<unsigned>((y - neuralRowsTop) / rowH));
+                        const bool onBadge = x >= (wide ? 238.f : 146.f);
+                        window.pushCommandFromWndProc((onBadge || snap.shiftDown) ? solos[row] : toggles[row]);
+                        consumed = true;
+                    }
+                }
+            } else if (hasHardwareTable && settings.showOverlay && hudMode == 2u && w >= 480.0f && h >= 300.0f) {
+                const auto lb = boo::computeLetterboxViewport16x9(window.clientWidth(), window.clientHeight());
+                const float scale = std::clamp(std::min(u, std::floor(lb.width / 480.0f)), 1.0f, 3.0f);
+                const float x = (snap.mouseX - lb.x) / scale - 14.0f;
+                const float y = (snap.mouseY - lb.y) / scale - 46.0f;
+                if (y >= 0 && y < 21 && x >= 0 && x < 5 * 43 + 23) {
+                    const auto tab = static_cast<unsigned>(x / 43);
+                    if (x - static_cast<float>(tab) * 43 < 40) {
+                        window.pushCommandFromWndProc(compareCommands[tab]);
+                        consumed = true;
+                    }
+                }
+            }
 
             // 1. Persistent Bottom Transport Bar (Timeline Scrubber + [< PRV] [PLAY/PAUS] [NEXT >] [F:FREE/FILM] + 5 SOLO Engine Pills)
-            if (settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
+            if (!consumed && settings.showOverlay && (hudMode == 0u || hudMode == 2u) && w >= 480.0f && h >= 300.0f) {
                 const float rightBase = w - 245.0f * u;
                 const float pTop = h - 34.0f * u;
                 const float pBot = pTop + 22.0f * u;
@@ -1045,6 +1292,10 @@ struct InteractiveExploreController {
         }
     }
 
+    bool wantsMouseExplore(const boo::WindowInputSnapshot& snap) const noexcept {
+        return !exploreActive && snap.rmbDown && (std::abs(snap.dragRmbDx) > 1.5f || std::abs(snap.dragRmbDy) > 1.5f);
+    }
+
     void updateFrame(
         const boo::WindowInputSnapshot& snap,
         const BooXInputGamepad& pad,
@@ -1062,7 +1313,7 @@ struct InteractiveExploreController {
         const boo::ShowVisualMode showMode = boo::resolveShowVisualMode(cueSheet, settings.playbackMode);
 
         // Right-mouse drag anywhere in the viewport immediately enters Explore mode & orbits look!
-        if (!exploreActive && snap.rmbDown && (std::abs(snap.dragRmbDx) > 1.5f || std::abs(snap.dragRmbDy) > 1.5f)) {
+        if (wantsMouseExplore(snap)) {
             enterExplore(showMode, clock, audio, audioClockReady, window, settings, ioCtx.moodIrisAngle);
             ioCtx.paused = (clock.state() == boo::TransportState::Paused);
         }
@@ -1254,6 +1505,57 @@ struct InteractiveExploreController {
 
 } // namespace
 
+// Bird camera: follows the flock from above and behind its centre, framing all of it, and turns
+// slowly round it. It drives the same camera override Explore uses, so the film, music and
+// lighting carry on underneath. Explore always wins while it is active.
+struct BirdCamera {
+    float blend = 0.0f;   // 0 = film camera, 1 = bird camera
+    float eye[3]{}, target[3]{};
+    bool placed = false;
+
+    void apply(bool wanted, const boo::FlockFocus& focus, float wallDt, boo::FrameContext& ctx) noexcept {
+        const bool exploreHasCamera = ctx.interactive.exploreActive || ctx.interactive.blendWeight > 0.0f;
+        if (exploreHasCamera) { blend = 0.0f; placed = false; return; }
+        const bool follow = wanted && focus.valid;
+        blend = std::clamp(blend + (follow ? wallDt / 0.9f : -wallDt / 0.6f), 0.0f, 1.0f);
+        if (focus.valid) {
+            constexpr float kFov = 0.82f;
+            // White egrets read best from well above, against the city. Dark kites vanish against
+            // it, so they are watched from nearer their own height, against the sky, as a kettle is.
+            const float kElevation = focus.species == 1u ? 0.62f : 0.14f;
+            const float distance = std::clamp(focus.radius / std::tan(kFov * 0.5f) * 1.05f + 3.0f, 10.0f, 80.0f);
+            const float azimuth = 0.9f + 0.07f * static_cast<float>(ctx.filmTimeSeconds);
+            const float want[3] = {focus.center[0] + distance * std::sin(azimuth) * std::cos(kElevation),
+                                   focus.center[1] + distance * std::sin(kElevation),
+                                   focus.center[2] + distance * std::cos(azimuth) * std::cos(kElevation)};
+            float jump = 0.0f;
+            for (int c = 0; c < 3; ++c) jump += (want[c] - eye[c]) * (want[c] - eye[c]);
+            // A new act or a seek moves the flock across the city: cut, do not fly through buildings.
+            const float k = (!placed || jump > 45.0f * 45.0f) ? 1.0f : 1.0f - std::exp(-wallDt * 3.5f);
+            for (int c = 0; c < 3; ++c) {
+                eye[c] += (want[c] - eye[c]) * k;
+                target[c] += (focus.center[c] - target[c]) * k;
+            }
+            placed = true;
+        }
+        if (blend <= 0.0f || !placed) return;
+        ctx.interactive.blendWeight = blend * blend * (3.0f - 2.0f * blend);
+        for (int c = 0; c < 3; ++c) {
+            ctx.interactive.eye[c] = eye[c];
+            ctx.interactive.target[c] = target[c];
+            ctx.interactive.up[c] = (c == 1) ? 1.0f : 0.0f;
+        }
+        ctx.interactive.fovYRadians = 0.82f;
+    }
+};
+
+#ifdef BOO_HAS_LINALG
+// Load the bundled D3D12 Agility SDK runtime (preview 1.721, Shader Model 6.10) from .\D3D12\.
+// Only test-rig builds configured with ENABLE_LINALG_PREVIEW carry it; Store builds use the in-box runtime.
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 721; }
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
+#endif
+
 int main(int argc, char** argv) {
     using namespace boo;
 
@@ -1305,14 +1607,17 @@ int main(int argc, char** argv) {
         AssetManifest manifest{};
         ValidationReport manifestRep{};
         const auto resolvedManifest = resolveResourcePath(settings.manifestPath);
-        if (!loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
+        const auto repoRoot = std::filesystem::absolute(resolvedManifest).parent_path().parent_path();
+        if (loadAssetManifestFromFile(resolvedManifest, manifest, manifestRep)) {
+            verifyManifestAssetFiles(manifest, repoRoot, manifestRep);
+        }
+        if (!manifestRep.valid) {
             std::cerr << "[FAIL] Asset manifest validation failed (" << resolvedManifest.string() << "):\n";
             for (const auto& iss : manifestRep.issues) {
                 std::cerr << "  - [" << iss.code << "] " << iss.message << "\n";
             }
             return 1;
         }
-        const auto repoRoot = resolvedManifest.parent_path().parent_path();
         const std::vector<std::filesystem::path> defaultCues = {
             "assets/cues/film_360s.json",
             "assets/cues/m2_trilogy_180s.json",
@@ -1324,12 +1629,12 @@ int main(int argc, char** argv) {
         };
         bool allValid = true;
         for (const auto& cf : defaultCues) {
-            const auto resolvedCue = resolveResourcePath(cf);
+            const auto resolvedCue = repoRoot / cf;
             CueSheet sheet{};
             ValidationReport rep{};
             loadCueSheetFromFile(resolvedCue, sheet, rep);
             if (rep.valid) {
-                validateCueSheetAgainstManifest(sheet, manifest, repoRoot, rep);
+                validateCueSheetAgainstManifest(sheet, manifest, {}, rep);
             }
             if (rep.valid) {
                 std::cout << "[PASS] " << resolvedCue.filename().string()
@@ -1396,6 +1701,8 @@ int main(int argc, char** argv) {
     pflags.enableSignalHijack = settings.enableSignalHijack;
     pflags.forceWarp = settings.forceWarp;
 
+    // Tensor-core neural rendering (ENABLE_LINALG_PREVIEW builds) must opt in before any device exists.
+    enableNeuralPreviewFeatures();
     const SystemCapabilities caps = probeSystemCapabilities(pflags);
     FallbackOrchestrator orchestrator;
     for (size_t i = 0; i < kEngineKindCount; ++i) {
@@ -1505,11 +1812,14 @@ int main(int argc, char** argv) {
     const std::string titleExplore = titleWord("win.explore", L"Explore");
     const std::string titleWipe = titleWord("win.wipe", L"Wipe");
     const std::string titleLamp = titleWord("win.lamp", L"Lamp");
+    const std::string titleDetail = titleWord("win.effects_detail", L"Effects detail");
 
     // 3. Initialize 48 kHz WASAPI Audio Engine or silent monotonic clock fallback
     AudioEngine audio;
     bool audioClockReady = false;
     if (!settings.forceSilentClock) {
+        // Decode during renderer warm-up while keeping the soundtrack at its opening sample.
+        audio.setPaused(true);
         audio.setMasterVolume(settings.masterVolume);
         audio.setMuted(settings.mute);
         audio.setEdition(settings.edition);
@@ -1547,10 +1857,10 @@ int main(int argc, char** argv) {
         }
         if (!audio.hasExternalAudioFile()) {
             const std::array<std::filesystem::path, AudioEngine::kBundledTrackCount> ostPaths = {
-                resolveResourcePath("assets/audio/01_neon_orchid.mp3"),
-                resolveResourcePath("assets/audio/02_acid_lotus.mp3"),
-                resolveResourcePath("assets/audio/03_velvet_cipher.mp3"),
-                resolveResourcePath("assets/audio/04_glass_dragon.mp3")
+                resolveResourcePath("assets/audio/01_neon_orchid.flac"),
+                resolveResourcePath("assets/audio/02_acid_lotus.flac"),
+                resolveResourcePath("assets/audio/03_velvet_cipher.flac"),
+                resolveResourcePath("assets/audio/04_glass_dragon.flac")
             };
             audio.startBundledSoundtrack(ostPaths, 1u);
             if (audio.hasBundledSoundtrack()) {
@@ -1589,6 +1899,10 @@ int main(int argc, char** argv) {
         settings.injectNpuTimeout,
         !settings.forceWarp);
 
+    // Start-up works for seconds at a time without reading its message queue. Keep Windows from
+    // swapping in a frozen "Not Responding" copy of the window, which would hide the loading bar.
+    DisableProcessWindowsGhosting();
+
     // 4. Create Win32 Window + Triple-Buffered D3D12 SwapChain
     AppWindow window;
     if (!window.create(settings.title, settings.width, settings.height, settings.fullscreen, settings.noActivateWindow)) {
@@ -1600,6 +1914,22 @@ int main(int argc, char** argv) {
     window.showLoading();
     (void)window.pumpMessages();
 
+    // A real loading bar. It counts bytes: every asset read into memory, each checked against its
+    // SHA-256 in the manifest, and GPU memory as it fills. Loaders and start-up stages report in.
+    {
+        StartupProgress::Setup progress;
+        progress.memoryFile = startupMemoryFile();
+        for (const char* folder : {"assets/meshes", "assets/textures", "assets/shaders", "assets/neural"}) {
+            progress.assetFolders.push_back(resolveResourcePath(folder));
+        }
+        for (const auto& asset : manifest.assets) progress.digests.emplace(asset.path, asset.sha256);
+        progress.onChange = [&window](const StartupProgressView& v) {
+            window.setLoadingProgress(v.fraction, loadingDetail(v));
+        };
+        StartupProgress::instance().begin(std::move(progress));
+        startupCheckpoint();
+    }
+
     D3D12Context d3d;
     std::string d3dInitErr;
     if (!d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(),
@@ -1610,17 +1940,42 @@ int main(int argc, char** argv) {
         audio.shutdown();
         return 1;
     }
+    StartupProgress::instance().setGpuProbe([&d3d] { return d3d.queryEstimatedAppVramBytes(); });
+    // The PhysX suite's shared runtime. It starts in the background the first time a genre needs it.
+    PhysxSuite physxRuntime(d3d.adapterLuidLow(), d3d.adapterLuidHigh());
+    std::unique_ptr<PhysxRigidGenre> physxRigid; // exists only while the rigid genre is dialled in
+    std::unique_ptr<PhysxMarbles> physxMarbles;  // the Explore marbles' scene, once the runtime is ready
+    std::unique_ptr<PhysxSoftGenre> physxSoft;   // exists only while the soft-body genre is dialled in
+    std::unique_ptr<PhysxFluidGenre> physxFluid; // likewise for fluids
+    if (physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart(); // loads beside the scene; see below
+    startupCheckpoint();
 
     (void)window.pumpMessages();
+
+    // Live GPU sensors (NVML via nvml.dll at runtime); N/A on non-NVIDIA GPUs.
+    GpuSensors gpuSensors;
+    if (!gpuSensors.start(d3d.adapterName(), d3d.adapterLuidLow(), d3d.adapterLuidHigh(), !settings.disableCUDA && !d3d.isWarp())) {
+        BOO_LOG_INFO("Sensors", "GPU sensors unavailable: " + gpuSensors.unavailableReason());
+    }
 
     // 5. Initialize cue-routed primary + embedded-safe-fallback visual effects
     M1TaipeiSliceEffect* liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, startupSpec, orchestrator);
 
+    startupCheckpoint();
     (void)window.pumpMessages();
     const HardwareResult visualInit = orchestrator.initializeEffects(false);
+    startupCheckpoint();
+    if (settings.physxRouteTest) physxRuntime.requestStart();
+    if (physxGenreInfo(settings.physxGenre).usesPhysxSdk || settings.physxRouteTest) {
+        // Opening on a PhysX genre: the runtime loaded alongside the scene; let it finish inside the
+        // loading screen, so its libraries are on the bar and the first frame does not wait for them.
+        physxRuntime.waitUntilSettled(30000);
+        startupCheckpoint();
+    }
     (void)window.pumpMessages();
     BOO_LOG_INFO("Render", std::string("Active visual backend: ") + orchestrator.activeEffectName() +
                            " [" + visualInit.diagnosticCode + "]");
+    gpuSensors.resetSummary(); // Run statistics cover playback, not loading
 
     SpoutSender spoutSender;
     if (settings.enableSpout) {
@@ -1762,8 +2117,13 @@ int main(int argc, char** argv) {
     };
 
     // 6. Start master timeline clock & main render loop
+    int64_t prerollAudioSamples = 0;
+    if (audioClockReady && audio.readPlayedSamples48k(prerollAudioSamples)) {
+        BOO_LOG_INFO("Audio", "Timeline samples presented during graphics warm-up: " + std::to_string(prerollAudioSamples));
+    }
     clock.start(audioClockReady, settings.loop || isSoloOrLoopMode);
     if(settings.startSeconds>0) { clock.seekToSeconds(settings.startSeconds); if(audioClockReady)audio.resetPhase(static_cast<uint64_t>(clock.currentSample())); }
+    if (audioClockReady) audio.setPaused(false);
     const int64_t initialSample = clock.currentSample();
     size_t lastActIdx = SIZE_MAX;
     orchestrator.onSceneBoundary(0, clock.currentSeconds(), false);
@@ -1780,6 +2140,7 @@ int main(int argc, char** argv) {
     gpuFrameSamplesMs.reserve(4096);
 
     uint64_t peakVramBytes = 0;
+    uint32_t maxFramesPresentedPerRender = 0;
     uint64_t frameCounter = 0;
     AudioReactiveFollower audioReactive;
     double smoothFps = 60.0;
@@ -1802,8 +2163,27 @@ int main(int argc, char** argv) {
     auto volumeVisibleUntil = wallStart;
     std::array<float, 16> recentGpuMs{};
     uint32_t hudMode = settings.showOverlay ? 0u : 3u;
+    uint32_t hudBeforeComparison = hudMode;
     AbCompareEngine abCompareEngine = AbCompareEngine::RT;
+    struct NpuViewReturn {
+        PlaybackMode mode;
+        AbCompareEngine comparison;
+        uint32_t hud, solo, aov;
+        float split, cameraBlend;
+        int64_t sample;
+        SoloLoopRange loopRange{};
+        bool loop, customRange, paused, ended, exploring;
+    };
+    std::optional<NpuViewReturn> npuViewReturn;
     InteractiveExploreController interactiveCtrl{};
+    BirdCamera birdCamera{};
+    // The workout dial releases birds in batches and never takes the frame rate under the floor.
+    WorkoutGovernor workoutGovernor{};
+    uint32_t workoutLimit = kMaxWorkoutBirds; // lowered if the machine cannot hold that many
+    uint32_t workoutLoggedBirds = 0;
+    uint32_t workoutTraceBirds = 0;
+    bool workoutLoggedFloor = false;
+    std::optional<std::chrono::steady_clock::time_point> previousFrameStart;
     interactiveCtrl.studioDrawerOpen = !settings.noActivateWindow;
     interactiveCtrl.recomputeSunDir();
     if (settings.initialExplorePreset >= 1u && settings.initialExplorePreset <= 6u) {
@@ -1814,12 +2194,60 @@ int main(int argc, char** argv) {
             resolveShowVisualMode(cueSheet, settings.playbackMode), clock, audio, audioClockReady, window, settings, 0.5f);
     }
 
+    auto leaveNpuView = [&]() {
+        if (!npuViewReturn) return;
+        const auto previous = *npuViewReturn;
+        npuViewReturn.reset();
+        hudMode = previous.hud;
+        settings.showOverlay = hudMode != 3u;
+        settings.playbackMode = previous.mode;
+        abCompareEngine = previous.comparison;
+        orchestrator.setAbCompareEngine(abCompareEngine);
+        interactiveCtrl.soloEngine = previous.solo;
+        interactiveCtrl.aovMode = previous.aov;
+        interactiveCtrl.abSplitRatio = previous.split;
+        interactiveCtrl.exploreActive = previous.exploring;
+        interactiveCtrl.blendT = previous.cameraBlend;
+        window.setExploreKeyCapture(previous.exploring);
+        modeRange = previous.loopRange;
+        if (previous.customRange) clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+        else clock.clearLoopRange();
+        clock.setLoopEnabled(previous.loop);
+        clock.seekToSample(previous.sample);
+        if (previous.paused) clock.pause();
+        else clock.resume();
+        if (audioClockReady) {
+            audio.resetPhase(static_cast<uint64_t>(previous.sample));
+            audio.setExploreAmbient(previous.exploring);
+            audio.setPaused(previous.paused || previous.ended);
+        }
+        interactiveCtrl.hasPrevState = false;
+        orchestrator.resetTo(clock.currentSeconds());
+    };
+    auto openComparison = [&](AbCompareEngine engine) {
+        if (npuViewReturn && engine != AbCompareEngine::NPU) leaveNpuView();
+        if (hudMode != 2u) hudBeforeComparison = hudMode;
+        hudMode = 2u;
+        settings.showOverlay = true;
+        abCompareEngine = engine;
+        orchestrator.setAbCompareEngine(engine);
+        BOO_LOG_INFO("Render", std::string("A/B comparison: ") + toString(engine));
+    };
+    auto closeComparison = [&]() {
+        if (npuViewReturn) {
+            leaveNpuView();
+        } else {
+            hudMode = hudBeforeComparison;
+            settings.showOverlay = hudMode != 3u;
+        }
+        BOO_LOG_INFO("Render", "Closed A/B comparison; HUD=" + std::to_string(hudMode));
+    };
     auto applyAllEnginesRestored = [&]() {
+        leaveNpuView();
         interactiveCtrl.soloEngine = 0u;
         settings.disableRT = false;
         settings.disableCUDA = false;
         settings.disableTensor = false;
-        settings.disableNPU = false;
         settings.disableNVENC = false;
         settings.enableSignalHijack = false;
         orchestrator.setDisableRt(false);
@@ -1827,7 +2255,6 @@ int main(int argc, char** argv) {
         orchestrator.setDisableTensor(false);
         orchestrator.setDisableCodec(false);
         orchestrator.setCodecSignalHijackActive(false);
-        asyncDirector.setDisableNpu(!findQualityPresetSpec(presets, qualityLadder.currentPreset()).allowNpu);
         settings.playbackMode = PlaybackMode::FullFilm;
         clock.clearLoopRange();
         clock.setLoopEnabled(settings.loop);
@@ -1888,14 +2315,71 @@ int main(int argc, char** argv) {
         window.showGraphicsFailure(recoveryError);
     };
 
+    if (settings.physxRouteTest) {
+        // The bird-route sweep: every bird the film can show, through both cities' buildings.
+        int routeExit = 0;
+        if (!liveM1Ptr || physxRuntime.info().state != PhysxRuntimeState::Ready) {
+            BOO_LOG_ERROR("RouteTest", "Bird-route sweep needs the film renderer and the PhysX runtime: " + physxRuntime.info().reason);
+            routeExit = 2;
+        }
+        for (uint32_t city : {1u, 2u}) {
+            if (routeExit == 2) break;
+            const auto buildings = liveM1Ptr->buildCityCollision(city);
+            const BirdRouteReport r = sweepBirdRoutes(physxRuntime, buildings, city);
+            const char* name = city == 1u ? "Shenzhen" : "Taipei";
+            if (!r.ran) {
+                BOO_LOG_ERROR("RouteTest", std::string(name) + ": did not run: " + r.reason);
+                routeExit = 2;
+                continue;
+            }
+            BOO_LOG_INFO("RouteTest", std::string(name) + ": " + std::to_string(r.samples) + " bird samples against " +
+                                      std::to_string(r.buildings) + " buildings; authored birds within the clearance " +
+                                      std::to_string(r.authoredHits) + " times, workout birds " + std::to_string(r.workoutHits) + " times; tallest building top " + std::to_string(r.tallest) + " m at (" + std::to_string(r.tallestAt[0]) + ", " + std::to_string(r.tallestAt[1]) + ").");
+            for (const auto& [flock, hits] : r.hitsByFlock) {
+                const auto lift = r.liftByFlock.find(flock);
+                BOO_LOG_WARN("RouteTest", std::string(name) + ": " + flock + ": " + std::to_string(hits) + " samples within " +
+                                          std::to_string(static_cast<int>(kBirdBuildingClearance)) + " m of a building" +
+                                          (lift != r.liftByFlock.end() ? ", needs to fly " + std::to_string(lift->second) + " m higher" : std::string()));
+            }
+            if (r.authoredClosest < 1e8f)
+                BOO_LOG_INFO("RouteTest", std::string(name) + ": the film's own birds come within " + std::to_string(r.authoredClosest) +
+                                          " m of a building at the closest");
+            for (const auto& n : r.nudges)
+                BOO_LOG_WARN("RouteTest", std::string(name) + ": film bird " + std::to_string(n.bird) +
+                                          (n.found ? " clears every building by moving " + std::to_string(n.across) + " m across and " +
+                                                         std::to_string(n.above) + " m up (kTaipeiFlockNudge in src/render/bird_flight.hpp)"
+                                                   : std::string(" has no move within 6 m across and 12 m up that clears it")));
+            for (const auto& h : r.examples) {
+                char line[220]{};
+                std::snprintf(line, sizeof(line), "%s: %s at %.1f s, (%.1f %.1f %.1f)", name, h.who.c_str(), h.filmTime,
+                              h.position[0], h.position[1], h.position[2]);
+                BOO_LOG_WARN("RouteTest", line);
+            }
+            if (r.workoutHits) routeExit = 1; // the film's own birds are reported, never failed: they are not moved
+        }
+        runtimeExitCode = routeExit;
+        running = false;
+    }
+
     while (running && window.pumpMessages()) {
         const auto cpuFrameT0 = std::chrono::steady_clock::now();
         bool manualPresetChanged = false;
 
+        d3d.beginSimulation(settings.frameGeneration, settings.reflex);
+        const auto presentation = d3d.frameGenerationStats();
+        maxFramesPresentedPerRender = std::max(maxFramesPresentedPerRender, presentation.framesActuallyPresented);
         const WindowInputSnapshot winInput = window.consumeInputSnapshot();
         BooXInputGamepad padState{};
         bool hasGamepad = false;
-        interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode, padState, hasGamepad);
+        interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode,
+            liveM1Ptr && !orchestrator.isUsingFallbackEffect(),
+            {liveM1Ptr && liveM1Ptr->pathTracingState() != RendererFeatureState::Unavailable,
+             liveM1Ptr && liveM1Ptr->dlssState() != RendererFeatureState::Unavailable,
+             liveM1Ptr && liveM1Ptr->rayReconstructionState() != RendererFeatureState::Unavailable,
+             presentation.state != RendererFeatureState::Unavailable, presentation.reflexState != RendererFeatureState::Unavailable},
+            std::chrono::steady_clock::now() < volumeVisibleUntil,
+            benchRunning.load(std::memory_order_relaxed) || benchCompleted.load(std::memory_order_relaxed),
+            padState, hasGamepad);
 
         // Drag-and-drop custom MP3/WAV/FLAC/M4A soundtrack (or MP4 Signal Hijack video) directly onto window!
         std::wstring droppedFile;
@@ -1923,6 +2407,7 @@ int main(int argc, char** argv) {
             }
         }
         if (interactiveCtrl.pendingScrubRatio >= 0.0f) {
+            leaveNpuView();
             if (interactiveCtrl.exploreActive) {
                 interactiveCtrl.exploreActive = false;
                 interactiveCtrl.activePreset = 0;
@@ -1993,6 +2478,7 @@ int main(int argc, char** argv) {
                     audio.setPaused(clock.state() == TransportState::Paused || clock.state() == TransportState::Ended);
                     break;
                 case TransportCommand::Restart: {
+                    leaveNpuView();
                     if (interactiveCtrl.exploreActive) {
                         interactiveCtrl.exploreActive = false;
                         interactiveCtrl.activePreset = 0;
@@ -2010,6 +2496,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case TransportCommand::NextAct: {
+                    leaveNpuView();
                     if (interactiveCtrl.exploreActive) {
                         const uint32_t nxtP = (interactiveCtrl.activePreset % 6u) + 1u;
                         interactiveCtrl.applyHeroPreset(
@@ -2034,6 +2521,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case TransportCommand::PrevAct: {
+                    leaveNpuView();
                     if (interactiveCtrl.exploreActive) {
                         const uint32_t prvP = (interactiveCtrl.activePreset <= 1u) ? 6u : (interactiveCtrl.activePreset - 1u);
                         interactiveCtrl.applyHeroPreset(
@@ -2065,6 +2553,92 @@ int main(int argc, char** argv) {
                     settings.mute = !audio.isMuted();
                     audio.setMuted(settings.mute);
                     break;
+                case TransportCommand::CycleEffectsDetail:
+                    settings.effectsDetail = (settings.effectsDetail + 1u) % 3u;
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                case TransportCommand::CyclePathTracing:
+                    settings.pathTracing = static_cast<PathTracingLevel>((static_cast<unsigned>(settings.pathTracing) + 1u) % 4u);
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                case TransportCommand::CycleDlss:
+                    settings.dlssMode = static_cast<DlssMode>((static_cast<unsigned>(settings.dlssMode) + 1u) % 4u);
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                case TransportCommand::ToggleRayReconstruction:
+                    settings.rayReconstruction = !settings.rayReconstruction;
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                case TransportCommand::CycleFrameGeneration:
+                    settings.frameGeneration = nextFrameGenerationMode(settings.frameGeneration, presentation.maxGeneratedPerFrame);
+                    break;
+                case TransportCommand::CycleReflex:
+                    settings.reflex = static_cast<ReflexMode>((static_cast<unsigned>(settings.reflex) + 1u) % 3u);
+                    break;
+                case TransportCommand::ToggleNeuralRendering:
+                    settings.neural.enabled = !settings.neural.enabled;
+                    if (!settings.neural.enabled) settings.neural.solo = NeuralSolo::None; // Back to the untouched frame
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Neural", std::string("Neural rendering ") + (settings.neural.enabled ? "ON" : "OFF"));
+                    break;
+                case TransportCommand::CycleFlockFormation: {
+                    static constexpr const char* kNames[] = {"extended cluster", "vee", "echelon", "column", "front", "kettle"};
+                    settings.flockFormation = (settings.flockFormation + 1u) % 6u;
+                    // A formation with no flock shows nothing: start a small one so the change is visible.
+                    if (settings.gpuWorkout == 0u) settings.gpuWorkout = 3u;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Workout", std::string("Flock formation: ") + kNames[settings.flockFormation]);
+                    break;
+                }
+                case TransportCommand::CyclePhysxGenre:
+                    settings.physxGenre = nextPhysxGenre(settings.physxGenre);
+                    BOO_LOG_INFO("PhysX", "PhysX genre: " + std::string(physxGenreInfo(settings.physxGenre).label));
+                    break;
+                case TransportCommand::ToggleBirdCam:
+                    settings.birdCam = !settings.birdCam;
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Workout", std::string("Bird camera ") + (settings.birdCam ? "ON" : "OFF"));
+                    break;
+                case TransportCommand::GpuWorkoutDown:
+                case TransportCommand::GpuWorkoutUp:
+                    settings.gpuWorkout = cmd == TransportCommand::GpuWorkoutUp ? std::min(settings.gpuWorkout + 1u, 10u)
+                                                                                : (settings.gpuWorkout > 0u ? settings.gpuWorkout - 1u : 0u);
+                    interactiveCtrl.hasPrevState = false;
+                    BOO_LOG_INFO("Workout", "GPU workout level " + std::to_string(settings.gpuWorkout) + ": asks for " +
+                                            std::to_string(workoutBirdCount(settings.gpuWorkout)) + " birds");
+                    break;
+                case TransportCommand::CycleDashboardPanel:
+                    settings.dashboardPanel = (settings.dashboardPanel + 1u) % 3u;
+                    break;
+                case TransportCommand::DashboardFull: settings.dashboardPanel = 0u; break;
+                case TransportCommand::DashboardMini: settings.dashboardPanel = 1u; break;
+                case TransportCommand::DashboardHidden: settings.dashboardPanel = 2u; break;
+                case TransportCommand::ToggleNeuralTensorCores:
+                    settings.neural.tensorCores = !settings.neural.tensorCores;
+                    BOO_LOG_INFO("Neural", std::string("Neural networks on ") + (settings.neural.tensorCores ? "tensor cores" : "shader cores"));
+                    break;
+                case TransportCommand::ToggleNeuralShading:
+                case TransportCommand::ToggleNeuralTextures:
+                case TransportCommand::ToggleNeuralCache: {
+                    bool& feature = cmd == TransportCommand::ToggleNeuralShading ? settings.neural.shading
+                                  : (cmd == TransportCommand::ToggleNeuralTextures ? settings.neural.textures
+                                                                                  : settings.neural.radianceCache);
+                    // With the suite off, clicking a row turns the suite on with that network running.
+                    if (!settings.neural.enabled) { settings.neural.enabled = true; feature = true; }
+                    else feature = !feature;
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                }
+                case TransportCommand::SoloNeuralShading:
+                case TransportCommand::SoloNeuralTextures:
+                case TransportCommand::SoloNeuralCache: {
+                    const NeuralSolo pick = cmd == TransportCommand::SoloNeuralShading ? NeuralSolo::Shading
+                                          : (cmd == TransportCommand::SoloNeuralTextures ? NeuralSolo::Textures
+                                                                                        : NeuralSolo::RadianceCache);
+                    settings.neural.solo = settings.neural.solo == pick ? NeuralSolo::None : pick;
+                    interactiveCtrl.hasPrevState = false;
+                    break;
+                }
                 case TransportCommand::CycleQualityPreset: {
                     const uint8_t nextP = (static_cast<uint8_t>(qualityLadder.currentPreset()) + 1u) % 4u;
                     qualityLadder.setPreset(static_cast<QualityPresetId>(nextP));
@@ -2080,10 +2654,14 @@ int main(int argc, char** argv) {
                     settings.showCaptions = !settings.showCaptions;
                     BOO_LOG_INFO("Show", std::string("Captions [K]: ") + (settings.showCaptions ? "ON" : "OFF"));
                     break;
-                case TransportCommand::ToggleOverlay:
-                    hudMode = (hudMode + 1u) % 4u;
+                case TransportCommand::ToggleOverlay: {
+                    const uint32_t nextHud = (hudMode + 1u) % 4u;
+                    leaveNpuView();
+                    if (hudMode == 1u) hudBeforeComparison = hudMode;
+                    hudMode = nextHud;
                     settings.showOverlay = hudMode != 3u;
                     break;
+                }
                 case TransportCommand::TriggerBenchSweep:
                     appliedBenchBadges = false;
                     startBackgroundBenchSweep();
@@ -2105,8 +2683,7 @@ int main(int argc, char** argv) {
                     break;
                 case TransportCommand::ToggleNpuRuntime:
                     settings.disableNPU = !settings.disableNPU;
-                    asyncDirector.setDisableNpu(settings.disableNPU || !findQualityPresetSpec(presets, qualityLadder.currentPreset()).allowNpu);
-                    BOO_LOG_INFO("NPU", std::string("Runtime NPU director [U]: ") + (settings.disableNPU ? "SCRIPTED DIRECTOR FALLBACK" : "OPENVINO NEURAL DIRECTOR ENABLED"));
+                    BOO_LOG_INFO("NPU", std::string("Neural director preference [U]: ") + (settings.disableNPU ? "OFF" : "ON"));
                     break;
                 case TransportCommand::ToggleCodecRuntime:
                     if (hudMode == 2u && abCompareEngine == AbCompareEngine::Codec) {
@@ -2132,17 +2709,28 @@ int main(int argc, char** argv) {
                     }
                     break;
                 case TransportCommand::CycleAbCompareEngine:
-                    if (hudMode != 2u) {
-                        hudMode = 2u;
-                        settings.showOverlay = true;
-                    } else {
-                        abCompareEngine = static_cast<AbCompareEngine>((static_cast<uint8_t>(abCompareEngine) + 1u) % 4u);
-                    }
-                    orchestrator.setAbCompareEngine(abCompareEngine);
-                    BOO_LOG_INFO("Render", std::string("A/B Split Compare [A]: ") + toString(abCompareEngine));
+                    openComparison(hudMode == 2u ? static_cast<AbCompareEngine>((static_cast<uint8_t>(abCompareEngine) + 1u) % 5u) : abCompareEngine);
+                    break;
+                case TransportCommand::CompareRT:
+                case TransportCommand::CompareCUDA:
+                case TransportCommand::CompareTensor:
+                case TransportCommand::CompareCodec:
+                case TransportCommand::CompareNPU:
+                    openComparison(static_cast<AbCompareEngine>(int(cmd) - int(TransportCommand::CompareRT)));
+                    break;
+                case TransportCommand::CloseComparison:
+                    if (hudMode == 2u) closeComparison();
                     break;
                 case TransportCommand::ToggleFullscreen:
                     window.toggleBorderlessFullscreen();
+                    BOO_LOG_INFO("Window", window.isFullscreen() ? "Full screen" : "Windowed");
+                    break;
+                case TransportCommand::LeaveFullscreen:
+                    // Idempotent, so a second Esc before this one lands cannot bounce back in.
+                    if (window.isFullscreen()) {
+                        window.toggleBorderlessFullscreen();
+                        BOO_LOG_INFO("Window", "Windowed (Esc)");
+                    }
                     break;
                 case TransportCommand::ToggleSpoutRuntime:
                     settings.enableSpout = !spoutSender.isActive();
@@ -2180,18 +2768,77 @@ int main(int argc, char** argv) {
                         }
                     }
                     break;
+                case TransportCommand::SoloEngineNPU:
+                case TransportCommand::SelectModeNPU: {
+                    if (npuViewReturn) {
+                        leaveNpuView();
+                        break;
+                    }
+                    SoloLoopRange comparisonRange{};
+                    if (!resolvePlaybackLoopRange(cueSheet, PlaybackMode::SoloNPU, comparisonRange)) {
+                        if (hudMode == 2u && abCompareEngine == AbCompareEngine::NPU) closeComparison();
+                        else openComparison(AbCompareEngine::NPU);
+                        break;
+                    }
+                    NpuViewReturn previous{};
+                    previous.mode = settings.playbackMode;
+                    previous.comparison = abCompareEngine;
+                    previous.hud = hudMode;
+                    previous.solo = interactiveCtrl.soloEngine;
+                    previous.aov = interactiveCtrl.aovMode;
+                    previous.split = interactiveCtrl.abSplitRatio;
+                    previous.cameraBlend = interactiveCtrl.blendT;
+                    previous.exploring = interactiveCtrl.exploreActive;
+                    previous.sample = clock.currentSample();
+                    previous.loop = clock.loopEnabled();
+                    previous.customRange = clock.getLoopRange(previous.loopRange.startSample, previous.loopRange.endSample);
+                    previous.paused = clock.state() == TransportState::Paused;
+                    previous.ended = clock.state() == TransportState::Ended;
+                    npuViewReturn = previous;
+
+                    // Both sides share the current GPU settings, camera and soundtrack.
+                    interactiveCtrl.soloEngine = 3u;
+                    interactiveCtrl.abSplitRatio = 0.5f;
+                    interactiveCtrl.blendT = 0.0f;
+                    interactiveCtrl.exploreActive = false;
+                    interactiveCtrl.aovMode = 0u;
+                    interactiveCtrl.hasPrevState = false;
+                    window.setExploreKeyCapture(false);
+                    hudMode = 2u;
+                    settings.showOverlay = true;
+                    abCompareEngine = AbCompareEngine::NPU;
+                    orchestrator.setAbCompareEngine(abCompareEngine);
+                    settings.playbackMode = PlaybackMode::SoloNPU;
+                    modeRange = comparisonRange;
+                    clock.setLoopRange(modeRange.startSample, modeRange.endSample);
+                    clock.setLoopEnabled(true);
+                    const int64_t reveal = modeRange.startSample + TimelineClock::secondsToSamples(18.0, cueSheet.sampleRate);
+                    clock.seekToSample(reveal < modeRange.endSample ? reveal : modeRange.startSample);
+                    clock.resume();
+                    // The dedicated comparison is an explicit request to test the director.
+                    // The user's NPU preference still applies, even after another hardware solo.
+                    asyncDirector.setDisableNpu(settings.disableNPU);
+                    asyncDirector.retryIfDegraded();
+                    if (audioClockReady) {
+                        audio.resetPhase(static_cast<uint64_t>(clock.currentSample()));
+                        audio.setExploreAmbient(false);
+                        audio.setPaused(false);
+                    }
+                    orchestrator.resetTo(clock.currentSeconds());
+                    BOO_LOG_INFO("Show", "Director comparison [4]: same scene and camera, active director versus scripted controls.");
+                    break;
+                }
                 case TransportCommand::SelectModeFull:
                 case TransportCommand::SelectModeRT:
                 case TransportCommand::SelectModeTensor:
-                case TransportCommand::SelectModeNPU:
                 case TransportCommand::SelectModeCUDA:
                 case TransportCommand::SelectModeFinale: {
+                    leaveNpuView();
                     if (cmd == TransportCommand::SelectModeFull) {
                         applyAllEnginesRestored();
                     }
                     if (cmd == TransportCommand::SelectModeRT) settings.playbackMode = PlaybackMode::SoloRT;
                     if (cmd == TransportCommand::SelectModeTensor) settings.playbackMode = PlaybackMode::SoloTensor;
-                    if (cmd == TransportCommand::SelectModeNPU) settings.playbackMode = PlaybackMode::SoloNPU;
                     if (cmd == TransportCommand::SelectModeCUDA) settings.playbackMode = PlaybackMode::SoloCUDA;
                     if (cmd == TransportCommand::SelectModeFinale) settings.playbackMode = PlaybackMode::FinaleLoop;
 
@@ -2208,6 +2855,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case TransportCommand::ToggleExploreMode:
+                    leaveNpuView();
                     if (interactiveCtrl.exploreActive) {
                         interactiveCtrl.exitExplore(clock, audio, audioClockReady, window);
                     } else {
@@ -2224,14 +2872,12 @@ int main(int argc, char** argv) {
                     break;
                 case TransportCommand::ToggleRtxSplitWipe:
                     if (hudMode == 2u) {
-                        hudMode = 0u;
-                        settings.showOverlay = true;
-                        BOO_LOG_INFO("Render", "Split-Screen Wipe [H]: OFF");
+                        closeComparison();
                     } else {
-                        hudMode = 2u;
-                        settings.showOverlay = true;
                         if (interactiveCtrl.soloEngine == 2u) {
                             abCompareEngine = AbCompareEngine::Tensor;
+                        } else if (interactiveCtrl.soloEngine == 3u) {
+                            abCompareEngine = AbCompareEngine::NPU;
                         } else if (interactiveCtrl.soloEngine == 4u) {
                             abCompareEngine = AbCompareEngine::CUDA;
                         } else if (interactiveCtrl.soloEngine == 5u) {
@@ -2239,7 +2885,7 @@ int main(int argc, char** argv) {
                         } else {
                             abCompareEngine = AbCompareEngine::RT;
                         }
-                        orchestrator.setAbCompareEngine(abCompareEngine);
+                        openComparison(abCompareEngine);
                         BOO_LOG_INFO("Render", std::string("Split-Screen Wipe [H]: LIVE ") + toString(abCompareEngine) +
                                                " vs FALLBACK (drag divider curtain)");
                     }
@@ -2269,13 +2915,12 @@ int main(int argc, char** argv) {
                     break;
                 case TransportCommand::SoloEngineRT:
                 case TransportCommand::SoloEngineTensor:
-                case TransportCommand::SoloEngineNPU:
                 case TransportCommand::SoloEngineCUDA:
                 case TransportCommand::SoloEngineCodec: {
+                    leaveNpuView();
                     const uint32_t targetSolo =
                         (cmd == TransportCommand::SoloEngineRT)     ? 1u :
                         (cmd == TransportCommand::SoloEngineTensor) ? 2u :
-                        (cmd == TransportCommand::SoloEngineNPU)    ? 3u :
                         (cmd == TransportCommand::SoloEngineCUDA)   ? 4u : 5u;
 
                     if (interactiveCtrl.soloEngine == targetSolo) {
@@ -2284,7 +2929,7 @@ int main(int argc, char** argv) {
                             audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
                         }
                         orchestrator.resetTo(clock.currentSeconds());
-                        BOO_LOG_INFO("Show", "Hardware SOLO toggled OFF -> Restored all 5 live hardware pillars");
+                        BOO_LOG_INFO("Show", "Hardware SOLO toggled OFF -> Full film resumed");
                         break;
                     }
 
@@ -2307,7 +2952,6 @@ int main(int argc, char** argv) {
                     settings.disableRT = false;
                     settings.disableCUDA = false;
                     settings.disableTensor = false;
-                    settings.disableNPU = false;
                     settings.disableNVENC = false;
                     settings.enableSignalHijack = false;
 
@@ -2316,7 +2960,6 @@ int main(int argc, char** argv) {
                     if (targetSolo == 1u) { // RT DXR
                         settings.disableCUDA = true;
                         settings.disableTensor = true;
-                        settings.disableNPU = true;
                         abCompareEngine = AbCompareEngine::RT;
                         soloDesc = "SOLO 1/5: RT DXR 1.1 Ray Tracing (Mirror Intelligence & Glass Orchid)";
                         if (isFullFilm) {
@@ -2329,7 +2972,6 @@ int main(int argc, char** argv) {
                         }
                     } else if (targetSolo == 2u) { // Tensor MMA
                         settings.disableCUDA = true;
-                        settings.disableNPU = true;
                         abCompareEngine = AbCompareEngine::Tensor;
                         soloDesc = "SOLO 2/5: Tensor Core MMA SIREN Caustics (Neural Velvet)";
                         if (isFullFilm) {
@@ -2340,23 +2982,8 @@ int main(int argc, char** argv) {
                                 clock.seekToSample(modeRange.startSample);
                             }
                         }
-                    } else if (targetSolo == 3u) { // NPU 5Hz Director
-                        settings.disableCUDA = true;
-                        settings.disableTensor = true;
-                        abCompareEngine = AbCompareEngine::RT;
-                        soloDesc = "SOLO 3/5: Intel OpenVINO NPU 5 Hz Stage Director (Madame N Botanical Sanctuary)";
-                        if (isFullFilm) {
-                            settings.playbackMode = PlaybackMode::SoloNPU;
-                            if (resolvePlaybackLoopRange(cueSheet, settings.playbackMode, modeRange)) {
-                                clock.setLoopRange(modeRange.startSample, modeRange.endSample);
-                                clock.setLoopEnabled(true);
-                                // Start right as Madame N's 5 Hz Sanctuary Bloom Reveal crests (168s..195s inside 150s..195s loop)
-                                clock.seekToSeconds(168.0);
-                            }
-                        }
                     } else if (targetSolo == 4u) { // CUDA 65.5K Vortex
                         settings.disableTensor = true;
-                        settings.disableNPU = true;
                         abCompareEngine = AbCompareEngine::CUDA;
                         soloDesc = "SOLO 4/5: CUDA 65,536-Particle Curl-Noise Vortex (Particle Mutiny)";
                         if (isFullFilm) {
@@ -2370,7 +2997,6 @@ int main(int argc, char** argv) {
                     } else { // Codec NVENC + D3D12 Video Decode
                         settings.disableCUDA = true;
                         settings.disableTensor = true;
-                        settings.disableNPU = true;
                         settings.enableSignalHijack = true;
                         abCompareEngine = AbCompareEngine::Codec;
                         soloDesc = "SOLO 5/5: NVENC + D3D12 Video H.264 Hardware Round-Trip (Signal Hijack)";
@@ -2390,7 +3016,6 @@ int main(int argc, char** argv) {
                     orchestrator.setDisableCodec(settings.disableNVENC);
                     orchestrator.setCodecSignalHijackActive(settings.enableSignalHijack);
                     orchestrator.setAbCompareEngine(abCompareEngine);
-                    asyncDirector.setDisableNpu(settings.disableNPU || !findQualityPresetSpec(presets, qualityLadder.currentPreset()).allowNpu);
                     interactiveCtrl.hasPrevState = false;
                     if (audioClockReady) {
                         audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, clock.currentSample())));
@@ -2422,6 +3047,7 @@ int main(int argc, char** argv) {
                     BOO_LOG_INFO("Explore", "Buffer / AOV Inspection [Shift+I]: 0: Final Rendered");
                     break;
                 case TransportCommand::SpawnMarbles: {
+                    leaveNpuView();
                     const ShowVisualMode curVis = resolveShowVisualMode(cueSheet, settings.playbackMode);
                     if (!interactiveCtrl.exploreActive) {
                         interactiveCtrl.enterExplore(curVis, clock, audio, audioClockReady, window, settings, 0.5f);
@@ -2490,6 +3116,7 @@ int main(int argc, char** argv) {
                 case TransportCommand::HeroPreset4:
                 case TransportCommand::HeroPreset5:
                 case TransportCommand::HeroPreset6: {
+                    leaveNpuView();
                     const uint32_t idx = static_cast<uint32_t>(
                         static_cast<int>(cmd) - static_cast<int>(TransportCommand::HeroPreset1) + 1);
                     interactiveCtrl.applyHeroPreset(
@@ -2539,6 +3166,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        if (npuViewReturn && interactiveCtrl.wantsMouseExplore(winInput)) leaveNpuView();
         const ClockSnapshot tick = clock.tickFrame();
         if (audioClockReady) {
             if (tick.loopedThisTick &&
@@ -2565,7 +3193,12 @@ int main(int argc, char** argv) {
                                      : d3d.queryEstimatedAppVramBytes();
         peakVramBytes = std::max(peakVramBytes, appVram);
         const QualityPresetSpec prevSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
-        qualityLadder.pushFrameSample(lastGpuMs, appVram, prevSpec.softVramLimitBytes, sceneChanged);
+        const bool comparingDirector = settings.showOverlay && hudMode == 2u && abCompareEngine == AbCompareEngine::NPU;
+        // A comparison draws the scene twice. Keep these timings out of the film's
+        // preset decisions, but keep the memory-pressure response active throughout.
+        if (!comparingDirector || appVram > prevSpec.softVramLimitBytes || qualityLadder.memoryPressureActive()) {
+            qualityLadder.pushFrameSample(lastGpuMs, appVram, prevSpec.softVramLimitBytes, sceneChanged);
+        }
 
         const QualityPresetSpec activeSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
         const bool allowImmediateCanvasResize =
@@ -2574,7 +3207,10 @@ int main(int argc, char** argv) {
             orchestrator.syncPresetBeforeFrame(activeSpec, allowImmediateCanvasResize, tick.filmTimeSeconds);
             if (!d3d.checkDeviceHealthy(&d3dInitErr)) recoverGraphics(d3dInitErr);
         }
-        asyncDirector.setDisableNpu(settings.disableNPU || !activeSpec.allowNpu);
+        const bool otherHardwareSolo = interactiveCtrl.soloEngine != 0u && interactiveCtrl.soloEngine != 3u;
+        const bool inspectDirector = npuViewReturn.has_value() || (comparingDirector && activeCue.allowDirectorModulation &&
+                                     liveM1Ptr && !orchestrator.isUsingFallbackEffect());
+        asyncDirector.setDisableNpu(settings.disableNPU || (!inspectDirector && (otherHardwareSolo || !activeSpec.allowNpu)));
 
         const double cueSpan = std::max(1.0, static_cast<double>(activeCue.endSample - activeCue.startSample));
         const float actProg = static_cast<float>(std::clamp(
@@ -2606,7 +3242,124 @@ int main(int argc, char** argv) {
         fctx.showCaptions = settings.showCaptions;
         fctx.reducedFlash = settings.reducedFlash;
         fctx.motionScale = settings.motionScale;
+        fctx.effectsDetail = settings.effectsDetail;
+        fctx.pathTracing = settings.pathTracing;
+        fctx.dlssMode = settings.dlssMode;
+        fctx.rayReconstruction = settings.rayReconstruction;
+        fctx.frameGeneration = settings.frameGeneration;
+        fctx.reflex = settings.reflex;
+        fctx.neural = settings.neural;
+        fctx.gpuWorkout = settings.gpuWorkout;
+        fctx.physxGenre = settings.physxGenre;
+        if (physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart();
+        // The Explore marbles move onto PhysX as soon as its runtime is ready, mid-roll if need be.
+        if (interactiveCtrl.marbleCount > 0u && !physxMarbles) {
+            const PhysxRuntimeState state = physxRuntime.info().state;
+            if (state == PhysxRuntimeState::Stopped) physxRuntime.requestStart();
+            if (state == PhysxRuntimeState::Ready) {
+                physxMarbles = std::make_unique<PhysxMarbles>(physxRuntime, [](float x, float z) {
+                    return InteractiveExploreController::evalCountertopHeight(x, z);
+                });
+                if (physxMarbles->ok()) {
+                    interactiveCtrl.physxMarbles = physxMarbles.get();
+                    interactiveCtrl.handMarblesToPhysx(resolveShowVisualMode(cueSheet, settings.playbackMode) == ShowVisualMode::FullFilm360s &&
+                                                       tick.filmTimeSeconds >= 335.5);
+                } else {
+                    physxMarbles.reset();
+                }
+            }
+        }
+        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Rigid) && liveM1Ptr && !graphicsUnavailable) {
+            if (!physxRigid) physxRigid = std::make_unique<PhysxRigidGenre>(physxRuntime);
+            uint32_t cityAct = UINT32_MAX;
+            const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
+            const FlockFocus focus = liveM1Ptr->flockFocus();
+            physxRigid->frame(std::clamp(tick.unclampedDtSeconds, 0.0, 0.1), fctx.paused, buildings, cityAct, focus.air, focus.valid);
+            fctx.physxBodies = physxRigid->bodies();
+        } else if (physxRigid) {
+            physxRigid.reset(); // releases the scene and its GPU memory
+        }
+        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Fluid) && liveM1Ptr && !graphicsUnavailable) {
+            if (!physxFluid) physxFluid = std::make_unique<PhysxFluidGenre>(physxRuntime);
+            uint32_t cityAct = UINT32_MAX;
+            const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
+            const FlockFocus focus = liveM1Ptr->flockFocus();
+            physxFluid->frame(std::clamp(tick.unclampedDtSeconds, 0.0, 0.1), tick.filmTimeSeconds, fctx.paused, buildings, cityAct,
+                              focus.air, focus.valid);
+            fctx.physxBodies = physxFluid->bodies();
+        } else if (physxFluid) {
+            physxFluid.reset();
+        }
+        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Soft) && liveM1Ptr && !graphicsUnavailable) {
+            if (!physxSoft) physxSoft = std::make_unique<PhysxSoftGenre>(physxRuntime);
+            uint32_t cityAct = UINT32_MAX;
+            const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
+            const FlockFocus focus = liveM1Ptr->flockFocus();
+            physxSoft->frame(std::clamp(tick.unclampedDtSeconds, 0.0, 0.1), fctx.paused, buildings, cityAct, focus.air, focus.valid);
+            fctx.physxBodies = physxSoft->bodies();
+        } else if (physxSoft) {
+            physxSoft.reset();
+        }
+        fctx.flockFormation = settings.flockFormation;
         fctx.hudMode = hudMode;
+
+        // The workout flock. The dial asks; the governor releases birds a batch at a time and checks
+        // the frame rate after each, so the machine is never taken under the floor.
+        {
+            const bool m1Live = liveM1Ptr && !orchestrator.isUsingFallbackEffect() && !graphicsUnavailable;
+            WorkoutGovernorInput gin{};
+            gin.frameSeconds = previousFrameStart
+                ? std::chrono::duration<double>(cpuFrameT0 - *previousFrameStart).count() : 0.0;
+            gin.gpuSeconds = lastGpuMs * 0.001;
+            gin.requested = m1Live ? workoutBirdCount(settings.gpuWorkout) : 0u;
+            gin.limit = workoutLimit;
+            gin.floorFps = settings.workoutFloorFps;
+            // Shots with no birds at all (the orbital views, the last seconds) teach it nothing.
+            gin.flockVisible = m1Live && !window.isMinimized() && liveM1Ptr->birdCount() > 0u;
+            workoutGovernor.update(gin);
+            previousFrameStart = cpuFrameT0;
+            if (m1Live && workoutGovernor.released() > liveM1Ptr->workoutBirdCapacity()) {
+                // More birds than the buffers hold: make room now, between frames.
+                if (!liveM1Ptr->reserveWorkoutBirds(workoutGovernor.released())) {
+                    workoutLimit = liveM1Ptr->workoutBirdCapacity();
+                    BOO_LOG_WARN("Workout", "This machine has room for " + std::to_string(workoutLimit) + " workout birds.");
+                }
+                workoutGovernor.restartMeasurement();
+                previousFrameStart.reset(); // the pause for the new buffers is not a frame time
+            }
+            if (workoutGovernor.released() != workoutTraceBirds) {
+                // Every batch, for anyone following the governor in a debug log.
+                char line[160]{};
+                std::snprintf(line, sizeof(line), "Flock %u -> %u birds (measured %.1f fps, %.3f us a bird%s)",
+                              workoutTraceBirds, workoutGovernor.released(), static_cast<double>(workoutGovernor.measuredFps()),
+                              workoutGovernor.secondsPerBird() * 1e6, workoutGovernor.atFloor() ? ", at the floor" : "");
+                BOO_LOG_DEBUG("Workout", line);
+                workoutTraceBirds = workoutGovernor.released();
+            }
+            fctx.workout.birds = workoutGovernor.birds();
+            fctx.workout.grown = workoutGovernor.grown();
+            fctx.workout.front = workoutGovernor.front();
+            fctx.workout.band = workoutGovernor.band();
+            fctx.workout.size = workoutGovernor.flockSize();
+            // One line when the frame rate, not the dial, settles the size of the flock, and another
+            // if that size later moves by more than a twentieth: a log shows what the machine could fly.
+            if (workoutGovernor.atFloor() && !workoutGovernor.releasing() && workoutGovernor.released() > 0u) {
+                const uint32_t now = workoutGovernor.released();
+                const uint32_t change = now > workoutLoggedBirds ? now - workoutLoggedBirds : workoutLoggedBirds - now;
+                if (!workoutLoggedFloor || change * 20u > std::max(now, 20u)) {
+                    char line[160]{};
+                    std::snprintf(line, sizeof(line), "Holding %u workout birds at %.1f fps (floor %.0f fps, asked for %u)",
+                                  now, static_cast<double>(workoutGovernor.measuredFps()),
+                                  static_cast<double>(settings.workoutFloorFps), gin.requested);
+                    BOO_LOG_INFO("Workout", line);
+                    workoutLoggedFloor = true;
+                    workoutLoggedBirds = now;
+                }
+            } else if (workoutGovernor.released() >= gin.requested) {
+                workoutLoggedFloor = false; // the dial is satisfied again
+                workoutLoggedBirds = 0;
+            }
+        }
 
         // M1/M2 clean-feed modulation must not inherit audio buffering or presentation history,
         // while M5 (SoloNPU) and M6 (FullFilm360s) consume live 5 Hz OpenVINO NPU/CPU stage direction.
@@ -2614,7 +3367,8 @@ int main(int argc, char** argv) {
         sampleDirector.reset(cueSheet.seed);
         FrameContext deterministicCtx = fctx;
         deterministicCtx.audioEnvelope = computeAnalyticalAudioBands(tick.samplePosition, cueSheet.sampleRate, cueSheet.durationSamples, settings.edition).rms;
-        const DirectorMoodState asyncMood = asyncDirector.evaluateFrame(fctx, &activeCue);
+        DirectorMoodState scriptedMood{};
+        const DirectorMoodState asyncMood = asyncDirector.evaluateFrame(fctx, &activeCue, &scriptedMood);
         const AsyncDirectorTelemetry npuTel = asyncDirector.telemetry();
         orchestrator.updateEngineStatus(npuTel.hardwareResult);
         const DirectorMoodState mood = cueUsesM1Visuals(cueSheet)
@@ -2625,10 +3379,19 @@ int main(int argc, char** argv) {
         fctx.moodCutAccent = mood.cutAccent;
         fctx.moodIntensity = mood.lightTension;
         fctx.moodPaletteAccent = mood.spectralShift;
+        const bool usesNeuralDirection = !mood.isScriptedFallback && activeCue.allowDirectorModulation;
+        const auto& baseline = usesNeuralDirection ? scriptedMood : mood;
+        fctx.scriptedDirectorComparison.bloomStrength = baseline.bloomStrength;
+        fctx.scriptedDirectorComparison.irisAngle = baseline.irisAngle;
+        fctx.scriptedDirectorComparison.lightTension = baseline.lightTension;
+        fctx.scriptedDirectorComparison.spectralShift = baseline.spectralShift;
+        fctx.scriptedDirectorComparison.cutAccent = baseline.cutAccent;
 
         interactiveCtrl.updateFrame(
             winInput, padState, hasGamepad, tick, activeSpec, cueSheet, settings,
             clock, audio, audioClockReady, window, fctx);
+        birdCamera.apply(settings.birdCam, liveM1Ptr ? liveM1Ptr->flockFocus() : FlockFocus{},
+                         std::clamp(static_cast<float>(tick.unclampedDtSeconds), 0.0005f, 0.100f), fctx);
 
         if (captureRequested && !graphicsUnavailable) {
             captureRequested = false;
@@ -2664,12 +3427,36 @@ int main(int argc, char** argv) {
             hud.edition = settings.edition;
             hud.playbackMode = settings.playbackMode;
             hud.mood = mood;
+            // The model may be running while the current shot holds its authored lighting.
+            hud.mood.isScriptedFallback = !usesNeuralDirection;
             hud.audioBands = bands;
+            hud.frameGenerationState = presentation.state;
+            hud.maxGeneratedFrames = presentation.maxGeneratedPerFrame;
+            hud.framesActuallyPresented = presentation.framesActuallyPresented;
+            hud.reflexState = presentation.reflexState;
+            hud.renderedFps = static_cast<float>(presentation.renderedFps);
+            hud.displayedFps = static_cast<float>(presentation.displayedFps);
             hud.canvasWidth = activeSpec.renderWidth;
             hud.canvasHeight = activeSpec.renderHeight;
             hud.swapchainBits = d3d.swapchainChannelBits();
             hud.abCompareEngine = abCompareEngine;
             hud.codecSignalHijackActive = settings.enableSignalHijack;
+            if (liveM1Ptr) hud.neural = liveM1Ptr->neuralRenderingStats();
+            hud.dashboardPanel = settings.dashboardPanel;
+            hud.gpuSensors = gpuSensors.latest();
+            hud.gpuWorkout = settings.gpuWorkout;
+            hud.flockFormation = settings.flockFormation;
+            hud.birdCam = settings.birdCam;
+            if (liveM1Ptr) hud.flockSpecies = liveM1Ptr->flockFocus().species;
+            if (liveM1Ptr) hud.birdCount = liveM1Ptr->birdCount();
+            hud.fullscreen = window.isFullscreen();
+            hud.physxGenre = settings.physxGenre;
+            hud.physx = physxStatsFor(settings.physxGenre, liveM1Ptr ? liveM1Ptr->physxSmokeStats() : FlowSmokeStats{}, physxRuntime.info(),
+                                      physxRigid.get(), physxFluid.get(), physxSoft.get());
+            hud.fullscreenPill = interactiveCtrl.fullscreenPillOpacity;
+            hud.workoutFloorFps = static_cast<uint32_t>(std::lround(settings.workoutFloorFps));
+            hud.workoutState = workoutGovernor.atFloor() ? 2u
+                : (workoutGovernor.releasing() || workoutGovernor.released() < workoutBirdCount(settings.gpuWorkout)) ? 1u : 0u;
             uint64_t mediaFrameSeq = 0;
             if (mediaIngest.isActive() && mediaIngest.copyLatestNv12Frame(latestMediaNv12, mediaFrameSeq)) {
                 if (liveM1Ptr) {
@@ -2682,6 +3469,8 @@ int main(int argc, char** argv) {
             hud.npuInferMs = npuTel.lastInferMs;
             hud.npuResultAgeMs = npuTel.resultAgeMs;
             hud.npuCompletedInferences = npuTel.completedInferences;
+            hud.directorBackend = classifyDirectorHudBackend(npuTel.hardwareResult);
+            hud.directorRateHz = npuTel.completedRateHz;
             if (liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
                 for (size_t p = 0; p < 4; ++p) {
                     hud.livePillars[p] = liveM1Ptr->livePillarTelemetry(p);
@@ -2702,6 +3491,7 @@ int main(int argc, char** argv) {
 
             orchestrator.setHudTelemetry(hud);
 
+            d3d.endSimulation();
             if (d3d.beginFrame()) {
                 orchestrator.renderFrame(fctx, false);
                 if (spoutSender.isActive() && liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
@@ -2715,7 +3505,10 @@ int main(int argc, char** argv) {
                 double completedGpuMs = 0.0;
                 const bool presented = d3d.endFrameAndPresent(settings.vsync, completedGpuMs);
                 const bool published = spoutSender.completePublish();
-                if (presented) window.hideLoading();
+                if (presented) {
+                    window.hideLoading();
+                    StartupProgress::instance().finish(); // does nothing after the first frame
+                }
                 if (!presented || !published) {
                     recoverGraphics(presented ? "Spout GPU publication did not retire." : "Frame submission or Present failed.");
                 } else if (completedGpuMs > 0.0) {
@@ -2751,7 +3544,7 @@ int main(int argc, char** argv) {
             std::snprintf(
                 titleBuf,
                 sizeof(titleBuf),
-                "BOO SAH SAH |%s %s | %s %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [F]=%s [H]=%s [J]=%s [Tab]=HUD",
+                "BOO SAH SAH |%s %s | %s %zu/%zu (%s) | %.1f FPS (GPU %.2f ms) | %u-bit %s | [7] %s %u/3 | [F]=%s [H]=%s [J]=%s [Tab]=HUD",
                 expTag,
                 TimelineClock::formatTimecode(tick.samplePosition, cueSheet.sampleRate).c_str(),
                 titleAct.c_str(),
@@ -2762,6 +3555,7 @@ int main(int argc, char** argv) {
                 lastGpuMs,
                 d3d.swapchainChannelBits(),
                 toString(qualityLadder.currentPreset()),
+                titleDetail.c_str(), effectiveEffectsDetail(fctx) + 1u,
                 titleExplore.c_str(),
                 titleWipe.c_str(),
                 titleLamp.c_str());
@@ -2814,7 +3608,39 @@ int main(int argc, char** argv) {
     summary.cpuFrameStats = computeFrametimeStats(cpuFrameSamplesMs);
     summary.gpuFrameStats = computeFrametimeStats(gpuFrameSamplesMs);
     summary.lastGpuPassTimings = d3d.lastPassTimings();
+    summary.presentation = d3d.frameGenerationStats();
+    summary.maxFramesPresentedPerRender = std::max(maxFramesPresentedPerRender, summary.presentation.framesActuallyPresented);
     if (liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
+        summary.pathTracing = liveM1Ptr->pathTracingState();
+        summary.superResolution = liveM1Ptr->dlssState();
+        summary.rayReconstruction = liveM1Ptr->rayReconstructionState();
+        summary.dlssInputWidth = liveM1Ptr->dlssInputWidth();
+        summary.dlssInputHeight = liveM1Ptr->dlssInputHeight();
+        summary.neural = liveM1Ptr->neuralRenderingStats();
+        summary.gpuSensorsDevice = gpuSensors.available() ? gpuSensors.deviceName() : std::string();
+        summary.gpuSensorsMatch = gpuSensors.matchMethod();
+        summary.gpuSensorsNvidiaCount = gpuSensors.nvidiaGpuCount();
+        summary.gpuSensorsReason = gpuSensors.unavailableReason();
+        summary.gpuSensorsLast = gpuSensors.latest();
+        summary.gpuSensorsRun = gpuSensors.summary();
+        summary.gpuWorkout = settings.gpuWorkout;
+        summary.flockFormation = settings.flockFormation;
+        summary.birdCam = settings.birdCam;
+        summary.flockSpecies = liveM1Ptr->flockFocus().species;
+        summary.birdCount = liveM1Ptr->birdCount();
+        summary.workoutRequested = workoutBirdCount(settings.gpuWorkout);
+        summary.workoutReleased = workoutGovernor.released();
+        summary.workoutFloorFps = settings.workoutFloorFps;
+        summary.workoutAtFloor = workoutGovernor.atFloor();
+        summary.workoutSteadyBirds = workoutGovernor.steadyBirds();
+        summary.workoutSteadyFps = workoutGovernor.steadyFps();
+        summary.workoutPeakBirds = workoutGovernor.peakBirds();
+        summary.workoutMicrosecondsPerBird = workoutGovernor.secondsPerBird() * 1e6;
+        summary.workoutCapacity = liveM1Ptr->workoutBirdCapacity();
+        summary.physxGenre = settings.physxGenre;
+        summary.physx = physxStatsFor(settings.physxGenre, liveM1Ptr->physxSmokeStats(), physxRuntime.info(), physxRigid.get(),
+                                      physxFluid.get(), physxSoft.get());
+        summary.physxRuntime = physxRuntime.info();
         for (size_t p = 0; p < 4; ++p) {
             summary.lastLivePillars[p] = liveM1Ptr->livePillarTelemetry(p);
         }

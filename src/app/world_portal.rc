@@ -1,0 +1,27 @@
+#include <windows.h>
+#include "world_portal.h"
+
+IDD_WORLD_PORTAL DIALOGEX 0, 0, 302, 106
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Visit a Demo-Verse world"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT       "&Public world address", -1, 9, 8, 284, 11
+    EDITTEXT    IDC_WORLD_ADDRESS, 9, 23, 284, 15, ES_AUTOHSCROLL
+    LTEXT       "Enter the public HTTPS link for a world. Review the destination to choose where to open it.", IDC_WORLD_STATUS, 9, 45, 284, 26
+    DEFPUSHBUTTON "Review...", IDOK, 164, 81, 62, 16
+    PUSHBUTTON  "Cancel", IDCANCEL, 231, 81, 62, 16
+END
+
+IDD_WORLD_DESTINATION DIALOGEX 0, 0, 335, 133
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Demo-Verse destination"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT       "Destination", -1, 9, 8, 318, 11
+    EDITTEXT    IDC_WORLD_ADDRESS, 9, 22, 317, 47, ES_READONLY | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
+    LTEXT       "", IDC_WORLD_STATUS, 9, 76, 317, 23
+    PUSHBUTTON  "Open in Demo-Verse", IDC_WORLD_VISITOR, 46, 108, 103, 16
+    PUSHBUTTON  "Open in browser", IDC_WORLD_BROWSER, 154, 108, 97, 16
+    DEFPUSHBUTTON "Cancel", IDCANCEL, 256, 108, 70, 16
+END

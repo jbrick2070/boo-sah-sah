@@ -2,6 +2,58 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.7.0 — Hardware sensors, the GPU workout, the bird flock and the PhysX suite
+
+- The dashboard reads the GPU's own sensors: temperature, power against its limit, clock and load, with a warning while the card is power or thermally limited. On a PC with several GPUs it follows the one the app renders on. A CPU line shows system load and the app's share.
+- A **Workout** dial adds ray-traced birds to load the GPU: 40 at level 1, 32,000 at level 9, and at level 10 as many as the machine can fly, up to 200,000. The film's own birds are unchanged.
+- The workout never takes the frame rate under a floor of 24 frames per second. It releases birds in batches, checks the frame rate after each, aims for 28 to stay ahead of the floor, and lets birds go at once if the frame rate falls. `--workout-floor-fps` changes the floor or switches it off. The flock is posed on every CPU core, so the GPU stays the limit.
+- Past 4,000 birds a flock grows as real ones do: more skeins in wider lanes, kettle after kettle in further thermals, a broader extended cluster.
+- A **Full screen** button in the top-right corner. Full screen it reads **Exit full screen**, and `Esc` now leaves full screen instead of closing the app.
+- A **PhysX** row (test-rig builds with the PhysX SDK): `Shift+P` dials through NVIDIA PhysX genres: smoke (NVIDIA Flow vapour rising through the kites' thermals), rigid (a shower of enamel marbles on the GPU rigid-body solver, landing on the real buildings), fluid (a small cloudburst on the GPU position-based fluid solver) and soft (two dozen soft microbes on the GPU finite-element soft-body solver, squashing onto the buildings). Each is an accent on one block of the city.
+- Film physics baked offline with PhysX: the parcel case swings on its line, Madame N's iris opens as a geared mechanism, Taipei 101's tuned mass damper swings in the tower, and the canopy ribbons are GPU cloth billowing in the terrace wind.
+- The renderer can now draw meshes whose vertices move (the cloth first): raster, ray tracing and the path tracer see the same surface, and DLSS gets per-vertex motion vectors.
+- `--physx-route-test` checks every bird route against the buildings with a 5 m clearance; the workout flock's flight data was adjusted to pass, and two of the film's Taipei kites now fly a little further in from a building they passed within 1.7 m of.
+- The Explore marbles roll on PhysX in test-rig builds, with continuous collision detection; the built-in solver remains for other builds.
+- A real loading bar at start-up. It counts bytes: files read into memory, system memory and GPU memory as they fill, against what the last start on this machine reached. Every asset the manifest lists is checked against its SHA-256 as it loads.
+- The extra birds fly real flight formations, named as ornithologists name them: an extended cluster behind the film's birds, great egrets (*Ardea alba*) in vee, echelon, column and front, or black kites (*Milvus migrans*) in a thermal-soaring kettle.
+- A bird camera follows the flock in place of the film's shots.
+- `--export-diagnostics` reports the sensors, CPU load and workout.
+
+## 1.1.6.0 — Neural rendering, Tensor Cores and a collapsible dashboard
+
+- A **Neural rendering** section in the upper-left dashboard runs three neural networks on the GPU every frame: neural shading, neural texture compression and a neural radiance cache that trains online. Each row shows its GPU time and quality in dB. Click a row to switch that network, click its badge to solo it, and press `Shift+N` to switch the whole suite. The suite is off by default.
+- `--test-rig`, or `test_rig = true`, switches on every GPU feature at once. `--export-diagnostics` now reports the neural figures.
+- Test-rig builds (`ENABLE_LINALG_PREVIEW`) run network inference on Tensor Cores through the Shader Model 6.10 preview. The dashboard shows `TC` or `SC`, and Shift-clicking the heading switches between them.
+- The upper-left dashboard collapses. Press `` ` `` or use **[-]**, **[+]** and **[X]** to switch between the full table, a two-line mini strip, and a small **HUD +** tab.
+- `tools/train_neural_weights.py` trains the offline networks into `assets/neural/neural_networks.bin`. The neural texture comes from the film's own Glass Orchid frame.
+
+## 1.1.5.0 — Cinematic camera and real-time graphics (release candidate)
+
+- Circle the Glass Orchid and Taipei 101 in two separately framed shots. A survey-based terrain mesh extends around the Taipei basin. The camera also follows the river patrol, a parcel delivery, the black kites and the aircraft over Shenzhen.
+- Change path-traced lighting, DLSS upscaling, Ray Reconstruction, Frame Generation and Reflex from the upper-left dashboard. Full and Compact views show the selected mode and measured state in all 25 supported languages.
+- View rendered and presented frame rates alongside the hardware workloads. The NPU displays its inference time and rate independently.
+
+## 1.1.3.0 — The seven-scene film and hardware comparisons
+
+- Taipei gains covered arcades, ceramic walk-ups and stepped office towers. Shenzhen’s waterfront surrounds the aircraft with more varied rooflines and lit floors. Repeated building parts share geometry in the normal view and in ray-traced reflections.
+- Nearby windows show six authored room interiors as the camera moves. Distant blocks use grouped window lighting that stays readable across the skyline.
+- The Hall of Mirrors has etched brass panels, and gold and jade threads run through the Neural Velvet canopy. The director steers two flower-shaped pools of light across Madame N’s stage. Particle Mutiny has two colored streams with tracers that follow their motion. Pearly enamel grows from the bases of the finale’s crystal petals before the dawn reveal.
+- Click a hardware row to compare its effect during any act, including while paused. Switch engines using the tabs above the image, then close the comparison to return to the previous HUD. The NPU comparison shows the active director and scripted lighting on the same GPU-rendered shot. The **[4]** control still opens the sanctuary demonstration.
+- The soundtrack now starts with the film clock after graphics warm-up. Slow startup keeps the opening music aligned with the first scene.
+
+## [Unreleased] — Soundtrack and director comparison
+
+- The bundled soundtrack uses lossless recordings from the four WAV masters. Playback applies the volume control directly. Music imported through the file picker or drag-and-drop keeps its original filename, including Unicode characters.
+- Press **4** to compare the neural stage director with scripted lighting in the same sanctuary shot. The Hardware table identifies the active route and reports completed inferences, latency, and measured rate. Seeking uses scripted lighting until the model returns a result for the new scene.
+- The codec row reads **Idle** between Signal Hijack scenes.
+
+## 1.1.0.0 — Shenzhen aircraft and recursive effects
+
+- The opening camera looks out across Taipei 101, arcaded shophouses and nine rows of city blocks extending toward the mountains. The Shenzhen waterfront gains an elevated railway, a five-car train, a twin-leg tower with skybridges, and outer neighborhoods around the bay.
+- The camera follows the six-rotor aircraft through its approach over Shenzhen. The cockpit, wings, and tilt rotors have new geometry, and six iridescent wakes follow the aircraft down to the pad.
+- Cinema mode keeps the selected rendering resolution during the intercept sequence. Telemetry carries the compressed broadcast in an inset. The full-screen codec and A/B controls remain available.
+- Press **7** to change effects detail. Higher settings add finer recursive patterns to Neural Velvet, more particles, and detail behind city windows. Safe mode uses the lowest setting. The control is localized in all 25 display languages.
+
 ## [Unreleased] — Live Audio Reactivity
 
 ### Added

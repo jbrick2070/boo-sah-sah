@@ -1,4 +1,5 @@
 #include "boo/diagnostics.hpp"
+#include "boo/physx_genres.hpp"
 #include "boo/json.hpp"
 #include "boo/logging.hpp"
 
@@ -138,6 +139,8 @@ bool exportDiagnosticsJson(
     run["edition"] = toString(summary.settings.edition);
     run["playback_mode"] = toString(summary.settings.playbackMode);
     run["final_quality_preset"] = toString(summary.finalQualityPreset);
+    run["effects_detail_requested"] = static_cast<int64_t>(summary.settings.effectsDetail);
+    run["effects_detail_active"] = static_cast<int64_t>(summary.finalQualityPreset == QualityPresetId::Safe ? 0u : summary.settings.effectsDetail);
     run["quality_downgrades"] = static_cast<int64_t>(summary.qualityDowngrades);
     run["rendered_frames"] = static_cast<int64_t>(summary.renderedFrames);
     run["present_stalls"] = static_cast<int64_t>(summary.presentStalls);
@@ -166,6 +169,150 @@ bool exportDiagnosticsJson(
     run["npu_infer_ms"] = summary.lastNpuInferMs;
     run["npu_result_age_ms"] = summary.lastNpuResultAgeMs;
     run["npu_completed_inferences"] = static_cast<int64_t>(summary.npuCompletedInferences);
+
+    const auto stateName = [](RendererFeatureState state) {
+        switch (state) {
+        case RendererFeatureState::Off: return "off";
+        case RendererFeatureState::Idle: return "idle";
+        case RendererFeatureState::Active: return "active";
+        default: return "unavailable";
+        }
+    };
+    JsonValue graphics = JsonValue::Object{};
+    graphics["path_tracing"] = stateName(summary.pathTracing);
+    graphics["dlss_upscaling"] = stateName(summary.superResolution);
+    graphics["dlss_backend"] = summary.rayReconstruction == RendererFeatureState::Active ? "ray_reconstruction" :
+                               summary.superResolution == RendererFeatureState::Active ? "super_resolution" : "none";
+    graphics["dlss_ray_reconstruction"] = stateName(summary.rayReconstruction);
+    graphics["dlss_input_width"] = static_cast<int64_t>(summary.dlssInputWidth);
+    graphics["dlss_input_height"] = static_cast<int64_t>(summary.dlssInputHeight);
+    graphics["dlss_frame_generation"] = stateName(summary.presentation.state);
+    graphics["reflex"] = stateName(summary.presentation.reflexState);
+    graphics["rendered_fps"] = summary.presentation.renderedFps;
+    graphics["displayed_fps"] = summary.presentation.displayedFps;
+    graphics["max_frames_presented_per_render"] = static_cast<int64_t>(summary.maxFramesPresentedPerRender);
+    graphics["supported_max_generated_frames"] = static_cast<int64_t>(summary.presentation.maxGeneratedPerFrame);
+    run["real_time_graphics"] = std::move(graphics);
+
+    // Neural rendering suite: last measured values per network (state, smoothed GPU ms, PSNR, throughput).
+    JsonValue neural = JsonValue::Object{};
+    const NeuralRenderingControls& nc = summary.settings.neural;
+    constexpr const char* soloNames[] = {"none", "shading", "textures", "cache"};
+    neural["available"] = summary.neural.available;
+    neural["backend"] = summary.neural.available ? summary.neural.backend : std::string("none");
+    if (!summary.neural.unavailableReason.empty()) neural["unavailable_reason"] = summary.neural.unavailableReason;
+    neural["enabled"] = nc.enabled;
+    neural["tensor_cores_requested"] = nc.tensorCores;
+    neural["tensor_cores_available"] = summary.neural.tensorCoresAvailable;
+    neural["tensor_cores_active"] = summary.neural.tensorCoresActive;
+    if (!summary.neural.tensorCoresReason.empty()) neural["tensor_cores_unavailable_reason"] = summary.neural.tensorCoresReason;
+    neural["solo"] = soloNames[static_cast<size_t>(nc.solo) & 3u];
+    constexpr const char* featureNames[] = {"neural_shading", "neural_textures", "neural_radiance_cache"};
+    for (size_t f = 0; f < kNeuralFeatureCount; ++f) {
+        const NeuralFeatureStats& s = summary.neural.features[f];
+        JsonValue fo = JsonValue::Object{};
+        fo["state"] = stateName(s.state);
+        fo["gpu_ms"] = static_cast<double>(s.gpuMs);
+        fo["psnr_db"] = static_cast<double>(s.quality);
+        fo["gflop_per_frame"] = static_cast<double>(s.gflopPerFrame);
+        fo["tflops"] = static_cast<double>(s.tflops);
+        neural[featureNames[f]] = std::move(fo);
+    }
+    neural["texture_compression_ratio"] = static_cast<double>(summary.neural.textureCompressionRatio);
+    neural["offline_shading_psnr_db"] = static_cast<double>(summary.neural.offlineShadingPsnr);
+    neural["offline_texture_psnr_db"] = static_cast<double>(summary.neural.offlineTexturePsnr);
+    neural["cache_training_steps"] = static_cast<int64_t>(summary.neural.cacheTrainingSteps);
+    neural["cache_samples_per_frame"] = static_cast<int64_t>(summary.neural.cacheSamplesPerFrame);
+    neural["cache_parameters"] = static_cast<int64_t>(summary.neural.cacheParameters);
+    run["neural_rendering"] = std::move(neural);
+
+    // GPU sensors (NVML): last reading plus run extremes, to spot power or thermal throttling.
+    JsonValue sensors = JsonValue::Object{};
+    sensors["available"] = summary.gpuSensorsLast.available;
+    if (!summary.gpuSensorsDevice.empty()) sensors["device"] = summary.gpuSensorsDevice;
+    if (!summary.gpuSensorsMatch.empty()) sensors["matched_by"] = summary.gpuSensorsMatch;
+    sensors["nvidia_gpu_count"] = static_cast<int64_t>(summary.gpuSensorsNvidiaCount);
+    if (!summary.gpuSensorsLast.available && !summary.gpuSensorsReason.empty()) sensors["unavailable_reason"] = summary.gpuSensorsReason;
+    if (summary.gpuSensorsLast.available) {
+        const GpuSensorReading& g = summary.gpuSensorsLast;
+        const GpuSensorSummary& r = summary.gpuSensorsRun;
+        sensors["temperature_c"] = static_cast<double>(g.temperatureC);
+        sensors["power_w"] = static_cast<double>(g.powerW);
+        sensors["power_limit_w"] = static_cast<double>(g.powerLimitW);
+        sensors["graphics_clock_mhz"] = static_cast<double>(g.graphicsClockMHz);
+        sensors["memory_clock_mhz"] = static_cast<double>(g.memoryClockMHz);
+        sensors["load_pct"] = static_cast<double>(g.utilizationPct);
+        if (g.fanPct >= 0.0f) sensors["fan_pct"] = static_cast<double>(g.fanPct);
+        sensors["samples"] = static_cast<int64_t>(r.samples);
+        sensors["peak_temperature_c"] = static_cast<double>(r.peakTemperatureC);
+        sensors["peak_power_w"] = static_cast<double>(r.peakPowerW);
+        sensors["average_power_w"] = static_cast<double>(r.averagePowerW);
+        sensors["average_load_pct"] = static_cast<double>(r.averageUtilizationPct);
+        sensors["min_clock_under_load_mhz"] = static_cast<double>(r.minGraphicsClockMHz);
+        sensors["max_clock_mhz"] = static_cast<double>(r.maxGraphicsClockMHz);
+        sensors["power_limited_samples"] = static_cast<int64_t>(r.powerLimitedSamples);
+        sensors["thermal_limited_samples"] = static_cast<int64_t>(r.thermalLimitedSamples);
+    }
+    run["gpu_sensors"] = std::move(sensors);
+
+    JsonValue cpu = JsonValue::Object{};
+    cpu["available"] = summary.gpuSensorsLast.cpuAvailable;
+    if (summary.gpuSensorsLast.cpuAvailable) {
+        cpu["logical_processors"] = static_cast<int64_t>(summary.gpuSensorsLast.cpuLogicalProcessors);
+        cpu["system_load_pct"] = static_cast<double>(summary.gpuSensorsLast.cpuSystemPct);
+        cpu["app_load_pct"] = static_cast<double>(summary.gpuSensorsLast.cpuAppPct);
+        cpu["average_system_load_pct"] = static_cast<double>(summary.gpuSensorsRun.averageCpuSystemPct);
+        cpu["peak_system_load_pct"] = static_cast<double>(summary.gpuSensorsRun.peakCpuSystemPct);
+        cpu["average_app_load_pct"] = static_cast<double>(summary.gpuSensorsRun.averageCpuAppPct);
+    }
+    run["cpu"] = std::move(cpu);
+
+    JsonValue workout = JsonValue::Object{};
+    workout["level"] = static_cast<int64_t>(summary.gpuWorkout);
+    workout["birds_drawn"] = static_cast<int64_t>(summary.birdCount);
+    workout["birds_requested"] = static_cast<int64_t>(summary.workoutRequested);
+    workout["birds_released"] = static_cast<int64_t>(summary.workoutReleased);
+    workout["floor_fps"] = static_cast<double>(summary.workoutFloorFps);
+    workout["held_at_floor"] = summary.workoutAtFloor;
+    // A score for the machine: the flock it was last measured flying without going under the floor.
+    workout["steady_birds"] = static_cast<int64_t>(summary.workoutSteadyBirds);
+    workout["steady_fps"] = static_cast<double>(summary.workoutSteadyFps);
+    workout["peak_steady_birds"] = static_cast<int64_t>(summary.workoutPeakBirds);
+    workout["microseconds_per_bird"] = summary.workoutMicrosecondsPerBird;
+    workout["bird_capacity"] = static_cast<int64_t>(summary.workoutCapacity);
+    constexpr const char* flockNames[] = {"extended cluster", "vee", "echelon", "column", "front", "kettle"};
+    workout["flock_formation"] = flockNames[std::min<uint32_t>(summary.flockFormation, 5u)];
+    workout["flock_species"] = summary.flockSpecies ? "Ardea alba (great egret)" : "Milvus migrans (black kite)";
+    workout["bird_cam"] = summary.birdCam;
+    run["gpu_workout"] = std::move(workout);
+
+    JsonValue physx = JsonValue::Object{};
+    constexpr const char* physxStates[] = {"unavailable", "off", "active", "starting"};
+    physx["genre"] = std::string(physxGenreInfo(summary.physxGenre).key);
+    physx["state"] = physxStates[summary.physx.state & 3u];
+    physx["backend"] = summary.physx.backend;
+    physx["reason"] = summary.physx.reason;
+    physx["step_cpu_ms"] = static_cast<double>(summary.physx.stepCpuMs);
+    physx["step_gpu_ms"] = static_cast<double>(summary.physx.stepGpuMs);
+    physx["step_wall_ms"] = static_cast<double>(summary.physx.stepWallMs);
+    physx["render_gpu_ms"] = static_cast<double>(summary.physx.renderGpuMs);
+    physx["gpu_memory_mb"] = static_cast<double>(summary.physx.gpuMemoryMegabytes);
+    physx["steps"] = static_cast<int64_t>(summary.physx.steps);
+    for (int i = 0; i < 4; ++i) {
+        if (summary.physx.counterNames[i] && *summary.physx.counterNames[i])
+            physx[summary.physx.counterNames[i]] = static_cast<double>(summary.physx.counters[i]);
+    }
+    JsonValue runtime = JsonValue::Object{};
+    constexpr const char* runtimeStates[] = {"unavailable", "stopped", "starting", "ready"};
+    runtime["state"] = runtimeStates[static_cast<uint32_t>(summary.physxRuntime.state) & 3u];
+    runtime["reason"] = summary.physxRuntime.reason;
+    runtime["sdk_version"] = summary.physxRuntime.sdkVersion;
+    runtime["gpu_solvers"] = summary.physxRuntime.gpu;
+    runtime["cuda_device"] = summary.physxRuntime.cudaDevice;
+    runtime["shared_cuda_context"] = summary.physxRuntime.sharedContext;
+    runtime["start_ms"] = static_cast<double>(summary.physxRuntime.startMs);
+    physx["runtime"] = std::move(runtime);
+    run["physx"] = std::move(physx);
 
     const char* pillarNames[4] = {"RT", "CUDA", "Tensor", "Codec"};
     JsonValue livePillarsObj = JsonValue::Object{};

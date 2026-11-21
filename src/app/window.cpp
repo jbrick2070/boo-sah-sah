@@ -1,5 +1,6 @@
 #include "boo/window.hpp"
 #include "boo/localization.hpp"
+#include "world_portal.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -17,6 +18,9 @@ namespace boo {
 
 namespace {
 constexpr const wchar_t* kWindowClassName = L"BooSahSahGlassOrchidWindowClass";
+constexpr UINT kMapAttributionCommand = 0x1D00;
+constexpr UINT kWorldPortalCommand = 0x1D10;
+constexpr const wchar_t* kMapCredit = L"© OpenStreetMap contributors";
 
 std::wstring utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
@@ -63,6 +67,24 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0u) == kWorldPortalCommand && worldPortalDialogAvailable()) {
+                openWorldPortalDialog(hwnd);
+                return 0;
+            }
+            if ((wParam & 0xFFF0u) == kMapAttributionCommand) {
+                std::wstring credit =
+                    L"Taipei · 臺北\n\n© OpenStreetMap contributors\n"
+                    L"https://www.openstreetmap.org/copyright\nOpen Data Commons ODbL 1.0\n\n"
+                    L"SRTM · NASA / NGA / USGS · Mapzen Terrain Tiles\n"
+                    L"https://registry.opendata.aws/terrain-tiles/\n\n"
+                    L"map-data/TAIPEI-MAP-NOTICE.txt\n\n"
+                    L"Taipei 101 · 台北 101\nC.Y. Lee & Partners · 李祖原聯合建築師事務所\nhttps://www.cylee.com/project/Taipei-101\n\n";
+                credit += uiText(UiText::IndependentProduction);
+                MessageBoxW(hwnd, credit.c_str(), L"BOO SAH SAH · Taipei", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            break;
         case WM_DISPLAYCHANGE:
             if (self->isFullscreen()) self->fitFullscreenToMonitor();
             break;
@@ -119,7 +141,15 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case VK_OEM_PERIOD: self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
                     case VK_OEM_6: if (!inExplore) self->pushCommandFromWndProc(TransportCommand::StepForward); return 0;
                     case 'G': self->pushCommandFromWndProc(TransportCommand::RevealPreroll); return 0;
-                    case 'F': self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
+                    case VK_OEM_3: self->pushCommandFromWndProc(TransportCommand::CycleDashboardPanel); return 0; // ` key
+                    case '7': self->pushCommandFromWndProc(TransportCommand::CycleEffectsDetail); return 0;
+                    case '8': self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::CycleReflex : TransportCommand::CyclePathTracing); return 0;
+                    case '9': self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::CycleFrameGeneration : TransportCommand::CycleDlss); return 0;
+                    case '0': self->pushCommandFromWndProc(TransportCommand::ToggleRayReconstruction); return 0;
+                    case 'F':
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) && !inExplore ? TransportCommand::CycleFlockFormation
+                                                                                                   : TransportCommand::ToggleExploreMode);
+                        return 0;
                     case VK_BACK: if (inExplore) self->pushCommandFromWndProc(TransportCommand::ToggleExploreMode); return 0;
                     case 'J': self->pushCommandFromWndProc(TransportCommand::TogglePracticalLamps); return 0;
                     case 'H': self->pushCommandFromWndProc(TransportCommand::ToggleRtxSplitWipe); return 0;
@@ -142,17 +172,37 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::PrevMusicTrack : TransportCommand::NextMusicTrack);
                         return 0;
                     case VK_DOWN:
+                        if (GetKeyState(VK_SHIFT) & 0x8000) { self->pushCommandFromWndProc(TransportCommand::GpuWorkoutDown); return 0; }
+                        [[fallthrough]];
                     case VK_OEM_MINUS: self->pushCommandFromWndProc(TransportCommand::VolumeDown); return 0;
                     case VK_UP:
+                        if (GetKeyState(VK_SHIFT) & 0x8000) { self->pushCommandFromWndProc(TransportCommand::GpuWorkoutUp); return 0; }
+                        [[fallthrough]];
                     case VK_OEM_PLUS: self->pushCommandFromWndProc(TransportCommand::VolumeUp); return 0;
                     case VK_F12: self->pushCommandFromWndProc(TransportCommand::CaptureClean); return 0;
-                    case VK_ESCAPE: self->pushCommandFromWndProc(TransportCommand::Quit); return 0;
+                    // Esc gets you out of full screen first. Only from a window does it close the app.
+                    case VK_ESCAPE:
+                        self->pushCommandFromWndProc(self->isFullscreen() ? TransportCommand::LeaveFullscreen
+                                                                          : TransportCommand::Quit);
+                        return 0;
                     case VK_SPACE:  self->pushCommandFromWndProc(TransportCommand::TogglePlayPause); return 0;
                     case 'R':
                     case VK_HOME:   self->pushCommandFromWndProc(TransportCommand::Restart); return 0;
-                    case 'N':  self->pushCommandFromWndProc(TransportCommand::NextAct); return 0;
-                    case 'P':   self->pushCommandFromWndProc(TransportCommand::PrevAct); return 0;
-                    case 'L':       self->pushCommandFromWndProc(TransportCommand::ToggleLoop); return 0;
+                    case 'N':
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ToggleNeuralRendering
+                                                                                      : TransportCommand::NextAct);
+                        return 0;
+                    case 'P':
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::CyclePhysxGenre
+                                                                                      : TransportCommand::PrevAct);
+                        return 0;
+                    case 'L':
+                        if ((GetKeyState(VK_CONTROL) & 0x8000) && worldPortalDialogAvailable()) {
+                            openWorldPortalDialog(hwnd);
+                        } else {
+                            self->pushCommandFromWndProc(TransportCommand::ToggleLoop);
+                        }
+                        return 0;
                     case 'M':
                         if (inExplore) {
                             self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ClearMarbles : TransportCommand::SpawnMarbles);
@@ -165,7 +215,10 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case 'K':       self->pushCommandFromWndProc(TransportCommand::ToggleCaptions); return 0;
                     case VK_TAB:
                     case VK_F1:     self->pushCommandFromWndProc(TransportCommand::ToggleOverlay); return 0;
-                    case 'B':       self->pushCommandFromWndProc(TransportCommand::TriggerBenchSweep); return 0;
+                    case 'B':
+                        self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ToggleBirdCam
+                                                                                      : TransportCommand::TriggerBenchSweep);
+                        return 0;
                     case 'X':       self->pushCommandFromWndProc(TransportCommand::ToggleRtRuntime); return 0;
                     case 'C':       self->pushCommandFromWndProc(TransportCommand::ToggleCudaRuntime); return 0;
                     case 'T':       self->pushCommandFromWndProc(TransportCommand::ToggleTensorRuntime); return 0;
@@ -290,6 +343,12 @@ bool AppWindow::create(
         this);
     if (!hwnd_) {
         return false;
+    }
+    if (HMENU systemMenu = GetSystemMenu(hwnd_, FALSE)) {
+        AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+        if (worldPortalDialogAvailable())
+            AppendMenuW(systemMenu, MF_STRING, kWorldPortalCommand, L"Visit a Demo-Verse &world...\tCtrl+L");
+        AppendMenuW(systemMenu, MF_STRING, kMapAttributionCommand, L"Taipei 101 · 臺北 · © OpenStreetMap…");
     }
 
     RECT actualClient{};
@@ -437,6 +496,40 @@ void AppWindow::showLoading() {
     }
 }
 
+namespace {
+// Where the loading bar and the figures under it go. The paint routine and the repaint request share this.
+struct LoadingBarLayout { RECT track, detail, dirty; };
+LoadingBarLayout loadingBarLayout(const RECT& client, int dpi) {
+    const int bodyPx = MulDiv(17, dpi, 96);
+    const int midY = (client.top + client.bottom) / 2;
+    const int clientW = client.right - client.left;
+    const int width = std::max(40, std::min(std::clamp(clientW * 2 / 5, MulDiv(220, dpi, 96), MulDiv(560, dpi, 96)),
+                                            clientW - MulDiv(32, dpi, 96)));
+    const int height = std::max(4, MulDiv(6, dpi, 96));
+    const int left = (client.left + client.right - width) / 2;
+    const int top = midY + bodyPx * 5 / 2;
+    LoadingBarLayout l{};
+    l.track = {left, top, left + width, top + height};
+    l.detail = {client.left, top + height + bodyPx / 2, client.right, top + height + bodyPx / 2 + bodyPx * 3 / 2};
+    l.dirty = {client.left, top - 2, client.right, l.detail.bottom + 2};
+    return l;
+}
+} // namespace
+
+void AppWindow::setLoadingProgress(float fraction, std::wstring detail) {
+    if (!loading_) return;
+    const bool first = loadingFraction_ < 0.0f;
+    loadingFraction_ = std::clamp(fraction, 0.0f, 1.0f);
+    loadingDetail_ = std::move(detail);
+    if (!hwnd_) return;
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const LoadingBarLayout l = loadingBarLayout(client, static_cast<int>(GetDpiForWindow(hwnd_)));
+    // Only the bar's strip is repainted, so the rest of the screen does not flicker.
+    InvalidateRect(hwnd_, first ? nullptr : &l.dirty, FALSE);
+    UpdateWindow(hwnd_);
+}
+
 bool AppWindow::paintLoadingFromWndProc() {
     if (!hwnd_ || !loading_) return false;
     PAINTSTRUCT ps{};
@@ -462,6 +555,37 @@ bool AppWindow::paintLoadingFromWndProc() {
     SetTextColor(dc, RGB(150, 200, 195));
     RECT bodyRect{r.left, midY + bodyPx / 2, r.right, midY + bodyPx * 3};
     DrawTextW(dc, uiText(UiText::Loading), -1, &bodyRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | rtl);
+    if (loadingFraction_ >= 0.0f) {
+        // The loading bar and its figures: megabytes read and checksummed, GPU memory in use.
+        const LoadingBarLayout l = loadingBarLayout(r, dpi);
+        HBRUSH trackBrush = CreateSolidBrush(RGB(30, 44, 46));
+        HBRUSH fillBrush = CreateSolidBrush(RGB(120, 214, 200));
+        FillRect(dc, &l.track, trackBrush);
+        RECT fill = l.track;
+        fill.right = fill.left + static_cast<LONG>(static_cast<float>(l.track.right - l.track.left) * loadingFraction_ + 0.5f);
+        if (fill.right > fill.left) FillRect(dc, &fill, fillBrush);
+        DeleteObject(trackBrush);
+        DeleteObject(fillBrush);
+        if (!loadingDetail_.empty()) {
+            const int detailPx = MulDiv(13, dpi, 96);
+            HFONT detailFont = CreateFontW(-detailPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            auto previousFont = SelectObject(dc, detailFont ? detailFont : GetStockObject(DEFAULT_GUI_FONT));
+            SetTextColor(dc, RGB(128, 150, 152));
+            RECT detailRect = l.detail;
+            DrawTextW(dc, loadingDetail_.c_str(), -1, &detailRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, previousFont);
+            if (detailFont) DeleteObject(detailFont);
+        }
+    }
+    RECT creditsRect{r.left, midY + bodyPx * 3, r.right, r.bottom - bodyPx};
+    SetTextColor(dc, RGB(154, 170, 173));
+    DrawTextW(dc, kMapCredit, -1, &creditsRect, DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+#if defined(BOO_HAS_DLSS)
+    creditsRect.bottom -= bodyPx * 2;
+    DrawTextW(dc, L"NVIDIA RTX™   ·   NVIDIA DLSS SDK", -1, &creditsRect,
+              DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+#endif
     SelectObject(dc, oldFont);
     if (titleFont) DeleteObject(titleFont);
     if (bodyFont) DeleteObject(bodyFont);

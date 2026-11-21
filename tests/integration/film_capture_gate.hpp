@@ -1,6 +1,7 @@
 // Included by integration_main.cpp inside its anonymous namespace. No end-user
 // executable or image-library dependency: PNG uses inbox Windows Imaging Component.
 std::filesystem::path gFilmCaptureDirectory = "build/film_captures";
+std::optional<uint32_t> gHeroCaptureStartSeconds;
 bool gRequireDebugLayer = false;
 
 struct CaptureComScope {
@@ -163,6 +164,7 @@ bool testFullFilmCaptureGate() {
     const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
     JsonValue report(JsonValue::Object{});
+    report["driver_profiling_frozen"] = freezeDriverProfilingForTest(d3d);
     report["schema"] = 1; report["complete"] = false; report["width"] = 2560; report["height"] = 1440;
     report["sample_rate"] = 48000; report["adapter"] = d3d.adapterName();
     report["director"] = "sample-derived ScriptedDirector; no NPU execution claim";
@@ -193,6 +195,10 @@ bool testFullFilmCaptureGate() {
                 const auto sample = int64_t(seconds) * cue.sampleRate;
                 BOO_CHECK(sample < cue.durationSamples);
                 auto ctx = makeFilmGateContext(cue, sample, edition);
+                // The split-view comparison uses native resolution. Its clean-feed
+                // reference must use that same sampling grid for exact RGB10 equality.
+                ctx.dlssMode = DlssMode::Off;
+                ctx.rayReconstruction = false;
                 const std::string stem = std::string(selection.label) + "_" + editionName + "_" + std::to_string(seconds) + "s";
                 std::vector<uint8_t> rgba, repeat, canonical;
                 std::vector<uint32_t> rgb10, repeated10, canonical10;
@@ -340,16 +346,17 @@ bool testHeroVideoCaptureGate() {
     BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
     fx.setDisableRt(false);
 
-    // 300 native 2560x1440 frames @ 30 fps (1600 samples/frame @ 48 kHz) across [342.000s .. 352.000s)
+    // Ten seconds at 30 fps, starting on the requested film sample.
     constexpr uint32_t kTotalFrames = 300;
-    constexpr int64_t kStartSample = 342LL * 48000LL;
     constexpr int64_t kStepSamples = 1600LL;
-    fx.resetTo(342.0);
+    const auto startSeconds = gHeroCaptureStartSeconds.value_or(342);
+    const int64_t startSample = int64_t(startSeconds) * 48000;
+    fx.resetTo(startSeconds);
 
     std::vector<uint8_t> rgba;
     uint32_t width = 0, height = 0;
     for (uint32_t f = 0; f < kTotalFrames; ++f) {
-        const int64_t sample = kStartSample + int64_t(f) * kStepSamples;
+        const int64_t sample = startSample + int64_t(f) * kStepSamples;
         auto ctx = makeFilmGateContext(cue, sample, Edition::Family);
         ctx.presentationFrame = f;
         BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, width, height, &error, nullptr));
@@ -404,6 +411,9 @@ bool testInteractiveShowcaseCaptureGate() {
 
     const int64_t bathroomSample = 346LL * 48000LL;
     auto baseCtx = makeFilmGateContext(cue, bathroomSample, Edition::Family);
+    // Capture the native progressive and NRD REBLUR paths, including the unaccumulated motion view.
+    baseCtx.dlssMode = DlssMode::Off;
+    baseCtx.rayReconstruction = false;
 
     HudTelemetrySnapshot hud{};
     hud.filmTimeSeconds = 346.0;
@@ -904,5 +914,111 @@ bool testValidationShowcaseCaptures() {
     d3d.waitForGpu();
     BOO_CHECK(d3d.debugErrorCount() == 0);
     std::cout << "Validation captures saved to: " << outDir.string() << '\n';
+    return true;
+}
+
+bool testEffectsDetailCaptures() {
+    using namespace boo;
+    CaptureComScope com;
+    BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
+    const auto out = gFilmCaptureDirectory == std::filesystem::path("build/film_captures")
+        ? std::filesystem::path("build/effects_captures") : gFilmCaptureDirectory;
+    std::error_code ec;
+    std::filesystem::create_directories(out, ec);
+    BOO_CHECK(!ec);
+    D3D12Context d3d;
+    std::string error;
+    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
+    const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
+    const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
+    JsonValue manifest(JsonValue::Object{});
+    manifest["adapter"] = d3d.adapterName();
+    manifest["director"] = "sample-derived ScriptedDirector";
+    manifest["frames"] = JsonValue::Array{};
+    manifest["complete"] = false;
+    BOO_CHECK(writeFilmGateJson(out / "manifest.json", manifest));
+    const struct { const char* cueName; int seconds; } scenes[] = {
+        {"solo_tensor", 24}, {"solo_cuda", 24}, {"solo_npu", 25}, {"film_360s", 260}
+    };
+    constexpr const char* levels[] = {"low", "normal", "high"};
+    CaptureContactSheet sheet;
+    for (const auto& scene : scenes) {
+        CueSheet cue;
+        ValidationReport validation;
+        const std::string name = scene.cueName;
+        const auto path = resolveResourcePath("assets/cues/" + name + ".json");
+        BOO_CHECK(loadCueSheetFromFile(path, cue, validation) && validation.valid);
+        const auto mode = resolveShowVisualMode(cue);
+        M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, mode);
+        BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
+        auto ctx = makeFilmGateContext(cue, int64_t(scene.seconds) * cue.sampleRate, Edition::Family);
+        std::vector<uint8_t> previous, rgba, scratch;
+        std::vector<uint32_t> rgb10, repeated10;
+        uint32_t w = 0, h = 0;
+        for (uint32_t detail = 0; detail < 3; ++detail) {
+            ctx.effectsDetail = detail;
+            fx.resetTo(ctx.filmTimeSeconds);
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, w, h, &error, &rgb10));
+            uint64_t nonFinite = 0;
+            BOO_CHECK(fx.readSceneHdrFiniteForTest(nonFinite, &error) && nonFinite == 0);
+            fx.resetTo(0.0);
+            auto repeat = ctx;
+            repeat.presentationFrame += 777;
+            BOO_CHECK(fx.renderHeadlessCanvasForTest(repeat, scratch, w, h, &error, &repeated10));
+            BOO_CHECK(rgba == scratch && rgb10 == repeated10);
+            const std::string file = name + "_" + std::to_string(scene.seconds) + "s_" + levels[detail] + ".png";
+            BOO_CHECK(writeCapturePng(out / file, rgba, w, h));
+            sheet.add(rgba, w, h, name + "  " + std::to_string(scene.seconds) + "s  " + levels[detail]);
+            JsonValue entry(JsonValue::Object{});
+            entry["file"] = file;
+            entry["rgb10_hash"] = capturePixelHash(rgb10);
+            entry["seek_repeat_equal"] = true;
+            if (detail > 0) {
+                BOO_CHECK(previous.size() == rgba.size());
+                uint64_t changed = 0;
+                for (size_t i = 0; i < rgba.size(); i += 4) {
+                    const int r = std::abs(int(rgba[i]) - int(previous[i]));
+                    const int g = std::abs(int(rgba[i+1]) - int(previous[i+1]));
+                    const int b = std::abs(int(rgba[i+2]) - int(previous[i+2]));
+                    if (std::max({r, g, b}) >= 3) ++changed;
+                }
+                entry["pixels_changed_by_at_least_3_from_previous"] = changed;
+                if (mode == ShowVisualMode::SoloTensor || mode == ShowVisualMode::SoloCUDA) {
+                    BOO_CHECK(changed >= 128);
+                }
+            }
+            manifest["frames"].asArrayMut().push_back(std::move(entry));
+            if (mode == ShowVisualMode::FullFilm360s && detail == 1) {
+                HudTelemetrySnapshot hud{};
+                hud.canvasWidth = w; hud.canvasHeight = h; hud.actIndex = ctx.actIndex;
+                hud.totalActs = static_cast<uint32_t>(cue.scenes.size()); hud.filmTimeSeconds = scene.seconds;
+                hud.durationSeconds = double(cue.durationSamples) / cue.sampleRate;
+                auto compact = ctx;
+                compact.showOverlay = true;
+                compact.hudMode = 1;
+                BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(compact, hud, w, h, scratch, &error));
+                BOO_CHECK(writeCapturePng(out / "film_260s_compact.png", scratch, w, h));
+                BOO_CHECK(fx.readLastRenderedCanvasForTest(scratch, w, h, &error, &repeated10));
+                BOO_CHECK(repeated10 == rgb10);
+            }
+            previous.swap(rgba);
+        }
+        // A beat left over from the last live audio update must disappear immediately when reduced flash is enabled.
+        ctx.reducedFlash = true;
+        ctx.audioReactive = {};
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, w, h, &error, &rgb10));
+        ctx.audioReactive.beat = 1.0f;
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, scratch, w, h, &error, &repeated10));
+        BOO_CHECK(repeated10 == rgb10);
+        fx.shutdown();
+    }
+    BOO_CHECK(sheet.save(out / "effects_detail.png", 3));
+    d3d.waitForGpu();
+    BOO_CHECK(d3d.debugErrorCount() == 0);
+    manifest["reduced_flash_ignores_beat"] = true;
+    manifest["complete"] = true;
+    BOO_CHECK(writeFilmGateJson(out / "manifest.json", manifest));
+    std::cout << "Effects detail captures saved to: " << out.string() << '\n';
     return true;
 }

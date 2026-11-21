@@ -1,0 +1,95 @@
+{
+  "coordinates": "WGS 84. Taipei 101 uses its mapped spire axis. Other points are approximate landmark positions from the Council on Vertical Urbanism's Taipei map.",
+  "coordinate_source": "https://www.skyscrapercenter.com/index.php/city/taipei",
+  "heights": "height_m is architectural height above the entrance datum. roof_m, occupied_m and body_m identify the roof, highest occupied floor or main volume where documented. floors counts above-ground floors.",
+  "landmarks": [
+    {
+      "id": "taipei_101",
+      "name": "Taipei 101",
+      "lat": 25.033668,
+      "lon": 121.564810,
+      "height_m": 508.0,
+      "roof_m": 448.0,
+      "occupied_m": 438.0,
+      "floors": 101,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/taipei-101/117",
+        "https://global.ctbuh.org/resources/papers/download/1650-structural-design-of-taipei-101-the-worlds-tallest-building.pdf",
+        "https://www.openstreetmap.org/way/615183623"
+      ]
+    },
+    {
+      "id": "nanshan_plaza",
+      "name": "Taipei Nanshan Plaza",
+      "lat": 25.034451,
+      "lon": 121.567192,
+      "height_m": 271.49,
+      "occupied_m": 242.4,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/nan-shan-plaza/15368",
+        "https://www.mjd.co.jp/files/news_detail/file/461/file.pdf"
+      ]
+    },
+    {
+      "id": "the_sky_taipei",
+      "name": "The Sky Taipei",
+      "lat": 25.036301,
+      "lon": 121.566063,
+      "height_m": 280.0,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/b/29218",
+        "https://acpvarchitects.com/project/the-sky-taipei-2/"
+      ]
+    },
+    {
+      "id": "cathay_landmark",
+      "name": "Cathay Landmark",
+      "lat": 25.040510,
+      "lon": 121.566872,
+      "height_m": 212.0,
+      "floors": 46,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/building/13041"
+      ]
+    },
+    {
+      "id": "farglory_financial_center",
+      "name": "Farglory Financial Center",
+      "lat": 25.039740,
+      "lon": 121.564217,
+      "height_m": 208.3,
+      "body_m": 164.5,
+      "floors": 32,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/wd/10037",
+        "https://www.cylee.com/project/Farglory-O3-Financial-Center?lang=tw"
+      ]
+    },
+    {
+      "id": "twtc_international_trade_building",
+      "name": "TWTC International Trade Building",
+      "lat": 25.034361,
+      "lon": 121.561089,
+      "height_m": 143.0,
+      "floors": 34,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/b/4240",
+        "https://www.twtc.com.tw/en/contact-us"
+      ]
+    },
+    {
+      "id": "fubon_life",
+      "name": "Fubon Life Insurance Building",
+      "lat": 25.039499,
+      "lon": 121.570251,
+      "height_m": 265.55,
+      "occupied_m": 239.85,
+      "floors": 54,
+      "typical_floor_area_m2": 1650,
+      "sources": [
+        "https://www.skyscrapercenter.com/building/building/30607",
+        "https://www.rpbw.com/project/fubon-tower-and-fubon-art-museum"
+      ]
+    }
+  ]
+}

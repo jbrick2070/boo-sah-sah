@@ -66,6 +66,11 @@ public:
 
     void setLoopEnabled(bool enabled);
     bool loopEnabled() const noexcept { return loopEnabled_; }
+    bool getLoopRange(int64_t& startSample, int64_t& endSample) const noexcept {
+        startSample = loopStartSample_;
+        endSample = loopEndSample_;
+        return hasCustomLoopRange_;
+    }
     void setLoopRange(int64_t startSample, int64_t endSample);
     void clearLoopRange();
 

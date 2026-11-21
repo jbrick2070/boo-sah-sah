@@ -44,11 +44,25 @@ struct AppSettings {
     bool noActivateWindow = false;
     QualityPresetId qualityPreset = QualityPresetId::Balanced;
     bool showOverlay = true;
+    uint32_t dashboardPanel = 0; // Upper-left dashboard: 0 full, 1 mini strip, 2 hidden tab (backtick cycles)
     bool showCaptions = true;
     // "auto" follows the Windows display language; otherwise a catalog tag such as "ja-JP" or "en-US".
     std::string language = "auto";
     std::filesystem::path stringsDir = "assets/strings";
     bool reducedFlash = false;
+    uint32_t effectsDetail = 1;
+    PathTracingLevel pathTracing = PathTracingLevel::Low;
+    DlssMode dlssMode = DlssMode::Quality;
+    bool rayReconstruction = true;
+    FrameGenerationMode frameGeneration = FrameGenerationMode::Auto;
+    ReflexMode reflex = ReflexMode::On;
+    NeuralRenderingControls neural{};
+    uint32_t physxGenre = 0;          // PhysX suite, live genre (boo/physx_genres.hpp)
+    bool physxRouteTest = false;      // sweep every bird route through the PhysX city, report, exit
+    uint32_t gpuWorkout = 0;          // 0..10: extra birds to load the GPU (0 = authored film)
+    float workoutFloorFps = 24.0f;    // the workout never takes the frame rate under this (0 = no floor)
+    uint32_t flockFormation = 0;      // 0 extended cluster, 1 vee, 2 echelon, 3 column, 4 front, 5 kettle
+    bool birdCam = false;             // camera follows the flock instead of the film's shots
     float motionScale = 1.0f;
     bool legacyM0Visual = false;
     bool startInExploreMode = false;
@@ -101,6 +115,8 @@ struct AppSettings {
 bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSettings, std::string* outError = nullptr);
 bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioSettings, std::string* outError = nullptr);
 std::string buildCliHelpText();
+// Turns on every GPU feature the app has, for hardware testing (--test-rig, [hardware] test_rig = true).
+void applyTestRigProfile(AppSettings& settings) noexcept;
 
 std::vector<QualityPresetSpec> loadQualityPresets(const std::filesystem::path& path);
 QualityPresetSpec findQualityPresetSpec(const std::vector<QualityPresetSpec>& presets, QualityPresetId id);

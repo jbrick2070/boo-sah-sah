@@ -1,4 +1,5 @@
 #include "boo/bmesh.hpp"
+#include "boo/startup_progress.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -30,6 +31,7 @@ bool loadBmesh(const std::filesystem::path& path,Bmesh& output,std::string* erro
     if(size<64 || size>256*1024*1024)return fail("Invalid mesh file size");
     std::vector<uint8_t> bytes(static_cast<size_t>(size)); file.seekg(0);
     if(!file.read(reinterpret_cast<char*>(bytes.data()),size))return fail("Truncated mesh");
+    startupAssetLoaded(path);
     const auto* p=bytes.data();
     if(std::memcmp(p,"BMESH001",8)||u32(p+8)!=1||u32(p+12)!=64||u32(p+16)!=40)return fail("Unsupported mesh format");
     const uint32_t nv=u32(p+20),ni=u32(p+24),ns=u32(p+28);
@@ -38,6 +40,7 @@ bool loadBmesh(const std::filesystem::path& path,Bmesh& output,std::string* erro
     if(payload!=u32(p+60)||payload+64!=bytes.size())return fail("Mesh size/count mismatch");
     if(crc(p+64,static_cast<size_t>(payload))!=u32(p+56))return fail("Mesh CRC32 mismatch");
     Bmesh mesh;
+    mesh.sourcePayloadCrc = u32(p+56);
     for(int i=0;i<6;++i) { mesh.bounds[i]=f32(p+32+i*4);if(!std::isfinite(mesh.bounds[i]))return fail("Nonfinite bounds"); }
     for(int i=0;i<3;++i)if(mesh.bounds[i]>mesh.bounds[i+3])return fail("Inverted bounds");
     uint32_t expected=0;

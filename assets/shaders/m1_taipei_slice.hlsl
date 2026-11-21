@@ -1599,6 +1599,8 @@ cbuffer M1PostCB : register(b0)
     uint   gDitherSeed;
     float  gPreExposure;
     float  gBloomIntensity;
+    float  gFocusDistance;
+    float  gFocusWeight;
 };
 
 Texture2D<float>  gSceneDistTex : register(t0);
@@ -1721,7 +1723,15 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         float3 hdr = hdrCenter;
         if ((lensFlags & 1u) != 0u)
         {
-            float focus = autofocusDistance(size);
+            float focus = gFocusDistance;
+            if (gFocusWeight < 1.0)
+            {
+                // Interpolate in diopters as Explore takes over or the film leaves the aircraft.
+                float autoFocus = autofocusDistance(size);
+                focus = gFocusWeight > 0.0
+                    ? rcp(lerp(rcp(max(autoFocus, 0.05)), rcp(max(gFocusDistance, 0.05)), gFocusWeight))
+                    : autoFocus;
+            }
             float centerD = loadDistance(int2(pxPos), size);
             hdr = bokehDepthOfField(pxPos, size, min(hdrCenter, 64.0.xxx), centerD, focus, scale);
         }
@@ -1819,7 +1829,7 @@ cbuffer M1PresentCB : register(b0)
 
     // bit0:overlay, bit1:audioClk, bit2:muted, bit3:paused, bit4:loop, bit5:midnight,
     // bit6:benchRun, bit7:benchDone, bits8..9:hudMode, bits10..11:abEngine (0=RT,1=CUDA,2=Tensor,3=Codec),
-    // bit12:codecViewActive, bit13:codecHwTexValid, bit14:abLeftHwVerified
+    // bit12:explicit full-screen codec, bit13:codecHwTexValid, bit14:abLeftHwVerified, bit18:cue codec inset
     uint   gHudFlags;
     uint   gEnginePacked;       // 4-bit nibbles: RT, Tensor, NPU, CUDA, Codec
     uint   gSwapchainBits;      // 10 or 8
@@ -1829,12 +1839,12 @@ cbuffer M1PresentCB : register(b0)
     float4 gBenchPrimary;       // Standalone offscreen `B` sweep: RT MRays/s, CUDA MPart/s, Tensor TFLOPS, NVENC FPS
     float4 gBenchFill;          // Normalized [0..1] standalone benchmark bar fill
     float4 gRecentGpuMs[4];
-    float4 gVolumeAndPadding;   // x: volumePercent (<0 hidden)
+    float4 gVolumeAndPadding;   // x: volumePercent (<0 hidden), y: director inference ms, z: measured inference Hz
 
     // Live-scene per-pillar attribution metrics (0=RT, 1=CUDA, 2=Tensor, 3=Codec):
     //   .x = live execution ms, .y = live throughput, .z = workload scale, .w = aux quality (PSNR dB)
     float4 gLivePillarMetrics[4];
-    // .x = packed 4-bit live pillar mode nibbles: 0=LIVE_HW, 1=SUB, 2=OFF, 3=FAULT
+    // .x = GPU mode nibbles, .y = DirectorHudBackend, .z = completed neural inferences
     uint4  gLivePillarMeta;
 
     // Pass-4 HUD-only lower-third captions, end card & LIVE CAMERA indicator (never in CanvasClean!)
@@ -1843,7 +1853,22 @@ cbuffer M1PresentCB : register(b0)
 
     float4 gInteractiveState;   // .x = abSplitRatio, .y = sunElev01, .z = sunAzim01, .w = accumSpp
     uint4  gInteractiveMeta;    // .x: bit0=explore, bit1=sunOvr, bit2=lampsOff, bit3=nrd, bits4..7=preset, bit8=accum
+
+    // Neural rendering rows (0 = shading, 1 = textures, 2 = radiance cache)
+    float4 gNeuralMs;           // xyz = GPU ms, w = texture compression ratio
+    float4 gNeuralQuality;      // xyz = PSNR dB per feature, w = summed TFLOPS
+    uint4  gNeuralMeta;         // x: 2-bit RendererFeatureState per feature, bits 8..9 solo, bit 10 master; y: cache steps
+
+    // GPU sensors from NVML (main.cpp polls them at 4 Hz on a worker thread)
+    float4 gGpuSensorA;         // x temperature C, y power W, z power limit W, w graphics clock MHz
+    float4 gGpuSensorB;         // x load %, y memory clock MHz, z fan % (< 0 none), w flags: 1 available, 2 power, 4 thermal
+    float4 gCpuWorkout;         // x CPU system % (< 0 unavailable), y CPU app %, w birds drawn,
+                                // z = workout level 0..10 | flock formation << 4 | bird camera << 8 | species << 9
+    float4 gPhysx;              // x genre | state << 4 (0 unavailable, 1 off, 2 active, 3 starting), y simulation GPU ms,
+                                // z render GPU ms, w thousands of active voxels
 };
+
+
 
 Texture2D<float4> gCanvasCleanTex     : register(t0);
 Texture2D<float4> gCanvasAbCompareTex : register(t1);
@@ -1855,28 +1880,44 @@ SamplerState      gLinearClamp        : register(s0);
 
 // Label slots: the same order as enum UiLabel in include/boo/ui_text.hpp.
 static const uint UI_LBL_PREV = 0u, UI_LBL_PLAY = 1u, UI_LBL_PAUSE = 2u, UI_LBL_NEXT = 3u;
-static const uint UI_LBL_MODE_FILM = 4u, UI_LBL_MODE_FREE = 5u, UI_LBL_LIVE_GPU = 6u;
+static const uint UI_LBL_MODE_FILM = 4u, UI_LBL_MODE_FREE = 5u, UI_LBL_HARDWARE = 6u;
 static const uint UI_LBL_COL_SIZE = 7u, UI_LBL_COL_RATE = 8u, UI_LBL_STATE_LIVE = 9u, UI_LBL_BENCH = 13u;
 static const uint UI_LBL_CAM_FREE = 14u, UI_LBL_CAM_FILM = 15u, UI_LBL_LAMP = 16u, UI_LBL_WIPE = 17u;
 static const uint UI_LBL_MARBLES = 18u, UI_LBL_SUN = 19u, UI_LBL_AZIMUTH = 20u, UI_LBL_MUTE = 21u;
 static const uint UI_LBL_MUSIC = 22u, UI_LBL_RESET = 23u, UI_LBL_NEXT_SCENE = 24u, UI_LBL_SOLO = 25u;
 static const uint UI_LBL_ALL = 26u, UI_LBL_ACT1 = 27u, UI_LBL_SCENE_FIRST = 34u, UI_LBL_SCENE_CUSTOM = 40u;
 static const uint UI_LBL_AOV_FIRST = 41u, UI_LBL_LIVE_CAMERA = 48u, UI_LBL_OST_SYNTH = 49u, UI_LBL_OST_CUSTOM = 50u;
-static const float UI_CAPTION_TOP = 960.0;
+static const uint UI_LBL_STATE_SCRIPT = 51u, UI_LBL_STATE_WARMING = 52u, UI_LBL_STATE_IDLE = 53u;
+static const uint UI_LBL_PATH_TRACING = 54u, UI_LBL_UNAVAILABLE = 55u, UI_LBL_FEATURE_LEVEL = 56u;
+static const uint UI_LBL_GRAPHICS = 62u, UI_LBL_AUTO = 63u, UI_LBL_ENABLED = 64u, UI_LBL_BOOST = 65u;
+static const uint UI_LBL_RR = 66u, UI_LBL_FG = 67u, UI_LBL_RENDER_FPS = 68u, UI_LBL_DISPLAY_FPS = 69u;
+static const uint UI_LBL_DLSS_UPSCALING = 70u;
+static const float UI_CAPTION_TOP = 1080.0;
 
 // A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
 // the same site uses; `cells` is the room the label has, in 5-unit glyph cells. Returns `fallback`
 // (the glyph-table English) when no translation is loaded.
-float uiLabel(float2 px, float2 origin, float scale, float cells, uint id, float fallback)
+float uiLabel(float2 px, float2 origin, float scale, float cells, uint id, float fallback, float nativeScale = 0.0)
 {
     if ((gHudFlags & 0x10000u) == 0u)
         return fallback;
     float2 rel = floor(px) - floor(origin - float2(0.0, 2.5 * scale));
     float2 box = float2(cells * 5.0 * scale, 11.0 * scale);
-    float2 cell = float2(160.0, 20.0) * clamp(floor(gSwapchainAndCanvas.y / 540.0), 1.0, 3.0);
-    if (any(rel < 0.0) || any(rel >= box) || any(rel >= cell))
+    float atlasScale = clamp(floor(gSwapchainAndCanvas.y / 540.0), 1.0, 3.0);
+    float2 cell = float2(160.0, 20.0) * atlasScale;
+    if (any(rel < 0.0) || any(rel >= box))
         return 0.0;
     float2 base = float2((float)(id & 3u), (float)(id >> 2u)) * cell;
+    // The same localized status badge is shown at different sizes in the table
+    // and the responsive comparison banners. Sample the full DirectWrite label.
+    if (nativeScale > 0.0 && abs(nativeScale * atlasScale - scale) > 0.01) {
+        float2 src = (rel + 0.5) * (nativeScale * atlasScale / scale);
+        if (any(src >= cell)) return 0.0;
+        uint w, h;
+        gUiTextTex.GetDimensions(w, h);
+        return gUiTextTex.SampleLevel(gLinearClamp, (base + clamp(src, 0.5, cell - 0.5)) / float2(w,h), 0);
+    }
+    if (any(rel >= cell)) return 0.0;
     return gUiTextTex.Load(int3(base + rel, 0));
 }
 
@@ -2399,6 +2440,22 @@ float sampleUint4(float2 px, float2 origin, float scale, uint val)
     return a;
 }
 
+// Whole number up to 999,999, right-aligned in six places.
+float sampleUint6(float2 px, float2 origin, float scale, uint val)
+{
+    val = min(val, 999999u);
+    float stepX = 5.0 * scale;
+    float a = 0.0;
+    uint place = 100000u;
+    [unroll] for (uint i = 0u; i < 6u; ++i)
+    {
+        if (val >= place || i == 5u)
+            a = max(a, sampleGlyph(px, origin + float2(float(i) * stepX, 0.0), scale, 48u + (val / place) % 10u));
+        place /= 10u;
+    }
+    return a;
+}
+
 float sampleWord4(float2 px, float2 origin, float scale, uint c0, uint c1, uint c2, uint c3)
 {
     float stepX = 5.0 * scale;
@@ -2482,6 +2539,103 @@ float3 livePillarModeColor(uint modeNib)
     return float3(0.42, 0.46, 0.56);                    // OFF / STANDBY
 }
 
+uint4 hardwareRowWord(uint engine)
+{
+    if (engine == 1u) return uint4(67u, 85u, 68u, 65u); // CUDA
+    if (engine == 2u) return uint4(84u, 78u, 83u, 82u); // TNSR
+    if (engine == 3u) return uint4(67u, 79u, 68u, 67u); // CODC
+    if (engine == 4u) return uint4(78u, 80u, 85u, 32u); // NPU
+    return uint4(82u, 84u, 32u, 32u);                   // RT
+}
+
+// One line of GPU sensors: "GPU  67C  92W/175W  1890MHZ  LOAD 99  PWR".
+// showLimit adds the power limit (full-width table only); narrower panels keep load and the warning.
+float gpuSensorLine(float2 px, float2 at, float sc, bool showLimit, out float3 warnColor, out float warnMask)
+{
+    const uint flags = (uint)(gGpuSensorB.w + 0.5);
+    warnColor = float3(1.0, 0.72, 0.12);
+    warnMask = 0.0;
+    float t = sampleWord4(px, at, sc, 71u, 80u, 85u, 32u);                                                   // GPU
+    if ((flags & 1u) == 0u) {
+        t = max(t, sampleWord8(px, at + float2(25.0 * sc, 0), sc, 83u, 69u, 78u, 83u, 79u, 82u, 83u, 32u)); // SENSORS
+        return max(t, sampleWord4(px, at + float2(65.0 * sc, 0), sc, 78u, 47u, 65u, 32u));                  // N/A
+    }
+    const float u = sc / 1.2;
+    t = max(t, sampleUint4(px, at + float2(22.0 * u, 0), sc, (uint)round(gGpuSensorA.x)));
+    t = max(t, sampleGlyph(px, at + float2(46.0 * u, 0), sc, 67u));                                          // C
+    t = max(t, sampleUint4(px, at + float2(58.0 * u, 0), sc, (uint)round(gGpuSensorA.y)));
+    t = max(t, sampleGlyph(px, at + float2(82.0 * u, 0), sc, 87u));                                          // W
+    float x = 94.0;
+    if (showLimit && gGpuSensorA.z > 0.0) {
+        t = max(t, sampleGlyph(px, at + float2(88.0 * u, 0), sc, 47u));                                      // /
+        t = max(t, sampleUint4(px, at + float2(88.0 * u, 0), sc, (uint)round(min(gGpuSensorA.z, 999.0))));
+        t = max(t, sampleGlyph(px, at + float2(112.0 * u, 0), sc, 87u));                                     // W
+        x = 126.0;
+    }
+    t = max(t, sampleUint4(px, at + float2(x * u, 0), sc, (uint)round(gGpuSensorA.w)));
+    t = max(t, sampleWord4(px, at + float2((x + 25.0) * u, 0), sc * 0.85, 77u, 72u, 90u, 32u));              // MHZ
+    t = max(t, sampleWord4(px, at + float2((x + 46.0) * u, 0), sc * 0.85, 76u, 79u, 65u, 68u));              // LOAD
+    t = max(t, sampleUint4(px, at + float2((x + 62.0) * u, 0), sc, (uint)round(gGpuSensorB.x)));
+    const float2 warnAt = at + float2((x + 88.0) * u, 0);
+    if ((flags & 4u) != 0u) {
+        warnMask = sampleWord4(px, warnAt, sc, 72u, 79u, 84u, 32u);                                          // HOT
+        warnColor = float3(0.98, 0.22, 0.34);
+    } else if ((flags & 2u) != 0u) {
+        warnMask = sampleWord4(px, warnAt, sc, 80u, 87u, 82u, 32u);                                          // PWR
+    }
+    return t;
+}
+
+// "CPU 23%  APP 9%" (Windows gives apps load only; CPU temperature and power need a kernel driver).
+float cpuLine(float2 px, float2 at, float sc)
+{
+    const float u = sc / 1.2;
+    float t = sampleWord4(px, at, sc, 67u, 80u, 85u, 32u);                                                   // CPU
+    if (gCpuWorkout.x < 0.0) return max(t, sampleWord4(px, at + float2(22.0 * u, 0), sc, 78u, 47u, 65u, 32u)); // N/A
+    t = max(t, sampleUint4(px, at + float2(22.0 * u, 0), sc, (uint)round(gCpuWorkout.x)));
+    t = max(t, sampleGlyph(px, at + float2(47.0 * u, 0), sc, 37u));                                          // %
+    t = max(t, sampleWord4(px, at + float2(64.0 * u, 0), sc, 65u, 80u, 80u, 32u));                           // APP
+    t = max(t, sampleUint4(px, at + float2(82.0 * u, 0), sc, (uint)round(gCpuWorkout.y)));
+    t = max(t, sampleGlyph(px, at + float2(107.0 * u, 0), sc, 37u));                                         // %
+    return t;
+}
+
+float liveStateLabel(float2 px, float2 origin, float scale, uint state)
+{
+    if (state == 4u) {
+        float text = sampleWord4(px, origin, scale, 73u, 68u, 76u, 69u); // IDLE
+        return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_IDLE, text, 1.45);
+    }
+    uint4 word = uint4(76, 73, 86, 69); // LIVE
+    if (state == 1u) word = uint4(83, 85, 66, 32); // SUB
+    if (state == 2u) word = uint4(79, 70, 70, 32); // OFF
+    if (state == 3u) word = uint4(70, 76, 84, 32); // FLT
+    float text = sampleWord4(px, origin, scale, word.x, word.y, word.z, word.w);
+    return uiLabel(px, origin, scale, 5.0, UI_LBL_STATE_LIVE + state, text, 1.45);
+}
+
+// DirectorHudBackend in render.hpp distinguishes CPU inference from the scripted director.
+uint measuredDirectorBackend()
+{
+    uint backend = gLivePillarMeta.y;
+    if ((backend == 2u || backend == 3u) && gLivePillarMeta.z == 0u) return 1u;
+    return backend;
+}
+
+float directorStateLabel(float2 px, float2 origin, float scale, uint backend)
+{
+    if (backend == 1u) {
+        float text = sampleWord8(px, origin, scale, 87u, 65u, 82u, 77u, 85u, 80u, 32u, 32u); // WARMUP
+        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_WARMING, text, 1.45);
+    }
+    if (backend == 4u) {
+        float text = sampleWord8(px, origin, scale, 83u, 67u, 82u, 73u, 80u, 84u, 32u, 32u); // SCRIPT
+        return uiLabel(px, origin, scale, 7.0, UI_LBL_STATE_SCRIPT, text, 1.45);
+    }
+    if (backend == 3u) return sampleWord4(px, origin + float2(10.0 * scale, 0), scale, 67u, 80u, 85u, 32u);
+    return liveStateLabel(px, origin + float2(5.0 * scale, 0), scale, backend == 2u ? 0u : (backend == 5u ? 3u : 2u));
+}
+
 float segmentedBar(float2 px, float2 rectMin, float2 rectSize, float fill01, uint segments)
 {
     float2 rel = (px - rectMin) / rectSize;
@@ -2502,7 +2656,27 @@ float verticalBar(float2 px, float2 rectMin, float2 rectSize, float fill01)
     return (fromBottom <= saturate(fill01)) ? 1.0 : 0.15;
 }
 
+float3 sampleCodecView(float2 uv, bool hardwareVerified, bool externalMedia)
+{
+    if (!hardwareVerified)
+        return sampleShaderCodecSubstitute(uv, externalMedia);
+    float3 decoded = gCodecDecodedTex.SampleLevel(gLinearClamp, uv, 0.0).rgb;
+    if (externalMedia)
+        decoded = saturate(lerp(decoded, gCanvasCleanTex.SampleLevel(gLinearClamp, uv, 0.0).rgb, 0.18));
+    return decoded;
+}
+
+float3 hudOver(inout float alpha, float3 under, float3 ink, float coverage) {
+    alpha += (1.0 - alpha) * saturate(coverage);
+    return lerp(under, ink, coverage);
+}
+float3 hudInk(inout float alpha, float3 ink) { alpha = 1.0; return ink; }
+#ifdef BOO_FRAME_GENERATION_OUTPUTS
+struct PresentOutputs { float4 color : SV_Target0; float4 scene : SV_Target1; float alpha : SV_Target2; };
+PresentOutputs PSPresentLetterboxHud(VSOut pin)
+#else
 float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
+#endif
 {
     const float2 res = max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
     const float2 canvasRes = max(gSwapchainAndCanvas.zw, float2(1.0, 1.0));
@@ -2510,13 +2684,18 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
 
     const bool showOverlay        = (gHudFlags & 1u) != 0u;
     const uint hudMode            = (gHudFlags >> 8u) & 3u;
-    const uint abEngine           = (gHudFlags >> 10u) & 3u;
+    // Bits 10..11 retain the four original engines; bit 19 selects the director comparison.
+    const bool directorCompare    = (gHudFlags & (1u << 19u)) != 0u;
+    const uint abEngine           = directorCompare ? 4u : ((gHudFlags >> 10u) & 3u);
     const bool codecViewActive    = (gHudFlags & (1u << 12u)) != 0u;
     const bool codecHwTexValid    = (gHudFlags & (1u << 13u)) != 0u;
     const bool abLeftHwVerified   = (gHudFlags & (1u << 14u)) != 0u;
     const bool externalMediaValid = (gHudFlags & (1u << 15u)) != 0u;
+    const bool cueCodecInset      = (gHudFlags & (1u << 18u)) != 0u;
 
     float3 sdr = 0.0.xxx;
+    float uiAlpha = 0.0;
+    float3 hudless = 0.0.xxx;
     float2 lbMin = gLetterboxRect.xy;
     float2 lbSize = max(gLetterboxRect.zw, float2(1.0, 1.0));
     if (px.x >= lbMin.x && px.x < (lbMin.x + lbSize.x) &&
@@ -2531,27 +2710,14 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 // Codec A/B: Left = Live Hardware H.264 Encoded+Decoded (or Shader Quant Sub), Right = Pristine 10-bit CanvasClean
                 if (canvasUv.x < splitRatio)
                 {
-                    if (codecHwTexValid)
-                    {
-                        float3 hwRgb = gCodecDecodedTex.SampleLevel(gLinearClamp, canvasUv, 0.0).rgb;
-                        if (externalMediaValid)
-                        {
-                            float3 carrier = gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0).rgb;
-                            hwRgb = saturate(lerp(hwRgb, carrier, 0.18));
-                        }
-                        sdr = hwRgb;
-                    }
-                    else
-                    {
-                        sdr = sampleShaderCodecSubstitute(canvasUv, externalMediaValid);
-                    }
+                    sdr = sampleCodecView(canvasUv, codecHwTexValid, externalMediaValid);
                 }
                 else
                 {
                     sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
                 }
             }
-            else if (abLeftHwVerified && canvasUv.x >= splitRatio)
+            else if ((directorCompare || abLeftHwVerified) && canvasUv.x >= splitRatio)
             {
                 // RT / CUDA / Tensor A/B: Left = Canonical Live HW CanvasClean, Right = Isolated Substitute CanvasAbCompare
                 sdr = sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
@@ -2563,27 +2729,40 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         }
         else if (codecViewActive)
         {
-            if (codecHwTexValid)
-            {
-                float3 hwRgb = gCodecDecodedTex.SampleLevel(gLinearClamp, canvasUv, 0.0).rgb;
-                if (externalMediaValid)
-                {
-                    float3 carrier = gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0).rgb;
-                    hwRgb = saturate(lerp(hwRgb, carrier, 0.18));
-                }
-                sdr = hwRgb;
-            }
-            else
-            {
-                sdr = sampleShaderCodecSubstitute(canvasUv, externalMediaValid);
-            }
+            sdr = sampleCodecView(canvasUv, codecHwTexValid, externalMediaValid);
         }
         else
         {
             sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
+            hudless = sdr;
+            // The broadcast monitor belongs to telemetry. Clean cinema keeps the
+            // native image, and the standalone benchmark owns this corner when open.
+            if (cueCodecInset && lbSize.x >= 640.0 && (hudMode != 0u || (gHudFlags & 0xC0u) == 0u))
+            {
+                float2 monitorSize = lbSize * 0.19;
+                float2 monitorMin = lbMin + float2(lbSize.x - monitorSize.x - lbSize.y * 0.026, lbSize.y * 0.026);
+                float2 local = px - monitorMin;
+                if (all(local >= 0.0) && all(local < monitorSize))
+                {
+                    uiAlpha = 1.0;
+                    sdr = sampleCodecView(local / monitorSize, codecHwTexValid, externalMediaValid);
+                    float border = min(min(local.x, local.y), min(monitorSize.x - local.x, monitorSize.y - local.y));
+                    float3 rim = codecHwTexValid ? float3(0.12, 0.67, 0.56) : float3(0.19, 0.51, 0.66);
+                    if (border < max(1.0, lbSize.y / 750.0)) sdr = rim;
+                    float textScale = max(1.0, floor(lbSize.y / 650.0));
+                    if (all(local >= 3.0 * textScale) && all(local < float2(31.0, 13.0) * textScale))
+                    {
+                        float label = codecHwTexValid
+                            ? sampleWord8(local, 5.0 * textScale, textScale, 72u,46u,50u,54u,52u,32u,32u,32u)
+                            : sampleWord4(local, 5.0 * textScale, textScale, 72u,76u,83u,76u);
+                        sdr = lerp(float3(0.025,0.045,0.06), 0.90.xxx, label);
+                    }
+                }
+            }
         }
     }
 
+    if (uiAlpha == 0.0) hudless = sdr;
     const float3 colJade   = float3(0.04, 0.88, 0.74);
     const float3 colOrchid = float3(0.88, 0.24, 0.90);
     const float3 colAmber  = float3(1.00, 0.68, 0.16);
@@ -2603,20 +2782,20 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         const float barH = 44.0 * uiScale;
         if (px.y >= res.y - barH)
         {
-            sdr = lerp(sdr, float3(0.020, 0.032, 0.058), 0.90);
+            sdr = hudOver(uiAlpha, sdr, float3(0.020, 0.032, 0.058), 0.90);
             if (abs(px.y - (res.y - barH)) < 1.5)
-                sdr = lerp(sdr, colJade, 0.65);
+                sdr = hudOver(uiAlpha, sdr, colJade, 0.65);
 
             // Timecode MM:SS
             float tcMask = sampleTimecodeMMSS(px, float2(14.0 * uiScale, res.y - 34.0 * uiScale), 2.0 * uiScale, gFilmTime);
-            sdr = lerp(sdr, colEnamel, tcMask);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, tcMask);
 
             // 10B / 8B swapchain bit-depth + Audio Clock lock badge ("ACLK" vs "QPC ")
             uint b0 = (gSwapchainBits >= 10u) ? 49u : 56u;
             uint b1 = (gSwapchainBits >= 10u) ? 48u : 66u;
             uint b2 = (gSwapchainBits >= 10u) ? 66u : 32u;
             float bitTxt = sampleWord4(px, float2(14.0 * uiScale, res.y - 17.0 * uiScale), 1.5 * uiScale, b0, b1, b2, 32u);
-            sdr = lerp(sdr, (gSwapchainBits >= 10u) ? colJade : colAmber, bitTxt);
+            sdr = hudOver(uiAlpha, sdr, (gSwapchainBits >= 10u) ? colJade : colAmber, bitTxt);
 
             bool aclk = (gHudFlags & 2u) != 0u;
             float clkTxt = sampleWord4(
@@ -2624,22 +2803,22 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float2(44.0 * uiScale, res.y - 17.0 * uiScale),
                 1.5 * uiScale,
                 aclk ? 65u : 81u, aclk ? 67u : 80u, aclk ? 76u : 67u, aclk ? 75u : 32u);
-            sdr = lerp(sdr, aclk ? colJade : colCyan, clkTxt);
+            sdr = hudOver(uiAlpha, sdr, aclk ? colJade : colCyan, clkTxt);
 
             // Clickable / Draggable Timeline Scrub Bar + Act Sub-Bar
             float2 tlMin  = float2(82.0 * uiScale, res.y - 31.0 * uiScale);
             float2 tlSize = float2(max(90.0, res.x * 0.20), 10.0 * uiScale);
             float filmFill = saturate(gFilmTime / max(gDuration, 1.0));
             float tlMask = segmentedBar(px, tlMin, tlSize, filmFill, 24u);
-            sdr = lerp(sdr, lerp(colJade, colOrchid, filmFill), tlMask * 0.92);
+            sdr = hudOver(uiAlpha, sdr, lerp(colJade, colOrchid, filmFill), tlMask * 0.92);
             float tlThumbX = tlMin.x + filmFill * tlSize.x;
             if (abs(px.x - tlThumbX) <= 2.2 * uiScale && px.y >= tlMin.y - 2.5 * uiScale && px.y <= tlMin.y + tlSize.y + 2.5 * uiScale)
-                sdr = colEnamel;
+                sdr = hudInk(uiAlpha, colEnamel);
 
             float2 actMin  = float2(82.0 * uiScale, res.y - 16.0 * uiScale);
             float2 actSize = float2(max(90.0, res.x * 0.20), 5.0 * uiScale);
             float actMask = segmentedBar(px, actMin, actSize, gActProgress, 12u);
-            sdr = lerp(sdr, colAmber, actMask * 0.88);
+            sdr = hudOver(uiAlpha, sdr, colAmber, actMask * 0.88);
 
             // 3-Band Live Audio Crossover Meters (LOW / MID / HIGH)
             float eqBaseX = tlMin.x + tlSize.x + 12.0 * uiScale;
@@ -2651,20 +2830,20 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float2 bMin = float2(eqBaseX + (float)bandIdx * 9.0 * uiScale, res.y - 34.0 * uiScale);
                 float2 bSz  = float2(6.0 * uiScale, 24.0 * uiScale);
                 float vm = verticalBar(px, bMin, bSz, bands[bandIdx]);
-                sdr = lerp(sdr, eqCols[bandIdx], vm * 0.90);
+                sdr = hudOver(uiAlpha, sdr, eqCols[bandIdx], vm * 0.90);
             }
 
             // FPS & Total Frame GPU ms readouts
             float statX = eqBaseX + 32.0 * uiScale;
             float fpsLbl = sampleWord4(px, float2(statX, res.y - 34.0 * uiScale), 1.8 * uiScale, 70u, 80u, 83u, 58u);
             float fpsVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 34.0 * uiScale), 1.8 * uiScale, gFps);
-            sdr = lerp(sdr, colJade, fpsLbl);
-            sdr = lerp(sdr, colEnamel, fpsVal);
+            sdr = hudOver(uiAlpha, sdr, colJade, fpsLbl);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, fpsVal);
 
             float msLbl = sampleWord4(px, float2(statX, res.y - 18.0 * uiScale), 1.6 * uiScale, 71u, 80u, 85u, 58u);
             float msVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 18.0 * uiScale), 1.6 * uiScale, gGpuMs);
-            sdr = lerp(sdr, colAmber, msLbl);
-            sdr = lerp(sdr, colEnamel, msVal);
+            sdr = hudOver(uiAlpha, sdr, colAmber, msLbl);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, msVal);
 
             // 5 Clickable Hardware Engine SOLO / ISOLATE Pills on bottom-right ([RT] [TNSR] [NPU] [CUDA] [CODC])
             float rightBase = res.x - 245.0 * uiScale;
@@ -2681,11 +2860,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float2 pMax = pMin + float2(42.0 * uiScale, 22.0 * uiScale);
                     if (px.x >= pMin.x && px.x <= pMax.x && px.y >= pMin.y && px.y <= pMax.y)
                     {
-                        sdr = lerp(sdr, pillCol * (isSolo ? 0.42 : 0.22), 0.88);
+                        sdr = hudOver(uiAlpha, sdr, pillCol * (isSolo ? 0.42 : 0.22), 0.88);
                         float bThick = isSolo ? (2.2 * uiScale) : 1.5;
                         bool border = (px.x - pMin.x < bThick) || (pMax.x - px.x < bThick) ||
                                       (px.y - pMin.y < bThick) || (pMax.y - px.y < bThick);
-                        if (border) sdr = isSolo ? colEnamel : pillCol;
+                        if (border) sdr = hudInk(uiAlpha, isSolo ? colEnamel : pillCol);
                     }
                     uint c0 = 82u, c1 = 84u, c2 = 32u, c3 = 32u;
                     if (e == 1u) { c0 = 84u; c1 = 78u; c2 = 83u; c3 = 82u; } // TNSR
@@ -2693,7 +2872,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if (e == 3u) { c0 = 67u; c1 = 85u; c2 = 68u; c3 = 65u; } // CUDA
                     if (e == 4u) { c0 = 67u; c1 = 79u; c2 = 68u; c3 = 67u; } // CODC
                     float txt = sampleWord4(px, pMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.6 * uiScale, c0, c1, c2, c3);
-                    sdr = lerp(sdr, isSolo ? colEnamel : pillCol, txt);
+                    sdr = hudOver(uiAlpha, sdr, isSolo ? colEnamel : pillCol, txt);
                 }
 
                 // Persistent Bottom Scene & Playback Buttons: [< PRV] [PLAY/PAUS] [NXT >] [F:FILM/STUDIO]
@@ -2707,15 +2886,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float2 prvMax = float2(rightBase - 220.0 * uiScale, pBot);
                     if (px.x >= prvMin.x && px.x <= prvMax.x && px.y >= pTop && px.y <= pBot)
                     {
-                        sdr = lerp(sdr, colCyan * 0.20, 0.86);
+                        sdr = hudOver(uiAlpha, sdr, colCyan * 0.20, 0.86);
                         if ((px.x - prvMin.x < 1.4) || (prvMax.x - px.x < 1.4) || (px.y - pTop < 1.4) || (pBot - px.y < 1.4))
-                            sdr = colCyan;
+                            sdr = hudInk(uiAlpha, colCyan);
                     }
                     float tPrv = max(
                         sampleGlyph(px, prvMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 60u),
                         uiLabel(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 4.0, UI_LBL_PREV,
                             sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u)));
-                    sdr = lerp(sdr, colEnamel, tPrv);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, tPrv);
 
                     // [PLAY] / [PAUS]
                     bool isPaused = (gHudFlags & 8u) != 0u;
@@ -2724,30 +2903,30 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float2 plyMax = float2(rightBase - 162.0 * uiScale, pBot);
                     if (px.x >= plyMin.x && px.x <= plyMax.x && px.y >= pTop && px.y <= pBot)
                     {
-                        sdr = lerp(sdr, plyCol * 0.24, 0.86);
+                        sdr = hudOver(uiAlpha, sdr, plyCol * 0.24, 0.86);
                         if ((px.x - plyMin.x < 1.4) || (plyMax.x - px.x < 1.4) || (px.y - pTop < 1.4) || (pBot - px.y < 1.4))
-                            sdr = plyCol;
+                            sdr = hudInk(uiAlpha, plyCol);
                     }
                     float tPly = isPaused
                         ? sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 76u, 65u, 89u)
                         : sampleWord4(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 65u, 85u, 83u);
                     tPly = uiLabel(px, plyMin + float2(8.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 5.4, isPaused ? UI_LBL_PLAY : UI_LBL_PAUSE, tPly);
-                    sdr = lerp(sdr, colEnamel, tPly);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, tPly);
 
                     // [NXT >] (prominent Next Scene button!)
                     float2 nxtMin = float2(rightBase - 156.0 * uiScale, pTop);
                     float2 nxtMax = float2(rightBase - 92.0 * uiScale, pBot);
                     if (px.x >= nxtMin.x && px.x <= nxtMax.x && px.y >= pTop && px.y <= pBot)
                     {
-                        sdr = lerp(sdr, colJade * 0.28, 0.88);
+                        sdr = hudOver(uiAlpha, sdr, colJade * 0.28, 0.88);
                         if ((px.x - nxtMin.x < 1.5) || (nxtMax.x - px.x < 1.5) || (px.y - pTop < 1.5) || (pBot - px.y < 1.5))
-                            sdr = colJade;
+                            sdr = hudInk(uiAlpha, colJade);
                     }
                     float tNxt = max(
                         uiLabel(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 5.0, UI_LBL_NEXT,
                             sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u)),
                         sampleGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
-                    sdr = lerp(sdr, colEnamel, tNxt);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, tNxt);
                 }
 
                 // Clickable Interactive Explore Mode Pill ("F:FILM" / "F:FREE")
@@ -2759,112 +2938,736 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float3 expCol = expActive ? colOrchid : colJade;
                     if (px.x >= expMin.x && px.x <= expMax.x && px.y >= expMin.y && px.y <= expMax.y)
                     {
-                        sdr = lerp(sdr, expCol * (expActive ? 0.34 : 0.20), 0.88);
+                        sdr = hudOver(uiAlpha, sdr, expCol * (expActive ? 0.34 : 0.20), 0.88);
                         if ((px.x - expMin.x < 1.5) || (expMax.x - px.x < 1.5) ||
                             (px.y - expMin.y < 1.5) || (expMax.y - px.y < 1.5))
                         {
-                            sdr = expCol;
+                            sdr = hudInk(uiAlpha, expCol);
                         }
                     }
                     float expTxt = expActive
                         ? sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 73u, 76u, 77u, 32u, 32u)
                         : sampleWord8(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 70u, 58u, 70u, 82u, 69u, 69u, 32u, 32u);
                     expTxt = uiLabel(px, expMin + float2(9.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 8.8, expActive ? UI_LBL_MODE_FILM : UI_LBL_MODE_FREE, expTxt);
-                    sdr = lerp(sdr, expActive ? colEnamel : expCol, expTxt);
+                    sdr = hudOver(uiAlpha, sdr, expActive ? colEnamel : expCol, expTxt);
                 }
             }
         }
     }
 
-    if (showOverlay && hudMode == 0u && res.x >= 480.0 && res.y >= 300.0)
+    // Full-screen pill in the top-right corner: FULL SCREEN in a window, EXIT FULL SCREEN [ESC] when
+    // full screen. main.cpp sets its opacity (bits 8..15 of gNeuralMeta.w; bit 0 is full screen) and
+    // mirrors the rectangle for clicks. It does not depend on the rest of the HUD being shown.
+    {
+        const float pillAlpha = float((gNeuralMeta.w >> 8u) & 255u) / 255.0;
+        if (pillAlpha > 0.0 && res.x >= 480.0 && res.y >= 300.0)
+        {
+            const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
+            const bool isFull = (gNeuralMeta.w & 1u) != 0u;
+            const float2 pillSize = float2(isFull ? 150.0 : 86.0, 18.0) * uiScale;
+            const float2 pillMin = float2(res.x - 14.0 * uiScale - pillSize.x, 14.0 * uiScale);
+            if (px.x >= pillMin.x && px.x < pillMin.x + pillSize.x && px.y >= pillMin.y && px.y < pillMin.y + pillSize.y)
+            {
+                const float3 edge = isFull ? colAmber : lerp(colJade, colCyan, 0.35);
+                sdr = hudOver(uiAlpha, sdr, float3(0.016, 0.026, 0.048), 0.86 * pillAlpha);
+                const bool bdr = (px.x - pillMin.x < 1.5) || (pillMin.x + pillSize.x - px.x < 1.5) ||
+                                 (px.y - pillMin.y < 1.5) || (pillMin.y + pillSize.y - px.y < 1.5);
+                if (bdr) sdr = hudOver(uiAlpha, sdr, edge, pillAlpha);
+                const float sc = 1.25 * uiScale;
+                const float2 at = pillMin + float2(8.0, 6.0) * uiScale;
+                float label;
+                if (isFull)
+                {
+                    label = sampleWord8(px, at, sc, 69u, 88u, 73u, 84u, 32u, 70u, 85u, 76u);                                  // EXIT FUL
+                    label = max(label, sampleWord8(px, at + float2(50.0, 0) * uiScale, sc, 76u, 32u, 83u, 67u, 82u, 69u, 69u, 78u)); // L SCREEN
+                    // The key that does the same thing.
+                    const float2 keyMin = pillMin + float2(114.0, 3.0) * uiScale;
+                    const float2 keySize = float2(28.0, 12.0) * uiScale;
+                    if (px.x >= keyMin.x && px.x < keyMin.x + keySize.x && px.y >= keyMin.y && px.y < keyMin.y + keySize.y)
+                    {
+                        sdr = hudOver(uiAlpha, sdr, edge * 0.30, 0.9 * pillAlpha);
+                        const bool keyEdge = (px.x - keyMin.x < 1.0) || (keyMin.x + keySize.x - px.x < 1.0) ||
+                                             (px.y - keyMin.y < 1.0) || (keyMin.y + keySize.y - px.y < 1.0);
+                        if (keyEdge) sdr = hudOver(uiAlpha, sdr, edge, 0.8 * pillAlpha);
+                    }
+                    sdr = hudOver(uiAlpha, sdr, edge,
+                                  sampleWord4(px, keyMin + float2(6.5, 3.0) * uiScale, 1.0 * uiScale, 69u, 83u, 67u, 32u) * pillAlpha); // ESC
+                }
+                else
+                {
+                    label = sampleWord8(px, at, sc, 70u, 85u, 76u, 76u, 32u, 83u, 67u, 82u);                              // FULL SCR
+                    label = max(label, sampleWord4(px, at + float2(50.0, 0) * uiScale, sc, 69u, 69u, 78u, 32u));          // EEN
+                }
+                sdr = hudOver(uiAlpha, sdr, colEnamel, label * pillAlpha);
+            }
+        }
+    }
+
+    if (showOverlay && hudMode < 2u && res.x >= 480.0 && res.y >= 300.0)
     {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
 
-        // Top-Left LIVE SCENE WORKLOADS Attribution Card (strictly live on-screen execution — NEVER standalone bench!)
+        // Live hardware workloads. In narrow windows reserve room for the separate benchmark.
+        const bool benchActiveOrDone = hudMode == 0u && (gHudFlags & 0xC0u) != 0u;
+        const bool compactTable = hudMode == 1u || res.x < 330.0 * uiScale ||
+                                  (benchActiveOrDone && res.x < 610.0 * uiScale);
         float liveTopY = (gVolumeAndPadding.x >= 0.0) ? (44.0 * uiScale) : (14.0 * uiScale);
         float2 liveMin  = float2(14.0 * uiScale, liveTopY);
-        float2 liveSize = float2(306.0 * uiScale, 112.0 * uiScale);
-        if (px.x >= liveMin.x && px.x <= liveMin.x + liveSize.x &&
+        float featureRowHeight = compactTable ? 18.0 : 22.0;
+        bool showFrameRates = gVolumeAndPadding.w > 0.0 && gInteractiveMeta.w > 0u;
+        // NEURAL RENDERING: a 20-unit heading and three rows below the five Real-Time Graphics rows.
+        // main.cpp mirrors these offsets for its click handling.
+        float neuralTop = 139.0 + 5.0 * featureRowHeight;
+        float neuralRowsTop = neuralTop + 20.0;
+        float footerTop = neuralRowsTop + 3.0 * featureRowHeight;
+        // The FPS line is always reserved so the rows below never move; main.cpp mirrors them for clicks.
+        float sensorTop = footerTop + 20.0;
+        float cpuTop = sensorTop + 18.0;
+        float workoutTop = cpuTop + 18.0;   // WORKOUT level, bird count, [-] [+]
+        float flockTop = workoutTop + 20.0; // FLOCK formation (click cycles) and bird camera toggle
+        float physxTop = flockTop + 20.0;   // PHYSX genre (click or Shift+P dials) and its timings
+        float2 liveSize = float2(compactTable ? 220.0 : 306.0, physxTop + 22.0) * uiScale;
+        // Dashboard panel: 0 full table, 1 mini two-line strip, 2 hidden (a small HUD+ tab brings it back).
+        // The backtick key cycles; main.cpp mirrors every button rectangle below.
+        const uint panelMode = min(gNeuralMeta.z, 2u);
+        if (panelMode == 1u) liveSize = float2(228.0, 62.0) * uiScale;
+        if (panelMode == 2u) liveSize = float2(44.0, 16.0) * uiScale;
+        if (panelMode != 0u && px.x >= liveMin.x && px.x <= liveMin.x + liveSize.x &&
             px.y >= liveMin.y && px.y <= liveMin.y + liveSize.y)
         {
-            sdr = lerp(sdr, float3(0.016, 0.026, 0.048), 0.86);
+            const float2 q = (px - liveMin) / uiScale;
+            const float sc = 1.25 * uiScale;
+            sdr = hudOver(uiAlpha, sdr, float3(0.016, 0.026, 0.048), 0.82);
             bool bdr = (px.x - liveMin.x < 1.5) || (liveMin.x + liveSize.x - px.x < 1.5) ||
                        (px.y - liveMin.y < 1.5) || (liveMin.y + liveSize.y - px.y < 1.5);
-            if (bdr) sdr = lerp(colJade, colCyan, 0.35);
+            if (bdr) sdr = hudInk(uiAlpha, lerp(colJade, colCyan, 0.35));
+            if (panelMode == 2u) {
+                float t = max(sampleWord4(px, liveMin + float2(7.0, 5.0) * uiScale, sc, 72u, 85u, 68u, 32u),      // HUD
+                              sampleGlyph(px, liveMin + float2(30.0, 5.0) * uiScale, sc, 43u));                  // +
+                sdr = hudOver(uiAlpha, sdr, colJade, t);
+            } else {
+                // Row 1: engine states, then graphics feature states, then [+] expand and [x] hide.
+                const float y1 = 6.0;
+                [unroll] for (uint p = 0u; p < 4u; ++p) {
+                    const uint engine = p == 3u ? 4u : p;
+                    float3 c = livePillarModeColor((gLivePillarMeta.x >> (p * 4u)) & 0xFu);
+                    if (engine == 4u) c = measuredDirectorBackend() == 0u ? badgeStatusColor(3u) : badgeStatusColor((gEnginePacked >> 8u) & 15u);
+                    const uint4 w = hardwareRowWord(engine);
+                    const float x0 = p == 0u ? 8.0 : (p == 1u ? 24.0 : (p == 2u ? 52.0 : 80.0));
+                    sdr = hudOver(uiAlpha, sdr, c, sampleWord4(px, liveMin + float2(x0, y1) * uiScale, sc, w.x, w.y, w.z, w.w));
+                }
+                [unroll] for (uint f = 0u; f < 5u; ++f) {
+                    const uint bits = gLivePillarMeta.w >> (f == 4u ? 17u : f * 4u);
+                    const uint st = bits & 3u; // Unavailable, Off, Active, Idle
+                    const float3 c = st == 2u ? colJade : (st == 3u ? colAmber : (st == 1u ? colCyan * 0.55 : float3(0.30, 0.33, 0.38)));
+                    const float x0 = 106.0 + f * 15.0;
+                    uint4 w = uint4(80u, 84u, 32u, 32u);              // PT
+                    if (f == 1u) w = uint4(83u, 82u, 32u, 32u);       // SR (DLSS upscaling)
+                    if (f == 2u) w = uint4(82u, 82u, 32u, 32u);       // RR
+                    if (f == 3u) w = uint4(70u, 71u, 32u, 32u);       // FG
+                    if (f == 4u) w = uint4(82u, 70u, 88u, 32u);       // RFX
+                    sdr = hudOver(uiAlpha, sdr, c, sampleWord4(px, liveMin + float2(x0, y1) * uiScale, sc, w.x, w.y, w.z, w.w));
+                }
+                // Row 2: NEURAL ON/OFF, TC/SC, throughput, and the render rate.
+                const float y2 = 20.0;
+                const uint nm = gNeuralMeta.x;
+                const bool on = (nm & (1u << 10u)) != 0u;
+                float neural = sampleWord8(px, liveMin + float2(8.0, y2) * uiScale, sc, 78u, 69u, 85u, 82u, 65u, 76u, 32u, 32u);
+                sdr = hudOver(uiAlpha, sdr, colJade, neural);
+                float2 onAt = liveMin + float2(52.0, y2) * uiScale;
+                sdr = hudOver(uiAlpha, sdr, on ? colJade : colCyan * 0.8,
+                              on ? sampleWord4(px, onAt, sc, 79u, 78u, 32u, 32u) : sampleWord4(px, onAt, sc, 79u, 70u, 70u, 32u));
+                if (on) {
+                    const bool tc = (nm & (1u << 11u)) != 0u;
+                    float2 tcAt = liveMin + float2(74.0, y2) * uiScale;
+                    sdr = hudOver(uiAlpha, sdr, tc ? colAmber : colCyan * 0.75,
+                                  tc ? sampleWord4(px, tcAt, sc, 84u, 67u, 32u, 32u) : sampleWord4(px, tcAt, sc, 83u, 67u, 32u, 32u));
+                    if (gNeuralQuality.w > 0.0) {
+                        float2 tfAt = liveMin + float2(92.0, y2) * uiScale;
+                        float tf = max(sampleFixedNumber6(px, tfAt, sc, gNeuralQuality.w),
+                                       sampleWord4(px, tfAt + float2(31.0 * sc, 0), sc * .85, 84u, 70u, 32u, 32u));
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, tf);
+                    }
+                }
+                if (gVolumeAndPadding.w > 0.0) {
+                    float2 fpsAt = liveMin + float2(150.0, y2) * uiScale;
+                    float fps = max(sampleUint4(px, fpsAt, sc, uint(round(gVolumeAndPadding.w))),
+                                    sampleWord4(px, fpsAt + float2(26.0 * sc, 0), sc * .85, 70u, 80u, 83u, 32u));
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, fps);
+                }
+                // Row 3: GPU sensors.
+                {
+                    float3 warnColor; float warnMask;
+                    float s = gpuSensorLine(px, liveMin + float2(8.0, 34.0) * uiScale, 1.15 * uiScale, false, warnColor, warnMask);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, s);
+                    sdr = hudOver(uiAlpha, sdr, warnColor, warnMask);
+                }
+                // Row 4: CPU and the workout level.
+                sdr = hudOver(uiAlpha, sdr, colEnamel, cpuLine(px, liveMin + float2(8.0, 48.0) * uiScale, 1.15 * uiScale));
+                {
+                    const uint level = (uint)round(gCpuWorkout.z) & 15u;
+                    float2 wAt = liveMin + float2(150.0, 48.0) * uiScale;
+                    float w = sampleWord4(px, wAt, 1.0 * uiScale, 87u, 79u, 82u, 75u);                       // WORK
+                    w = max(w, level == 0u ? sampleWord4(px, wAt + float2(24.0, 0) * uiScale, 1.0 * uiScale, 79u, 70u, 70u, 32u)
+                                           : sampleUint4(px, wAt + float2(22.0, 0) * uiScale, 1.15 * uiScale, level));
+                    sdr = hudOver(uiAlpha, sdr, level == 0u ? colCyan * 0.85 : colAmber, w);
+                }
+                // Buttons: [+] back to the full table, [x] hide to the small tab.
+                [unroll] for (uint b = 0u; b < 2u; ++b) {
+                    const float bx = b == 0u ? 194.0 : 211.0;
+                    if (q.x >= bx && q.x < bx + 14.0 && q.y >= 3.0 && q.y < 17.0) {
+                        sdr = hudOver(uiAlpha, sdr, colJade * 0.20, 0.85);
+                        if (q.x - bx < 0.8 || bx + 14.0 - q.x < 0.8 || q.y - 3.0 < 0.8 || 17.0 - q.y < 0.8)
+                            sdr = hudInk(uiAlpha, colJade * 0.8);
+                    }
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 4.5, 6.0) * uiScale, sc, b == 0u ? 43u : 88u));
+                }
+            }
+        }
+        if (panelMode == 0u && px.x >= liveMin.x && px.x <= liveMin.x + liveSize.x &&
+            px.y >= liveMin.y && px.y <= liveMin.y + liveSize.y)
+        {
+            sdr = hudOver(uiAlpha, sdr, float3(0.016, 0.026, 0.048), 0.86);
+            bool bdr = (px.x - liveMin.x < 1.5) || (liveMin.x + liveSize.x - px.x < 1.5) ||
+                       (px.y - liveMin.y < 1.5) || (liveMin.y + liveSize.y - px.y < 1.5);
+            if (bdr) sdr = hudInk(uiAlpha, lerp(colJade, colCyan, 0.35));
 
-            // Header: "LIVE GPU" + column headers "SIZE"  "MS"  "RATE"
+            // Header and metric columns for the four GPU workloads and the stage director.
             float hdrTxt = sampleWord8(
                 px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale,
-                76u, 73u, 86u, 69u, 32u, 71u, 80u, 85u);
-            hdrTxt = uiLabel(px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale, 15.0, UI_LBL_LIVE_GPU, hdrTxt);
-            sdr = lerp(sdr, colJade, hdrTxt);
+                72u, 65u, 82u, 68u, 87u, 65u, 82u, 69u);
+            hdrTxt = uiLabel(px, liveMin + float2(8.0 * uiScale, 7.0 * uiScale), 1.55 * uiScale, 11.0, UI_LBL_HARDWARE, hdrTxt);
+            sdr = hudOver(uiAlpha, sdr, colJade, hdrTxt);
+            const float2 headerPos = (px - liveMin) / uiScale;
+            if (headerPos.x >= 92.0 && headerPos.x < 120.0 && headerPos.y >= 2.0 && headerPos.y < 18.0) {
+                sdr = hudOver(uiAlpha, sdr, colJade * 0.22, 0.85);
+                float abText = sampleWord4(px, liveMin + float2(96.0, 6.0) * uiScale, 1.25 * uiScale, 65u, 47u, 66u, 32u);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, abText);
+            }
 
             float colSzTxt = sampleWord4(px, liveMin + float2(128.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 83u, 73u, 90u, 69u);
             float colMsTxt = sampleWord4(px, liveMin + float2(188.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 32u, 77u, 83u, 32u);
             float colRtTxt = sampleWord4(px, liveMin + float2(246.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 82u, 65u, 84u, 69u);
             colSzTxt = uiLabel(px, liveMin + float2(128.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 8.0, UI_LBL_COL_SIZE, colSzTxt);
             colRtTxt = uiLabel(px, liveMin + float2(246.0 * uiScale, 7.0 * uiScale), 1.4 * uiScale, 8.0, UI_LBL_COL_RATE, colRtTxt);
-            sdr = lerp(sdr, colAmber, max(colSzTxt, max(colMsTxt, colRtTxt)));
+            if (!compactTable) sdr = hudOver(uiAlpha, sdr, colAmber, max(colSzTxt, max(colMsTxt, colRtTxt)));
+            {
+                // [-] collapses the table to the mini strip (backtick cycles full -> mini -> hidden).
+                const float bx = liveSize.x / uiScale - 20.0;
+                if (headerPos.x >= bx && headerPos.x < bx + 14.0 && headerPos.y >= 3.0 && headerPos.y < 17.0) {
+                    sdr = hudOver(uiAlpha, sdr, colJade * 0.20, 0.85);
+                    if (headerPos.x - bx < 0.8 || bx + 14.0 - headerPos.x < 0.8 || headerPos.y - 3.0 < 0.8 || 17.0 - headerPos.y < 0.8)
+                        sdr = hudInk(uiAlpha, colJade * 0.8);
+                }
+                sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 4.5, 7.0) * uiScale, 1.25 * uiScale, 45u));
+            }
 
             [unroll]
-            for (uint p = 0u; p < 4u; ++p)
+            for (uint p = 0u; p < 5u; ++p)
             {
-                float rowY = liveMin.y + (23.0 + (float)p * 21.5) * uiScale;
+                float rowY = liveMin.y + (23.0 + (float)p * 20.0) * uiScale;
+                const bool director = p == 4u;
+                uint backend = measuredDirectorBackend();
                 uint modeNib = (gLivePillarMeta.x >> (p * 4u)) & 0xFu;
                 float3 mCol = livePillarModeColor(modeNib);
-                float4 pm = gLivePillarMetrics[p];
+                if (director) {
+                    mCol = badgeStatusColor((gEnginePacked >> 8u) & 15u);
+                    if (backend == 0u) mCol = badgeStatusColor(3u);
+                }
+                float4 pm = gLivePillarMetrics[min(p, 3u)];
 
-                // Pillar name: "RT", "CUDA", "TNSR", "CODC"
-                uint n0 = 82u, n1 = 84u, n2 = 32u, n3 = 32u; // RT
-                if (p == 1u) { n0 = 67u; n1 = 85u; n2 = 68u; n3 = 65u; } // CUDA
-                if (p == 2u) { n0 = 84u; n1 = 78u; n2 = 83u; n3 = 82u; } // TNSR
-                if (p == 3u) { n0 = 67u; n1 = 79u; n2 = 68u; n3 = 67u; } // CODC
-                float nameMask = sampleWord4(px, float2(liveMin.x + 8.0 * uiScale, rowY), 1.55 * uiScale, n0, n1, n2, n3);
-                sdr = lerp(sdr, colEnamel, nameMask);
+                uint4 word = hardwareRowWord(p);
+                float nameMask = sampleWord4(px, float2(liveMin.x + 8.0 * uiScale, rowY), 1.55 * uiScale, word.x, word.y, word.z, word.w);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, nameMask);
+                if (director) {
+                    float shortcut = sampleWord4(px, float2(liveMin.x + 34.0 * uiScale, rowY), 1.3 * uiScale, 91u, 52u, 93u, 32u);
+                    sdr = hudOver(uiAlpha, sdr, colAmber, shortcut);
+                }
 
                 // Attribution pill: LIVE / SUB / OFF / FLT
-                float2 pillMin = float2(liveMin.x + 54.0 * uiScale, rowY - 2.0 * uiScale);
-                float2 pillMax = pillMin + float2(42.0 * uiScale, 13.0 * uiScale);
+                float2 pillMin = float2(liveMin.x + 57.0 * uiScale, rowY - 2.0 * uiScale);
+                float2 pillMax = pillMin + float2(59.0 * uiScale, 13.0 * uiScale);
                 if (px.x >= pillMin.x && px.x <= pillMax.x && px.y >= pillMin.y && px.y <= pillMax.y)
                 {
-                    sdr = lerp(sdr, mCol * 0.24, 0.85);
+                    sdr = hudOver(uiAlpha, sdr, mCol * 0.24, 0.85);
                     if ((px.x - pillMin.x < 1.2) || (pillMax.x - px.x < 1.2) ||
                         (px.y - pillMin.y < 1.2) || (pillMax.y - px.y < 1.2))
                     {
-                        sdr = mCol;
+                        sdr = hudInk(uiAlpha, mCol);
                     }
                 }
-                uint s0 = 76u, s1 = 73u, s2 = 86u, s3 = 69u; // LIVE
-                if (modeNib == 1u) { s0 = 83u; s1 = 85u; s2 = 66u; s3 = 32u; } // SUB
-                if (modeNib == 2u) { s0 = 79u; s1 = 70u; s2 = 70u; s3 = 32u; } // OFF
-                if (modeNib == 3u) { s0 = 70u; s1 = 76u; s2 = 84u; s3 = 32u; } // FLT
-                float pillTxt = sampleWord4(px, pillMin + float2(4.0 * uiScale, 2.0 * uiScale), 1.45 * uiScale, s0, s1, s2, s3);
-                pillTxt = uiLabel(px, pillMin + float2(4.0 * uiScale, 2.0 * uiScale), 1.45 * uiScale, 5.0,
-                                  UI_LBL_STATE_LIVE + ((modeNib >= 1u && modeNib <= 3u) ? modeNib : 0u), pillTxt);
-                sdr = lerp(sdr, mCol, pillTxt);
+                float2 labelAt = pillMin + float2(4.0, 2.0) * uiScale;
+                float pillTxt = director ? directorStateLabel(px, labelAt, 1.45 * uiScale, backend)
+                                         : liveStateLabel(px, labelAt + float2(7.25 * uiScale, 0), 1.45 * uiScale, modeNib);
+                sdr = hudOver(uiAlpha, sdr, mCol, pillTxt);
 
                 // Workload scale, live ms, and live rate/quality
-                float szMask = sampleFixedNumber6(px, float2(liveMin.x + 104.0 * uiScale, rowY), 1.5 * uiScale, pm.z);
+                if (compactTable || (!director && modeNib == 4u)) continue;
+                if (director) {
+                    // The director runs asynchronously. Its rate comes from completed inferences.
+                    if (backend == 2u || backend == 3u) {
+                        uint total = gLivePillarMeta.z;
+                        float2 countAt = float2(liveMin.x + 125.0 * uiScale, rowY);
+                        float count = sampleUint4(px, countAt, 1.5 * uiScale, total);
+                        if (total >= 10000u) {
+                            bool millions = total >= 1000000u;
+                            count = sampleFixedNumber6(px, countAt - float2(7.0 * uiScale, 0), 1.2 * uiScale,
+                                                       float(total) / (millions ? 1000000.0 : 1000.0));
+                            count = max(count, sampleGlyph(px, countAt + float2(31.0 * uiScale, 0), 1.2 * uiScale, millions ? 77u : 75u));
+                        }
+                        float ms = sampleFixedMs6(px, float2(liveMin.x + 168.0 * uiScale, rowY), 1.5 * uiScale, gVolumeAndPadding.y);
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, count);
+                        sdr = hudOver(uiAlpha, sdr, mCol, ms);
+                        float hz = sampleFixedNumber6(px, float2(liveMin.x + 234.0 * uiScale, rowY), 1.5 * uiScale, gVolumeAndPadding.z);
+                        hz = max(hz, sampleWord4(px, float2(liveMin.x + 282.0 * uiScale, rowY), 1.25 * uiScale, 72u, 90u, 32u, 32u));
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, hz);
+                    }
+                    continue;
+                }
+                float szMask = sampleFixedNumber6(px, float2(liveMin.x + 118.0 * uiScale, rowY), 1.5 * uiScale, pm.z);
                 float msMask = sampleFixedMs6(px, float2(liveMin.x + 168.0 * uiScale, rowY), 1.5 * uiScale, pm.x);
                 float rtMask = sampleFixedNumber6(px, float2(liveMin.x + 234.0 * uiScale, rowY), 1.5 * uiScale, pm.y);
-                sdr = lerp(sdr, colEnamel, max(szMask, rtMask));
-                sdr = lerp(sdr, (modeNib == 0u) ? colJade : colCyan, msMask);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, max(szMask, rtMask));
+                sdr = hudOver(uiAlpha, sdr, (modeNib == 0u) ? colJade : colCyan, msMask);
+            }
+
+            // Each control shows the selected mode and the work observed on this frame.
+            float2 tablePoint = (px - liveMin) / uiScale;
+            if (tablePoint.y >= 119.0 && tablePoint.y < 139.0) {
+                float2 at = liveMin + float2(8.0, 123.0) * uiScale;
+                float sc = 1.30 * uiScale;
+                float title = sampleWord8(px,at,sc,82u,69u,65u,76u,45u,84u,73u,77u);
+                title = max(title,sampleWord8(px,at+float2(40.0*sc,0),sc,69u,32u,71u,82u,65u,80u,72u,73u));
+                title = max(title,sampleWord4(px,at+float2(80.0*sc,0),sc,67u,83u,32u,32u));
+                sdr = hudOver(uiAlpha, sdr,colJade,uiLabel(px,at,sc,26.0,UI_LBL_GRAPHICS,title));
+            }
+            if (showFrameRates && tablePoint.y >= footerTop) {
+                float2 at = liveMin + float2(7.0, footerTop + 4.0) * uiScale;
+                float sc = 1.20 * uiScale;
+                float render = sampleWord8(px,at,sc,82u,69u,78u,68u,69u,82u,32u,70u);
+                render = max(render,sampleWord4(px,at+float2(40.0*sc,0),sc,80u,83u,32u,32u));
+                float2 displayAt = at + float2(compactTable ? 112.0 : 142.0, 0) * uiScale;
+                float display = sampleWord8(px,displayAt,sc,68u,73u,83u,80u,76u,65u,89u,32u);
+                display = max(display,sampleWord4(px,displayAt+float2(40.0*sc,0),sc,70u,80u,83u,32u));
+                float captions = max(uiLabel(px,at,sc,12.0,UI_LBL_RENDER_FPS,render),
+                                     uiLabel(px,displayAt,sc,12.0,UI_LBL_DISPLAY_FPS,display));
+                float values = max(sampleUint4(px,at+float2(73.0,0)*uiScale,sc,uint(round(gVolumeAndPadding.w))),
+                                   sampleUint4(px,displayAt+float2(73.0,0)*uiScale,sc,gInteractiveMeta.w));
+                sdr = hudOver(uiAlpha, sdr,colEnamel,max(captions,values));
+            }
+            const uint neuralMeta = gNeuralMeta.x;
+            const bool neuralMaster = (neuralMeta & (1u << 10u)) != 0u;
+            const uint neuralSolo = (neuralMeta >> 8u) & 3u;
+            if (tablePoint.y >= neuralTop && tablePoint.y < neuralRowsTop) {
+                // NEURAL RENDERING  ON  12.3 TF  [SHIFT+N]   (a click toggles the whole suite)
+                float2 at = liveMin + float2(8.0, neuralTop + 4.0) * uiScale;
+                float sc = 1.30 * uiScale;
+                float title;
+                if (compactTable) {
+                    title = sampleWord8(px,at,sc,78u,69u,85u,82u,65u,76u,32u,32u);                            // NEURAL
+                } else {
+                    title = max(sampleWord8(px,at,sc,78u,69u,85u,82u,65u,76u,32u,82u),                        // NEURAL R
+                                sampleWord8(px,at+float2(40.0*sc,0),sc,69u,78u,68u,69u,82u,73u,78u,71u));    // ENDERING
+                }
+                sdr = hudOver(uiAlpha, sdr, colJade, title);
+                float2 modeAt = liveMin + float2(compactTable ? 77.0 : 131.0, neuralTop + 4.0) * uiScale;
+                float master = neuralMaster ? sampleWord4(px,modeAt,sc,79u,78u,32u,32u) : sampleWord4(px,modeAt,sc,79u,70u,70u,32u);
+                sdr = hudOver(uiAlpha, sdr, neuralMaster ? colJade : colCyan * 0.9, master);
+                // Which cores run the networks: TC = tensor cores (SM 6.10), SC = shader cores. Shift-click switches.
+                if (!compactTable) {
+                    const bool tc = (neuralMeta & (1u << 11u)) != 0u;
+                    float cores = tc ? sampleWord4(px, modeAt + float2(15.0 * sc, 0), sc, 84u,67u,32u,32u)
+                                     : sampleWord4(px, modeAt + float2(15.0 * sc, 0), sc, 83u,67u,32u,32u);
+                    sdr = hudOver(uiAlpha, sdr, tc ? colAmber : colCyan * 0.75, cores);
+                }
+                if (!compactTable && gNeuralQuality.w > 0.0) {
+                    float2 tfAt = liveMin + float2(166.0, neuralTop + 4.0) * uiScale;
+                    float tf = sampleFixedNumber6(px, tfAt, sc, gNeuralQuality.w);
+                    tf = max(tf, sampleWord4(px, tfAt + float2(31.0 * sc, 0), sc * .85, 84u,70u,32u,32u));    // TF
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, tf);
+                }
+                if (!compactTable) {
+                    float2 keyAt = liveMin + float2(244.0, neuralTop + 4.0) * uiScale;
+                    float key = sampleWord8(px,keyAt,sc*0.85,91u,83u,72u,73u,70u,84u,43u,78u);                 // [SHIFT+N
+                    key = max(key, sampleGlyph(px, keyAt + float2(34.0 * sc, 0), sc * 0.85, 93u));             // ]
+                    sdr = hudOver(uiAlpha, sdr, colAmber, key);
+                }
+            }
+            if (tablePoint.y >= cpuTop && tablePoint.y < workoutTop) {
+                sdr = hudOver(uiAlpha, sdr, colEnamel, cpuLine(px, liveMin + float2(7.0, cpuTop + 3.0) * uiScale, 1.20 * uiScale));
+            }
+            const uint workoutBits = (uint)round(gCpuWorkout.z);
+            if (tablePoint.y >= physxTop) {
+                // PHYSX  SMOKE  SIM 0.82  RAY 1.40 MS  312K VOX      (click to dial through the genres)
+                const float sc = 1.25 * uiScale;
+                const uint bits = (uint)round(gPhysx.x);
+                const uint genre = bits & 15u;
+                const uint state = (bits >> 4u) & 3u;
+                float2 at = liveMin + float2(8.0, physxTop + 5.0) * uiScale;
+                if (tablePoint.y - physxTop < 1.0) sdr = hudInk(uiAlpha, colJade * 0.5);
+                sdr = hudOver(uiAlpha, sdr, colJade, sampleWord8(px, at, sc, 80u, 72u, 89u, 83u, 88u, 32u, 32u, 32u)); // PHYSX
+                float2 nameAt = at + float2(compactTable ? 40.0 : 52.0, 0) * uiScale;
+                if (genre == 0u) {
+                    sdr = hudOver(uiAlpha, sdr, colCyan * 0.85, sampleWord4(px, nameAt, sc, 79u, 70u, 70u, 32u)); // OFF
+                } else {
+                    const float3 c = state == 2u ? colAmber : (state == 0u ? float3(0.98, 0.35, 0.40) : colCyan * 0.85);
+                    const float genreName = genre == 4u ? sampleWord8(px, nameAt, sc, 83u, 79u, 70u, 84u, 32u, 32u, 32u, 32u)  // SOFT
+                                          : genre == 3u ? sampleWord8(px, nameAt, sc, 70u, 76u, 85u, 73u, 68u, 32u, 32u, 32u)  // FLUID
+                                          : genre == 2u ? sampleWord8(px, nameAt, sc, 82u, 73u, 71u, 73u, 68u, 32u, 32u, 32u)  // RIGID
+                                                        : sampleWord8(px, nameAt, sc, 83u, 77u, 79u, 75u, 69u, 32u, 32u, 32u); // SMOKE
+                    sdr = hudOver(uiAlpha, sdr, c, genreName);
+                    if (state == 0u) {
+                        sdr = hudOver(uiAlpha, sdr, c, sampleWord4(px, nameAt + float2(36.0, 0) * uiScale, sc, 78u, 47u, 65u, 32u)); // N/A
+                    } else if (state == 3u) {
+                        sdr = hudOver(uiAlpha, sdr, colCyan * 0.85,
+                                      sampleWord8(px, nameAt + float2(36.0, 0) * uiScale, sc * 0.85, 83u, 84u, 65u, 82u, 84u, 73u, 78u, 71u)); // STARTING
+                    } else if (!compactTable && state == 2u && genre == 3u) {
+                        // FLUID  STEP 1.40   20000 PARTICLES
+                        const float ts = sc * 0.85;
+                        float2 f = nameAt + float2(36.0, 0) * uiScale;
+                        float t = sampleWord4(px, f, ts, 83u, 84u, 69u, 80u);                                        // STEP
+                        t = max(t, sampleFixedMs6(px, f + float2(22.0, 0) * uiScale, ts, gPhysx.y));
+                        t = max(t, sampleUint6(px, f + float2(58.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
+                        t = max(t, sampleWord8(px, f + float2(92.0, 0) * uiScale, ts, 80u, 65u, 82u, 84u, 73u, 67u, 76u, 69u)); // PARTICLE
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, t);
+                    } else if (!compactTable && state == 2u && genre == 4u) {
+                        // SOFT   STEP 1.40      40 MICROBES
+                        const float ts = sc * 0.85;
+                        float2 f = nameAt + float2(36.0, 0) * uiScale;
+                        float t = sampleWord4(px, f, ts, 83u, 84u, 69u, 80u);                                        // STEP
+                        t = max(t, sampleFixedMs6(px, f + float2(22.0, 0) * uiScale, ts, gPhysx.y));
+                        t = max(t, sampleUint6(px, f + float2(58.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
+                        t = max(t, sampleWord8(px, f + float2(92.0, 0) * uiScale, ts, 77u, 73u, 67u, 82u, 79u, 66u, 69u, 83u)); // MICROBES
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, t);
+                    } else if (!compactTable && state == 2u && genre == 2u) {
+                        // RIGID  STEP 1.40   20000 BODIES
+                        const float ts = sc * 0.85;
+                        float2 f = nameAt + float2(36.0, 0) * uiScale;
+                        float t = sampleWord4(px, f, ts, 83u, 84u, 69u, 80u);                                        // STEP
+                        t = max(t, sampleFixedMs6(px, f + float2(22.0, 0) * uiScale, ts, gPhysx.y));
+                        t = max(t, sampleUint6(px, f + float2(58.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
+                        t = max(t, sampleWord8(px, f + float2(92.0, 0) * uiScale, ts, 66u, 79u, 68u, 73u, 69u, 83u, 32u, 32u)); // BODIES
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, t);
+                    } else if (!compactTable && state == 2u) {
+                        const float ts = sc * 0.85;
+                        float2 f = nameAt + float2(36.0, 0) * uiScale;
+                        float t = sampleWord4(px, f, ts, 83u, 73u, 77u, 32u);                                        // SIM
+                        t = max(t, sampleFixedMs6(px, f + float2(17.0, 0) * uiScale, ts, gPhysx.y));
+                        t = max(t, sampleWord4(px, f + float2(53.0, 0) * uiScale, ts, 82u, 65u, 89u, 32u));         // RAY
+                        t = max(t, sampleFixedMs6(px, f + float2(70.0, 0) * uiScale, ts, gPhysx.z));
+                        t = max(t, sampleUint4(px, f + float2(106.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
+                        t = max(t, sampleWord4(px, f + float2(128.0, 0) * uiScale, ts, 75u, 32u, 86u, 79u));        // K VO
+                        t = max(t, sampleGlyph(px, f + float2(128.0 + 20.0 * 0.85 * 1.25, 0) * uiScale, ts, 88u));  // X
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, t);
+                    }
+                }
+            }
+            else if (tablePoint.y >= flockTop) {
+                // FLOCK  MURMURATION >        CAM ON    (click the name to change formation, CAM to follow the birds)
+                const float tw = liveSize.x / uiScale;
+                const float sc = 1.25 * uiScale;
+                const uint formation = (workoutBits >> 4u) & 7u;
+                const bool cam = (workoutBits & 256u) != 0u;
+                float2 at = liveMin + float2(8.0, flockTop + 5.0) * uiScale;
+                sdr = hudOver(uiAlpha, sdr, colJade, sampleWord8(px, at, sc, 70u, 76u, 79u, 67u, 75u, 32u, 32u, 32u)); // FLOCK
+                float2 nameAt = at + float2(compactTable ? 40.0 : 52.0, 0) * uiScale;
+                // Formation types as ornithologists name them (Heppner 1974), and the species flying them.
+                float name;
+                float nameEnd = 40.0;
+                if (formation == 1u) { name = sampleWord4(px, nameAt, sc, 86u, 69u, 69u, 32u); nameEnd = 20.0; }                       // VEE
+                else if (formation == 2u) { name = sampleWord8(px, nameAt, sc, 69u, 67u, 72u, 69u, 76u, 79u, 78u, 32u); nameEnd = 40.0; } // ECHELON
+                else if (formation == 3u) { name = sampleWord8(px, nameAt, sc, 67u, 79u, 76u, 85u, 77u, 78u, 32u, 32u); nameEnd = 35.0; } // COLUMN
+                else if (formation == 4u) { name = sampleWord8(px, nameAt, sc, 70u, 82u, 79u, 78u, 84u, 32u, 32u, 32u); nameEnd = 30.0; } // FRONT
+                else if (formation == 5u) { name = sampleWord8(px, nameAt, sc, 75u, 69u, 84u, 84u, 76u, 69u, 32u, 32u); nameEnd = 35.0; } // KETTLE
+                else { name = sampleWord8(px, nameAt, sc, 67u, 76u, 85u, 83u, 84u, 69u, 82u, 32u); nameEnd = 40.0; }                    // CLUSTER
+                sdr = hudOver(uiAlpha, sdr, colEnamel, name);
+                if (!compactTable) {
+                    const bool egret = (workoutBits & 512u) != 0u;
+                    const float ss = 1.0 * uiScale;
+                    float2 spAt = nameAt + float2(nameEnd * sc + 6.0 * uiScale, 1.0 * uiScale);
+                    float species;
+                    if (egret) {
+                        species = sampleWord8(px, spAt, ss, 65u, 82u, 68u, 69u, 65u, 32u, 65u, 76u);                                  // ARDEA AL
+                        species = max(species, sampleWord4(px, spAt + float2(40.0 * ss, 0), ss, 66u, 65u, 32u, 32u));                 // BA
+                    } else {
+                        species = sampleWord8(px, spAt, ss, 77u, 73u, 76u, 86u, 85u, 83u, 32u, 77u);                                  // MILVUS M
+                        species = max(species, sampleWord8(px, spAt + float2(40.0 * ss, 0), ss, 73u, 71u, 82u, 65u, 78u, 83u, 32u, 32u)); // IGRANS
+                    }
+                    sdr = hudOver(uiAlpha, sdr, colCyan * 0.85, species);
+                }
+                // Bird camera pill
+                const float bx = tw - 62.0;
+                const float2 q = tablePoint - float2(bx, flockTop + 3.0);
+                const float3 camColor = cam ? colAmber : colCyan * 0.85;
+                if (q.x >= 0.0 && q.x < 56.0 && q.y >= 0.0 && q.y < 15.0) {
+                    sdr = hudOver(uiAlpha, sdr, camColor * 0.22, 0.85);
+                    if (q.x < 0.8 || q.x > 55.2 || q.y < 0.8 || q.y > 14.2) sdr = hudInk(uiAlpha, camColor * 0.8);
+                }
+                float camText = sampleWord4(px, liveMin + float2(bx + 5.0, flockTop + 7.0) * uiScale, sc, 67u, 65u, 77u, 32u); // CAM
+                camText = max(camText, cam ? sampleWord4(px, liveMin + float2(bx + 30.0, flockTop + 7.0) * uiScale, sc, 79u, 78u, 32u, 32u)
+                                           : sampleWord4(px, liveMin + float2(bx + 30.0, flockTop + 7.0) * uiScale, sc, 79u, 70u, 70u, 32u));
+                sdr = hudOver(uiAlpha, sdr, camColor, camText);
+            }
+            if (tablePoint.y >= workoutTop && tablePoint.y < flockTop) {
+                // WORKOUT  MAX   52080 BIRDS  FLOOR 24   [-] [+]
+                const float tw = liveSize.x / uiScale;
+                const float sc = 1.25 * uiScale;
+                const uint level = workoutBits & 15u;
+                const uint flockState = (workoutBits >> 10u) & 3u; // 1 releasing birds, 2 held by the frame-rate floor
+                const uint floorFps = (workoutBits >> 12u) & 255u;
+                float2 at = liveMin + float2(8.0, workoutTop + 5.0) * uiScale;
+                const float3 hot = level == 0u ? colCyan * 0.85 : (level >= 7u ? float3(0.98, 0.35, 0.40) : colAmber);
+                if (tablePoint.y - workoutTop < 1.0) sdr = hudInk(uiAlpha, hot * 0.6);
+                float title = sampleWord8(px, at, sc, 87u, 79u, 82u, 75u, 79u, 85u, 84u, 32u);                 // WORKOUT
+                sdr = hudOver(uiAlpha, sdr, colJade, title);
+                float levelText;
+                if (level == 0u) levelText = sampleWord4(px, at + float2(52.0, 0) * uiScale, sc, 79u, 70u, 70u, 32u);        // OFF
+                else if (level >= 10u) levelText = sampleWord4(px, at + float2(52.0, 0) * uiScale, sc, 77u, 65u, 88u, 32u);  // MAX
+                else levelText = sampleUint4(px, at + float2(44.0, 0) * uiScale, sc, level);
+                sdr = hudOver(uiAlpha, sdr, hot, levelText);
+                if (!compactTable || level > 0u) {
+                    // Held by the floor, the count is the machine's answer: show it in the hot colour.
+                    float birds = sampleUint6(px, at + float2(76.0, 0) * uiScale, sc, (uint)round(gCpuWorkout.w));
+                    sdr = hudOver(uiAlpha, sdr, flockState == 2u ? hot : colEnamel, birds);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel,
+                                  sampleWord8(px, at + float2(117.0, 0) * uiScale, sc * 0.85, 66u, 73u, 82u, 68u, 83u, 32u, 32u, 32u)); // BIRDS
+                }
+                if (!compactTable && flockState != 0u) {
+                    const float ts = sc * 0.85;
+                    float2 tagAt = at + float2(150.0, 0) * uiScale;
+                    float tag;
+                    if (flockState == 2u) {
+                        tag = sampleWord8(px, tagAt, ts, 70u, 76u, 79u, 79u, 82u, 32u, 32u, 32u);                            // FLOOR
+                        tag = max(tag, sampleUint4(px, tagAt + float2(22.0, 0) * uiScale, ts, floorFps));
+                    } else {
+                        tag = sampleWord8(px, tagAt, ts, 82u, 69u, 76u, 69u, 65u, 83u, 73u, 78u);                            // RELEASIN
+                        tag = max(tag, sampleGlyph(px, tagAt + float2(8.0 * 5.0 * ts, 0), ts, 71u));                         // G
+                    }
+                    sdr = hudOver(uiAlpha, sdr, flockState == 2u ? hot : colCyan * 0.85, tag);
+                }
+                [unroll] for (uint b = 0u; b < 2u; ++b) {
+                    const float bx = tw - (b == 0u ? 56.0 : 36.0);
+                    const float2 q = tablePoint - float2(bx, workoutTop + 3.0);
+                    if (q.x >= 0.0 && q.x < 16.0 && q.y >= 0.0 && q.y < 15.0) {
+                        sdr = hudOver(uiAlpha, sdr, hot * 0.22, 0.85);
+                        if (q.x < 0.8 || q.x > 15.2 || q.y < 0.8 || q.y > 14.2) sdr = hudInk(uiAlpha, hot * 0.8);
+                    }
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 5.5, workoutTop + 7.0) * uiScale, sc, b == 0u ? 45u : 43u));
+                }
+            }
+            if (tablePoint.y >= sensorTop && tablePoint.y < cpuTop) {
+                float3 warnColor; float warnMask;
+                float s = gpuSensorLine(px, liveMin + float2(7.0, sensorTop + 3.0) * uiScale, 1.20 * uiScale, !compactTable, warnColor, warnMask);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, s);
+                sdr = hudOver(uiAlpha, sdr, warnColor, warnMask);
+            }
+            if (tablePoint.x >= 4.0 && tablePoint.x < liveSize.x / uiScale - 4.0 &&
+                tablePoint.y >= neuralRowsTop && tablePoint.y < footerTop)
+            {
+                // One row per network: name, GPU ms, PSNR and a LIVE / OFF / SOLO badge.
+                // Clicking the row switches that network; clicking the badge solos it.
+                uint feature = min(uint((tablePoint.y - neuralRowsTop) / featureRowHeight), 2u);
+                uint state = (neuralMeta >> (feature * 2u)) & 3u;   // Unavailable, Off, Active, Idle
+                bool soloed = neuralSolo == feature + 1u;
+                float rowTop = neuralRowsTop + feature * featureRowHeight;
+                float2 rowAt = liveMin + float2(0.0, rowTop) * uiScale;
+                float3 accent = soloed ? colAmber : (state == 2u ? colJade : colCyan * (state == 0u ? .48 : .90));
+                float3 labelColor = state == 0u ? float3(.62, .66, .67) : colEnamel;
+                sdr = hudOver(uiAlpha, sdr, accent * (soloed ? .24 : .15), .74);
+                if (tablePoint.y - rowTop < 1.0 || tablePoint.x < 5.0) sdr = hudInk(uiAlpha, accent * .80);
+                float scale = 1.30 * uiScale;
+                float2 nameAt = rowAt + float2(8.0, 5.0) * uiScale;
+                float name;
+                if (compactTable) {
+                    name = feature == 0u ? sampleWord4(px,nameAt,scale,78u,83u,72u,68u)                        // NSHD
+                         : (feature == 1u ? sampleWord4(px,nameAt,scale,78u,84u,69u,88u)                       // NTEX
+                                          : sampleWord4(px,nameAt,scale,78u,82u,67u,32u));                     // NRC
+                } else if (feature == 0u) {
+                    name = max(sampleWord8(px,nameAt,scale,78u,69u,85u,82u,65u,76u,32u,83u),                   // NEURAL S
+                               sampleWord8(px,nameAt+float2(40.0*scale,0),scale,72u,65u,68u,73u,78u,71u,32u,32u)); // HADING
+                } else if (feature == 1u) {
+                    name = max(sampleWord8(px,nameAt,scale,78u,69u,85u,82u,65u,76u,32u,84u),                   // NEURAL T
+                               sampleWord8(px,nameAt+float2(40.0*scale,0),scale,69u,88u,84u,85u,82u,69u,83u,32u)); // EXTURES
+                } else {
+                    name = max(sampleWord8(px,nameAt,scale,82u,65u,68u,73u,65u,78u,67u,69u),                   // RADIANCE
+                               sampleWord8(px,nameAt+float2(40.0*scale,0),scale,32u,67u,65u,67u,72u,69u,32u,32u)); //  CACHE
+                }
+                float values = 0.0;
+                if (state == 2u) {
+                    const float q = gNeuralQuality[feature];
+                    if (compactTable) {
+                        values = sampleFixedNumber6(px, rowAt + float2(60.0, 5.0) * uiScale, scale, q);
+                    } else {
+                        values = sampleFixedMs6(px, rowAt + float2(106.0, 5.0) * uiScale, scale, gNeuralMs[feature]);
+                        values = max(values, sampleWord4(px, rowAt + float2(146.0, 5.0) * uiScale, scale * .85, 77u,83u,32u,32u)); // MS
+                        float2 qAt = rowAt + float2(166.0, 5.0) * uiScale;
+                        values = max(values, sampleFixedNumber6(px, qAt, scale, q));
+                        values = max(values, sampleWord4(px, qAt + float2(31.0 * scale, 0), scale * .85, 68u,66u,32u,32u)); // DB
+                    }
+                }
+                float2 stateAt = rowAt + float2(compactTable ? 150.0 : 244.0, 5.0) * uiScale;
+                float badge;
+                if (state == 0u) badge = sampleWord4(px, stateAt, scale, 78u,47u,65u,32u);                    // N/A
+                else if (soloed) badge = sampleWord4(px, stateAt, scale, 83u,79u,76u,79u);                     // SOLO
+                else badge = liveStateLabel(px, stateAt, scale, state == 2u ? 0u : 2u);                        // LIVE / OFF
+                sdr = hudOver(uiAlpha, sdr, labelColor, name);
+                sdr = hudOver(uiAlpha, sdr, colCyan, values);
+                sdr = hudOver(uiAlpha, sdr, accent, badge);
+            }
+            if (tablePoint.x >= 4.0 && tablePoint.x < liveSize.x / uiScale - 4.0 &&
+                tablePoint.y >= 139.0 && tablePoint.y < neuralTop)
+            {
+                uint feature = uint((tablePoint.y - 139.0) / featureRowHeight);
+                uint bits = gLivePillarMeta.w >> (feature == 4u ? 17u : feature * 4u);
+                uint state = bits & 3u;     // Unavailable, Off, Active, Idle
+                uint level = (bits >> 2u) & (feature == 3u ? 7u : 3u);
+                float rowTop = 139.0 + feature * featureRowHeight;
+                float2 rowAt = liveMin + float2(0.0, rowTop) * uiScale;
+                float3 accent = state == 2u ? colJade : (state == 3u ? colAmber : colCyan * (state == 0u ? .48 : .90));
+                float3 labelColor = state == 0u ? float3(.62, .66, .67) : colEnamel;
+                sdr = hudOver(uiAlpha, sdr, accent * .15, .74);
+                if (tablePoint.y - rowTop < 1.0 || tablePoint.x < 5.0) sdr = hudInk(uiAlpha, accent * .80);
+                float scale = 1.30 * uiScale;
+                float2 keyAt = rowAt + float2(7.0, 5.0) * uiScale;
+                float2 nameAt = rowAt + float2(feature < 2u && !compactTable ? 30.0 : 8.0, 5.0) * uiScale;
+                float2 modeAt = rowAt + float2(compactTable ? 77.0 : 131.0,5.0) * uiScale;
+                float2 stateAt = rowAt + float2(compactTable ? 150.0 : 244.0,5.0) * uiScale;
+                float key = feature < 2u && !compactTable ? sampleWord4(px, keyAt, scale, 91u, 56u + feature, 93u, 32u) : 0;
+                float name;
+                if (feature == 0u) {
+                    name = sampleWord4(px, nameAt, scale, 80u,65u,84u,72u);
+                    name = max(name, sampleWord8(px, nameAt + float2(25.0 * scale,0), scale, 84u,82u,65u,67u,73u,78u,71u,32u));
+                    name = uiLabel(px, nameAt, scale, 12.0, UI_LBL_PATH_TRACING, name);
+                    if (compactTable) name = sampleWord4(px,nameAt,scale,80u,84u,32u,32u);
+                } else if (feature == 1u) {
+                    name = sampleWord4(px,nameAt,scale,68u,76u,83u,83u);
+                    if (!compactTable) {
+                        float text = sampleWord8(px,nameAt,scale,68u,76u,83u,83u,32u,85u,80u,83u);
+                        text = max(text,sampleWord8(px,nameAt+float2(40.0*scale,0),scale,67u,65u,76u,73u,78u,71u,32u,32u));
+                        name = uiLabel(px,nameAt,scale,15.0,UI_LBL_DLSS_UPSCALING,text);
+                    }
+                } else if (feature == 2u) {
+                    name = sampleWord8(px,nameAt,scale,68u,76u,83u,83u,32u,82u,82u,32u);
+                    if (!compactTable) {
+                        float rr = sampleWord8(px,nameAt,scale,82u,65u,89u,32u,82u,69u,67u,79u);
+                        rr = max(rr, sampleWord8(px,nameAt+float2(40.0*scale,0),scale,78u,83u,84u,82u,85u,67u,84u,73u));
+                        rr = max(rr, sampleWord4(px,nameAt+float2(80.0*scale,0),scale,79u,78u,32u,32u));
+                        name = uiLabel(px,nameAt,scale,18.0,UI_LBL_RR,rr);
+                    }
+                } else if (feature == 3u) {
+                    name = sampleWord8(px,nameAt,scale,68u,76u,83u,83u,32u,70u,71u,32u);
+                    if (!compactTable) {
+                        float fg = sampleWord8(px,nameAt,scale,70u,82u,65u,77u,69u,32u,71u,69u);
+                        fg = max(fg,sampleWord8(px,nameAt+float2(40.0*scale,0),scale,78u,69u,82u,65u,84u,73u,79u,78u));
+                        name = uiLabel(px,nameAt,scale,18.0,UI_LBL_FG,fg);
+                    }
+                } else {
+                    name = sampleWord8(px,nameAt,scale,82u,69u,70u,76u,69u,88u,32u,32u);
+                }
+                float mode = 0.0;
+                if (level == 0u) mode = liveStateLabel(px, modeAt, scale, 2u);
+                else if (feature < 2u) {
+                    uint id = feature * 3u + level - 1u;
+                    if (id == 0u) mode = sampleWord4(px,modeAt,scale,76u,79u,87u,32u);
+                    if (id == 1u) mode = sampleWord8(px,modeAt,scale,77u,69u,68u,73u,85u,77u,32u,32u);
+                    if (id == 2u) mode = sampleWord4(px,modeAt,scale,72u,73u,71u,72u);
+                    if (id == 3u) mode = sampleWord8(px,modeAt,scale,81u,85u,65u,76u,73u,84u,89u,32u);
+                    if (id == 4u) mode = sampleWord8(px,modeAt,scale,66u,65u,76u,65u,78u,67u,69u,68u);
+                    if (id == 5u) {
+                        mode = sampleWord8(px,modeAt,scale,80u,69u,82u,70u,79u,82u,77u,65u);
+                        mode = max(mode, sampleWord4(px,modeAt + float2(40.0 * scale,0),scale,78u,67u,69u,32u));
+                    }
+                    mode = uiLabel(px, modeAt, scale, 10.0, UI_LBL_FEATURE_LEVEL + id, mode);
+                } else if (feature == 3u) {
+                    mode = level == 1u ? uiLabel(px,modeAt,scale,10.0,UI_LBL_AUTO,sampleWord4(px,modeAt,scale,65u,85u,84u,79u))
+                                       : sampleWord4(px,modeAt,scale,48u+level,88u,32u,32u);
+                    uint available = (gLivePillarMeta.w >> 21u) & 7u;
+                    uint presented = (gLivePillarMeta.w >> 24u) & 7u;
+                    if (level >= 2u && available >= 2u && available < level) {
+                        mode = max(mode,sampleWord4(px,modeAt+float2(10.0*scale,0),scale,47u,48u+available,88u,32u));
+                    } else if (level == 1u && state == 2u && !compactTable && presented > 1u) {
+                        mode = max(mode,sampleWord4(px,modeAt+float2(59.0*scale,0),scale,48u+presented,88u,32u,32u));
+                    }
+                } else if (feature == 4u && level == 2u) {
+                    mode = uiLabel(px,modeAt,scale,10.0,UI_LBL_BOOST,sampleWord8(px,modeAt,scale,66u,79u,79u,83u,84u,32u,32u,32u));
+                } else {
+                    mode = uiLabel(px,modeAt,scale,10.0,UI_LBL_ENABLED,sampleWord4(px,modeAt,scale,79u,78u,32u,32u));
+                }
+                if (state == 0u) mode = sampleGlyph(px, modeAt, scale, 45u);
+                float badge = state == 0u ? uiLabel(px, stateAt, scale, 6.5, UI_LBL_UNAVAILABLE,
+                    sampleWord4(px, stateAt, scale, 78u,47u,65u,32u))
+                    : liveStateLabel(px, stateAt, scale, state == 1u ? 2u : (state == 2u ? 0u : 4u));
+                sdr = hudOver(uiAlpha, sdr, labelColor, max(name,mode));
+                sdr = hudOver(uiAlpha, sdr, accent, max(key,badge));
+            }
+        }
+
+        // Neural solo-view captions, positioned in canvas space through the 16:9 letterbox.
+        {
+            const uint soloView = (gNeuralMeta.x >> 8u) & 3u;
+            if (soloView != 0u) {
+                const float2 canvas = gSwapchainAndCanvas.zw;
+                const float k = gLetterboxRect.z / max(canvas.x, 1.0);
+                const float sc = 1.6 * uiScale;
+                float txt = 0.0;
+                float3 tint = colEnamel;
+                if (soloView == 2u) {
+                    const float side = min(canvas.y * 0.72, canvas.x * 0.30);
+                    const float gap = (canvas.x - 3.0 * side) / 4.0;
+                    const float ty = gLetterboxRect.y + ((canvas.y + side) * 0.5) * k + 12.0 * uiScale;
+                    [unroll] for (uint panel = 0u; panel < 3u; ++panel) {
+                        const float2 at = float2(gLetterboxRect.x + (gap + panel * (side + gap)) * k, ty);
+                        float t;
+                        if (panel == 0u) t = sampleWord8(px, at, sc, 79u, 82u, 73u, 71u, 73u, 78u, 65u, 76u);              // ORIGINAL
+                        else if (panel == 1u) {
+                            t = max(sampleWord8(px, at, sc, 78u, 69u, 85u, 82u, 65u, 76u, 32u, 32u),                         // NEURAL
+                                    sampleFixedNumber6(px, at + float2(42.0 * sc, 0), sc, gNeuralQuality.y));
+                            t = max(t, sampleWord4(px, at + float2(74.0 * sc, 0), sc, 68u, 66u, 32u, 32u));                  // DB
+                            t = max(t, sampleFixedNumber6(px, at + float2(0.0, 11.0 * sc), sc * 0.8, gNeuralMs.w));
+                            t = max(t, sampleWord8(px, at + float2(32.0 * sc * 0.8, 11.0 * sc), sc * 0.8, 88u, 32u, 83u, 77u, 65u, 76u, 76u, 69u)); // X SMALLE
+                            t = max(t, sampleWord4(px, at + float2(72.0 * sc * 0.8, 11.0 * sc), sc * 0.8, 82u, 32u, 32u, 32u));                    // R
+                        } else t = max(sampleWord8(px, at, sc, 69u, 82u, 82u, 79u, 82u, 32u, 88u, 52u), 0.0);              // ERROR X4
+                        const float3 c = panel == 1u ? colJade : (panel == 0u ? colEnamel : float3(1.0, 0.45, 0.72));
+                        sdr = hudOver(uiAlpha, sdr, c, t);
+                    }
+                } else {
+                    // Split views: left half is the live frame, right half the network.
+                    const float ty = gLetterboxRect.y + 14.0 * uiScale;
+                    const float2 rightAt = float2(gLetterboxRect.x + gLetterboxRect.z * 0.5 + 14.0 * uiScale, ty);
+                    const float2 leftAt = float2(gLetterboxRect.x + gLetterboxRect.z * 0.5 - (soloView == 1u ? 66.0 : 82.0) * sc, ty);
+                    float l = soloView == 1u ? sampleWord8(px, leftAt, sc, 32u, 79u, 82u, 73u, 71u, 73u, 78u, 65u)          // ORIGINA
+                                             : sampleWord8(px, leftAt, sc, 32u, 32u, 76u, 73u, 86u, 69u, 32u, 70u);         // LIVE F
+                    l = max(l, soloView == 1u ? sampleWord4(px, leftAt + float2(40.0 * sc, 0), sc, 76u, 32u, 32u, 32u)      // L
+                                              : sampleWord8(px, leftAt + float2(40.0 * sc, 0), sc, 82u, 65u, 77u, 69u, 32u, 32u, 32u, 32u)); // RAME
+                    float r = soloView == 1u ? sampleWord8(px, rightAt, sc, 78u, 69u, 85u, 82u, 65u, 76u, 32u, 71u)         // NEURAL G
+                                             : sampleWord8(px, rightAt, sc, 78u, 69u, 85u, 82u, 65u, 76u, 32u, 67u);        // NEURAL C
+                    r = max(r, soloView == 1u ? sampleWord4(px, rightAt + float2(40.0 * sc, 0), sc, 82u, 65u, 68u, 69u)    // RADE
+                                              : sampleWord4(px, rightAt + float2(40.0 * sc, 0), sc, 65u, 67u, 72u, 69u));  // ACHE
+                    // Dark backing so the captions stay legible over bright frames.
+                    const float2 boxL = leftAt - float2(6.0, 4.0) * uiScale, boxR = rightAt - float2(6.0, 4.0) * uiScale;
+                    const float2 boxSize = float2(66.0 * sc, 9.0 * sc) + float2(12.0, 8.0) * uiScale;
+                    if (all(px >= boxL) && all(px <= boxL + boxSize)) sdr = hudOver(uiAlpha, sdr, float3(0.01, 0.015, 0.03), 0.62);
+                    if (all(px >= boxR) && all(px <= boxR + boxSize)) sdr = hudOver(uiAlpha, sdr, float3(0.01, 0.015, 0.03), 0.62);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, l);
+                    sdr = hudOver(uiAlpha, sdr, soloView == 1u ? colJade : colAmber, r);
+                }
             }
         }
 
         // Top-Right Standalone Offscreen Benchmark Card (`B` sweep — explicitly labeled "BENCH [B]")
-        const bool benchActiveOrDone = ((gHudFlags & 64u) != 0u) || ((gHudFlags & 128u) != 0u);
         if (benchActiveOrDone)
         {
-            float2 cardMin = float2(res.x - 278.0 * uiScale, 14.0 * uiScale);
+            bool stackCards = res.x < 426.0 * uiScale;
+            float2 cardMin = float2(max(0.0, res.x - 278.0 * uiScale),
+                                    stackCards ? liveTopY + liveSize.y + 6.0 * uiScale : 14.0 * uiScale);
             float2 cardSize = float2(264.0 * uiScale, 126.0 * uiScale);
             if (px.x >= cardMin.x && px.x <= cardMin.x + cardSize.x &&
                 px.y >= cardMin.y && px.y <= cardMin.y + cardSize.y)
             {
-                sdr = lerp(sdr, float3(0.025, 0.032, 0.062), 0.88);
+                sdr = hudOver(uiAlpha, sdr, float3(0.025, 0.032, 0.062), 0.88);
                 bool cardBorder = (px.x - cardMin.x < 1.5) || (cardMin.x + cardSize.x - px.x < 1.5) ||
                                   (px.y - cardMin.y < 1.5) || (cardMin.y + cardSize.y - px.y < 1.5);
-                if (cardBorder) sdr = lerp(colAmber, colOrchid, 0.5);
+                if (cardBorder) sdr = hudInk(uiAlpha, lerp(colAmber, colOrchid, 0.5));
             }
 
             float bTitle = max(
@@ -2873,11 +3676,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     66u, 69u, 78u, 67u, 72u, 32u, 91u, 66u),
                 sampleGlyph(px, cardMin + float2(70.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 93u));
             bTitle = uiLabel(px, cardMin + float2(10.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 11.0, UI_LBL_BENCH, bTitle);
-            sdr = lerp(sdr, colAmber, bTitle);
+            sdr = hudOver(uiAlpha, sdr, colAmber, bTitle);
 
             float hdrFill = ((gHudFlags & 64u) != 0u) ? gBenchProgress : 1.0;
             float hdrBar = segmentedBar(px, cardMin + float2(96.0 * uiScale, 8.0 * uiScale), float2(156.0 * uiScale, 6.0 * uiScale), hdrFill, 20u);
-            sdr = lerp(sdr, colAmber, hdrBar);
+            sdr = hudOver(uiAlpha, sdr, colAmber, hdrBar);
 
             float scores[4] = { gBenchPrimary.x, gBenchPrimary.y, gBenchPrimary.z, gBenchPrimary.w };
             float fills[4]  = { gBenchFill.x,    gBenchFill.y,    gBenchFill.z,    gBenchFill.w };
@@ -2898,7 +3701,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if (b == 3u) { l0 = 67u; l1 = 79u; l2 = 68u; l3 = 67u; }
 
                 float lbl = sampleWord4(px, float2(cardMin.x + 10.0 * uiScale, rowY), 1.7 * uiScale, l0, l1, l2, l3);
-                sdr = lerp(sdr, rowCols[b], lbl);
+                sdr = hudOver(uiAlpha, sdr, rowCols[b], lbl);
 
                 float barMask = segmentedBar(
                     px,
@@ -2906,61 +3709,62 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float2(126.0 * uiScale, 9.0 * uiScale),
                     fills[b],
                     16u);
-                sdr = lerp(sdr, rowCols[b], barMask * 0.92);
+                sdr = hudOver(uiAlpha, sdr, rowCols[b], barMask * 0.92);
 
                 float numMask = sampleFixedNumber6(
                     px,
                     float2(cardMin.x + 190.0 * uiScale, rowY),
                     1.7 * uiScale,
                     scores[b]);
-                sdr = lerp(sdr, colEnamel, numMask);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, numMask);
             }
         }
     }
 
+
     if (showOverlay && hudMode == 1u && px.x < 330.0 && px.y > res.y - 42.0) {
-        sdr = lerp(sdr, float3(0.015, 0.025, 0.04), 0.85);
-        sdr = lerp(sdr, colEnamel, sampleTimecodeMMSS(px, float2(12, res.y - 30), 2.0, gFilmTime));
+        sdr = hudOver(uiAlpha, sdr, float3(0.015, 0.025, 0.04), 0.85);
+        sdr = hudOver(uiAlpha, sdr, colEnamel, sampleTimecodeMMSS(px, float2(12, res.y - 30), 2.0, gFilmTime));
         [unroll] for (uint e = 0u; e < 5u; ++e) {
             if (abs(px.x - (84.0 + (float)e * 17.0)) < 5.0 && abs(px.y - (res.y - 23.0)) < 5.0)
-                sdr = badgeStatusColor((gEnginePacked >> (e * 4u)) & 15u);
+                sdr = hudInk(uiAlpha, badgeStatusColor((gEnginePacked >> (e * 4u)) & 15u));
         }
-        sdr = lerp(sdr, colAmber, sampleFixedNumber6(px, float2(190, res.y - 30), 2.0, gGpuMs));
+        sdr = hudOver(uiAlpha, sdr, colAmber, sampleFixedNumber6(px, float2(190, res.y - 30), 2.0, gGpuMs));
     }
     if (showOverlay && hudMode == 1u) {
         [unroll] for (uint i = 0u; i < 16u; ++i) {
             float ms = gRecentGpuMs[i / 4u][i % 4u];
             float bar = verticalBar(px, float2(255.0 + (float)i * 4.0, res.y - 34.0), float2(3, 24), saturate(ms / 16.667));
-            sdr = lerp(sdr, ms > 16.667 ? colAmber : colJade, bar);
+            sdr = hudOver(uiAlpha, sdr, ms > 16.667 ? colAmber : colJade, bar);
         }
     }
     if (showOverlay && gVolumeAndPadding.x >= 0.0 && px.y < 38.0 && px.x < 190.0) {
-        sdr *= 0.25;
-        sdr = lerp(sdr, colEnamel, sampleWord4(px, float2(12, 12), 2, 86u, 79u, 76u, 58u));
-        sdr = lerp(sdr, colJade, sampleFixedNumber6(px, float2(62, 12), 2, gVolumeAndPadding.x));
+        sdr = hudOver(uiAlpha, sdr, 0.0.xxx, 0.75);
+        sdr = hudOver(uiAlpha, sdr, colEnamel, sampleWord4(px, float2(12, 12), 2, 86u, 79u, 76u, 58u));
+        sdr = hudOver(uiAlpha, sdr, colJade, sampleFixedNumber6(px, float2(62, 12), 2, gVolumeAndPadding.x));
     }
     if (showOverlay && hudMode == 2u) {
-        const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float uiScale = clamp(min(floor(res.y / 540.0), floor(lbSize.x / 480.0)), 1.0, 3.0);
         const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
         float splitX = lbMin.x + lbSize.x * splitRatio;
         if (abs(px.x - splitX) < 1.35 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
-            sdr = colEnamel;
+            sdr = hudInk(uiAlpha, colEnamel);
 
         // Draggable RTX Split Curtain Center Grab Handle
         float2 handleCenter = float2(splitX, lbMin.y + lbSize.y * 0.5);
         float2 handleHalf   = float2(6.5 * uiScale, 20.0 * uiScale);
         if (abs(px.x - handleCenter.x) <= handleHalf.x && abs(px.y - handleCenter.y) <= handleHalf.y)
         {
-            sdr = lerp(sdr, float3(0.018, 0.028, 0.052), 0.92);
+            sdr = hudOver(uiAlpha, sdr, float3(0.018, 0.028, 0.052), 0.92);
             bool hb = (handleHalf.x - abs(px.x - handleCenter.x) < 1.4) ||
                       (handleHalf.y - abs(px.y - handleCenter.y) < 1.4);
-            if (hb) sdr = colJade;
+            if (hb) sdr = hudInk(uiAlpha, colJade);
             else if (abs(abs(px.x - handleCenter.x) - 2.2 * uiScale) < 0.7 && abs(px.y - handleCenter.y) < 11.0 * uiScale)
-                sdr = colEnamel;
+                sdr = hudInk(uiAlpha, colEnamel);
         }
 
-        float4 pm = gLivePillarMetrics[abEngine];
-        float2 bannerSz    = float2(262.0 * uiScale, 28.0 * uiScale);
+        float4 pm = gLivePillarMetrics[min(abEngine, 3u)];
+        float2 bannerSz    = float2(min(262.0 * uiScale, (lbSize.x - 40.0 * uiScale) * 0.5), 28.0 * uiScale);
         float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
         float  rightMaxX   = max(lbMin.x + 14.0 * uiScale, lbMin.x + lbSize.x - bannerSz.x - 14.0 * uiScale);
         float2 rightBoxMin = float2(clamp(max(splitX + 14.0 * uiScale, leftBoxMin.x + bannerSz.x + 12.0 * uiScale), lbMin.x + 14.0 * uiScale, rightMaxX), lbMin.y + 14.0 * uiScale);
@@ -2968,18 +3772,18 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         if (px.x >= leftBoxMin.x && px.x <= leftBoxMin.x + bannerSz.x &&
             px.y >= leftBoxMin.y && px.y <= leftBoxMin.y + bannerSz.y)
         {
-            sdr = lerp(sdr, float3(0.015, 0.025, 0.045), 0.86);
+            sdr = hudOver(uiAlpha, sdr, float3(0.015, 0.025, 0.045), 0.86);
             if ((px.x - leftBoxMin.x < 1.5) || (leftBoxMin.x + bannerSz.x - px.x < 1.5) ||
                 (px.y - leftBoxMin.y < 1.5) || (leftBoxMin.y + bannerSz.y - px.y < 1.5))
-                sdr = abLeftHwVerified ? colJade : colAmber;
+                sdr = hudInk(uiAlpha, abLeftHwVerified ? colJade : colAmber);
         }
         if (px.x >= rightBoxMin.x && px.x <= rightBoxMin.x + bannerSz.x &&
             px.y >= rightBoxMin.y && px.y <= rightBoxMin.y + bannerSz.y)
         {
-            sdr = lerp(sdr, float3(0.015, 0.025, 0.045), 0.86);
+            sdr = hudOver(uiAlpha, sdr, float3(0.015, 0.025, 0.045), 0.86);
             if ((px.x - rightBoxMin.x < 1.5) || (rightBoxMin.x + bannerSz.x - px.x < 1.5) ||
                 (px.y - rightBoxMin.y < 1.5) || (rightBoxMin.y + bannerSz.y - px.y < 1.5))
-                sdr = colOrchid;
+                sdr = hudInk(uiAlpha, colOrchid);
         }
 
         // Left banner label: "LIVE DXR" / "CUDA 65K" / "TNSR MMA" / "NVEC H264" + live ms + throughput/PSNR
@@ -3000,15 +3804,62 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             lc0 = 67u; lc1 = 79u; lc2 = 68u; lc3 = 67u; lc4 = 32u; lc5 = 49u; lc6 = 77u; lc7 = 66u; // CODC 1MB
             rc0 = 67u; rc1 = 76u; rc2 = 69u; rc3 = 65u; rc4 = 78u; rc5 = 49u; rc6 = 48u; rc7 = 66u; // CLEAN10B
         }
-
+        const bool cpuDirector = gLivePillarMeta.y == 3u && gLivePillarMeta.z > 0u &&
+                                 (gHudFlags & (1u << 20u)) != 0u;
         float lTxt = sampleWord8(px, leftBoxMin + float2(8.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, lc0, lc1, lc2, lc3, lc4, lc5, lc6, lc7);
+        if (directorCompare) {
+            float2 at = leftBoxMin + float2(8.0, 8.0) * uiScale;
+            if (abLeftHwVerified || cpuDirector) {
+                float device = sampleWord4(px, at, 1.8 * uiScale, abLeftHwVerified ? 78u : 67u, 80u, 85u, 32u);
+                lTxt = max(device, liveStateLabel(px, at + float2(44.0 * uiScale, 0.0), 1.8 * uiScale, 0u));
+            } else {
+                lTxt = directorStateLabel(px, at, 1.8 * uiScale, 4u);
+            }
+        }
         float lMs  = sampleFixedMs6(px, leftBoxMin + float2(96.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, pm.x);
         float lVal = sampleFixedNumber6(px, leftBoxMin + float2(168.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, (abEngine == 3u) ? pm.w : pm.y);
-        sdr = lerp(sdr, abLeftHwVerified ? colJade : colAmber, lTxt);
-        sdr = lerp(sdr, colEnamel, max(lMs, lVal));
+        sdr = hudOver(uiAlpha, sdr, abLeftHwVerified ? colJade : colAmber, lTxt);
+        if (directorCompare) {
+            float2 at = leftBoxMin + float2(112.0, 8.0) * uiScale;
+            uint pendingState = measuredDirectorBackend();
+            if (pendingState == 2u || pendingState == 3u) pendingState = 4u;
+            float detail = (abLeftHwVerified || cpuDirector)
+                ? max(sampleFixedMs6(px, at, 1.8 * uiScale, gVolumeAndPadding.y),
+                      sampleWord4(px, at + float2(57.0 * uiScale, 0.0), 1.8 * uiScale, 77u, 83u, 32u, 32u)) // MS
+                : (pendingState == 4u ? 0.0 : directorStateLabel(px, at, 1.8 * uiScale, pendingState));
+            if (bannerSz.x >= 250.0 * uiScale) sdr = hudOver(uiAlpha, sdr, colEnamel, detail);
+        } else {
+            if (bannerSz.x >= 250.0 * uiScale) sdr = hudOver(uiAlpha, sdr, colEnamel, max(lMs, lVal));
+        }
 
         float rTxt = sampleWord8(px, rightBoxMin + float2(8.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, rc0, rc1, rc2, rc3, rc4, rc5, rc6, rc7);
-        sdr = lerp(sdr, colOrchid, rTxt);
+        if (directorCompare)
+            rTxt = directorStateLabel(px, rightBoxMin + float2(8.0, 8.0) * uiScale, 1.8 * uiScale, 4u);
+        sdr = hudOver(uiAlpha, sdr, colOrchid, rTxt);
+
+        // Current-shot comparisons. Technical abbreviations match the hardware table in every locale.
+        float2 tabPos = (px - lbMin) / uiScale - float2(14.0, 46.0);
+        if (res.x >= 480.0 && res.y >= 300.0 && tabPos.x >= 0.0 && tabPos.x < 238.0 && tabPos.y >= 0.0 && tabPos.y < 21.0) {
+            uint tab = (uint)(tabPos.x / 43.0);
+            float localX = tabPos.x - tab * 43.0;
+            if (localX < 40.0) {
+                bool selected = tab == abEngine;
+                sdr = hudOver(uiAlpha, sdr, selected ? colJade * 0.18 : float3(0.025, 0.038, 0.060), 0.94);
+                if (tabPos.y >= 19.0 && selected) sdr = hudInk(uiAlpha, colJade);
+                if (tab == 5u) {
+                    float2 center = float2(localX - 11.5, tabPos.y - 10.5);
+                    float stroke = abs(abs(center.x) - abs(center.y));
+                    float crossMark = saturate((1.2 - stroke) * uiScale) * saturate((5.5 - max(abs(center.x), abs(center.y))) * uiScale);
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, crossMark);
+                } else {
+                    uint4 word = hardwareRowWord(tab);
+                    float inset = tab == 0u ? 13.0 : (tab == 4u ? 9.0 : 6.0);
+                    float2 at = lbMin + float2(14.0 + 43.0 * tab + inset, 52.0) * uiScale;
+                    float label = sampleWord4(px, at, 1.4 * uiScale, word.x, word.y, word.z, word.w);
+                    sdr = hudOver(uiAlpha, sdr, selected ? colJade : colEnamel, label);
+                }
+            }
+        }
     }
 
     // Persistent Bottom Interactive NVIDIA RTX Studio Dock (Pass 4 only; anchored right above Bottom Bar even during WIPE!)
@@ -3037,10 +3888,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             const bool isReblur  = (curDenMode == 1u);
             const uint sppCount = (uint)(clamp(gInteractiveState.w, 1.0, 9999.0) + 0.5);
 
-            sdr = lerp(sdr, float3(0.015, 0.024, 0.046), 0.91);
+            sdr = hudOver(uiAlpha, sdr, float3(0.015, 0.024, 0.046), 0.91);
             bool outerBdr = (px.x - barMin.x < 1.5) || (barMin.x + barSize.x - px.x < 1.5) ||
                             (px.y - barMin.y < 1.5) || (barMin.y + barSize.y - px.y < 1.5);
-            if (outerBdr) sdr = lerp(colJade, colOrchid, 0.35);
+            if (outerBdr) sdr = hudInk(uiAlpha, lerp(colJade, colOrchid, 0.35));
 
             // Row 1: [FREE/FILM] [RBLR/NRD + SPP] [LAMP] [WIPE] [AOV] [MRBL] [<] [1..6] [>] [SCENE NAME]
             const float r1MinY = barMin.y + 5.0 * u;
@@ -3052,15 +3903,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 expC = expOn ? colJade : colAmber;
             if (px.x >= bExpMin.x && px.x <= bExpMax.x && px.y >= bExpMin.y && px.y <= bExpMax.y)
             {
-                sdr = lerp(sdr, expC * 0.24, 0.85);
+                sdr = hudOver(uiAlpha, sdr, expC * 0.24, 0.85);
                 if ((px.x - bExpMin.x < 1.2) || (bExpMax.x - px.x < 1.2) || (px.y - bExpMin.y < 1.2) || (bExpMax.y - px.y < 1.2))
-                    sdr = expC;
+                    sdr = hudInk(uiAlpha, expC);
             }
             float tExp = expOn
                 ? sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 82u, 69u, 69u) // FREE
                 : sampleWord4(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 70u, 73u, 76u, 77u); // FILM
             tExp = uiLabel(px, barMin + float2(16.0 * u, 9.5 * u), 1.35 * u, 5.6, expOn ? UI_LBL_CAM_FREE : UI_LBL_CAM_FILM, tExp);
-            sdr = lerp(sdr, expC, tExp);
+            sdr = hudOver(uiAlpha, sdr, expC, tExp);
 
             // 2. REBLUR / NRD / ACC denoiser + live SPP convergence readout (rx = 60..152)
             float2 bSppMin = float2(barMin.x + 60.0 * u, r1MinY);
@@ -3069,9 +3920,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             bool denActive = isAccum || isReblur;
             if (px.x >= bSppMin.x && px.x <= bSppMax.x && px.y >= bSppMin.y && px.y <= bSppMax.y)
             {
-                sdr = lerp(sdr, nrdC * (denActive ? 0.24 : 0.10), 0.85);
+                sdr = hudOver(uiAlpha, sdr, nrdC * (denActive ? 0.24 : 0.10), 0.85);
                 if ((px.x - bSppMin.x < 1.2) || (bSppMax.x - px.x < 1.2) || (px.y - bSppMin.y < 1.2) || (bSppMax.y - px.y < 1.2))
-                    sdr = nrdC * (denActive ? 1.0 : 0.65);
+                    sdr = hudInk(uiAlpha, nrdC * (denActive ? 1.0 : 0.65));
             }
             float tNrd = isReblur
                 ? sampleWord4(px, barMin + float2(63.0 * u, 9.5 * u), 1.35 * u, 82u, 66u, 76u, 82u) // RBLR
@@ -3080,9 +3931,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     : sampleWord4(px, barMin + float2(64.0 * u, 9.5 * u), 1.35 * u, 65u, 67u, 67u, 32u)); // ACC
             float tSppNum = sampleUint4(px, barMin + float2(91.0 * u, 9.5 * u), 1.35 * u, sppCount);
             float tSppLbl = sampleWord4(px, barMin + float2(121.0 * u, 9.5 * u), 1.35 * u, 83u, 80u, 80u, 32u);
-            sdr = lerp(sdr, nrdC, tNrd);
-            sdr = lerp(sdr, colEnamel, tSppNum);
-            sdr = lerp(sdr, isAccum ? colAmber : (isReblur ? colJade : float3(0.58, 0.64, 0.72)), tSppLbl);
+            sdr = hudOver(uiAlpha, sdr, nrdC, tNrd);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, tSppNum);
+            sdr = hudOver(uiAlpha, sdr, isAccum ? colAmber : (isReblur ? colJade : float3(0.58, 0.64, 0.72)), tSppLbl);
 
             // 3. Practical LAMP [J] toggle pill (rx = 156..196)
             float2 bLmpMin = float2(barMin.x + 156.0 * u, r1MinY);
@@ -3090,13 +3941,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 lmpC = (!lampsOff) ? colAmber : float3(0.42, 0.46, 0.56);
             if (px.x >= bLmpMin.x && px.x <= bLmpMax.x && px.y >= bLmpMin.y && px.y <= bLmpMax.y)
             {
-                sdr = lerp(sdr, lmpC * ((!lampsOff) ? 0.24 : 0.12), 0.85);
+                sdr = hudOver(uiAlpha, sdr, lmpC * ((!lampsOff) ? 0.24 : 0.12), 0.85);
                 if ((px.x - bLmpMin.x < 1.2) || (bLmpMax.x - px.x < 1.2) || (px.y - bLmpMin.y < 1.2) || (bLmpMax.y - px.y < 1.2))
-                    sdr = lmpC;
+                    sdr = hudInk(uiAlpha, lmpC);
             }
             float tLmp = sampleWord4(px, barMin + float2(162.0 * u, 9.5 * u), 1.35 * u, 76u, 65u, 77u, 80u);
             tLmp = uiLabel(px, barMin + float2(162.0 * u, 9.5 * u), 1.35 * u, 4.7, UI_LBL_LAMP, tLmp);
-            sdr = lerp(sdr, lmpC, tLmp);
+            sdr = hudOver(uiAlpha, sdr, lmpC, tLmp);
 
             // 4. RTX Split WIPE [H] toggle pill (rx = 200..240 — persistent in exact same spot!)
             float2 bWipMin = float2(barMin.x + 200.0 * u, r1MinY);
@@ -3105,13 +3956,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 wipC = wipeOn ? colOrchid : colCyan;
             if (px.x >= bWipMin.x && px.x <= bWipMax.x && px.y >= bWipMin.y && px.y <= bWipMax.y)
             {
-                sdr = lerp(sdr, wipC * (wipeOn ? 0.36 : 0.14), 0.85);
+                sdr = hudOver(uiAlpha, sdr, wipC * (wipeOn ? 0.36 : 0.14), 0.85);
                 if ((px.x - bWipMin.x < 1.2) || (bWipMax.x - px.x < 1.2) || (px.y - bWipMin.y < 1.2) || (bWipMax.y - px.y < 1.2))
-                    sdr = wipC;
+                    sdr = hudInk(uiAlpha, wipC);
             }
             float tWip = sampleWord4(px, barMin + float2(206.0 * u, 9.5 * u), 1.35 * u, 87u, 73u, 80u, 69u);
             tWip = uiLabel(px, barMin + float2(206.0 * u, 9.5 * u), 1.35 * u, 4.7, UI_LBL_WIPE, tWip);
-            sdr = lerp(sdr, wipeOn ? colEnamel : wipC, tWip);
+            sdr = hudOver(uiAlpha, sdr, wipeOn ? colEnamel : wipC, tWip);
 
             // 5. Buffer / AOV Inspection [I / F9] pill (rx = 244..284)
             float2 bAovMin = float2(barMin.x + 244.0 * u, r1MinY);
@@ -3120,12 +3971,12 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 aovC = aovOn ? colAmber : float3(0.56, 0.66, 0.78);
             if (px.x >= bAovMin.x && px.x <= bAovMax.x && px.y >= bAovMin.y && px.y <= bAovMax.y)
             {
-                sdr = lerp(sdr, aovC * (aovOn ? 0.32 : 0.14), 0.85);
+                sdr = hudOver(uiAlpha, sdr, aovC * (aovOn ? 0.32 : 0.14), 0.85);
                 if ((px.x - bAovMin.x < 1.2) || (bAovMax.x - px.x < 1.2) || (px.y - bAovMin.y < 1.2) || (bAovMax.y - px.y < 1.2))
-                    sdr = aovC;
+                    sdr = hudInk(uiAlpha, aovC);
             }
             float tAov = sampleWord4(px, barMin + float2(250.0 * u, 9.5 * u), 1.35 * u, 65u, 79u, 86u, aovOn ? (48u + curAovMode) : 32u);
-            sdr = lerp(sdr, aovOn ? colEnamel : aovC, tAov);
+            sdr = hudOver(uiAlpha, sdr, aovOn ? colEnamel : aovC, tAov);
 
             // 6. Marbles RTX Physics Cascade [Y / F10 / M] pill (rx = 288..330)
             float2 bMrbMin = float2(barMin.x + 288.0 * u, r1MinY);
@@ -3134,24 +3985,24 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 mrbC = mrbOn ? colOrchid : colJade;
             if (px.x >= bMrbMin.x && px.x <= bMrbMax.x && px.y >= bMrbMin.y && px.y <= bMrbMax.y)
             {
-                sdr = lerp(sdr, mrbC * (mrbOn ? 0.32 : 0.16), 0.85);
+                sdr = hudOver(uiAlpha, sdr, mrbC * (mrbOn ? 0.32 : 0.16), 0.85);
                 if ((px.x - bMrbMin.x < 1.2) || (bMrbMax.x - px.x < 1.2) || (px.y - bMrbMin.y < 1.2) || (bMrbMax.y - px.y < 1.2))
-                    sdr = mrbC;
+                    sdr = hudInk(uiAlpha, mrbC);
             }
             float tMrb = sampleWord4(px, barMin + float2(295.0 * u, 9.5 * u), 1.35 * u, 77u, 82u, 66u, 76u);
             tMrb = uiLabel(px, barMin + float2(295.0 * u, 9.5 * u), 1.35 * u, 4.9, UI_LBL_MARBLES, tMrb);
-            sdr = lerp(sdr, mrbOn ? colEnamel : mrbC, tMrb);
+            sdr = hudOver(uiAlpha, sdr, mrbOn ? colEnamel : mrbC, tMrb);
 
             // 7. Prominent Scene Switcher: [<] (336..354) + [1..6] (357..444) + [>] (447..465) + Scene Name (470..530)
             float2 bScnPrvMin = float2(barMin.x + 336.0 * u, r1MinY);
             float2 bScnPrvMax = float2(barMin.x + 354.0 * u, r1MaxY);
             if (px.x >= bScnPrvMin.x && px.x <= bScnPrvMax.x && px.y >= r1MinY && px.y <= r1MaxY)
             {
-                sdr = lerp(sdr, colCyan * 0.22, 0.85);
+                sdr = hudOver(uiAlpha, sdr, colCyan * 0.22, 0.85);
                 if ((px.x - bScnPrvMin.x < 1.1) || (bScnPrvMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
-                    sdr = colCyan;
+                    sdr = hudInk(uiAlpha, colCyan);
             }
-            sdr = lerp(sdr, colEnamel, sampleGlyph(px, bScnPrvMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 60u));
+            sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, bScnPrvMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 60u));
 
             [unroll]
             for (uint k = 0u; k < 6u; ++k)
@@ -3162,23 +4013,23 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float3 cCol = sel ? colJade : float3(0.50, 0.58, 0.68);
                 if (px.x >= cMin.x && px.x <= cMax.x && px.y >= cMin.y && px.y <= cMax.y)
                 {
-                    sdr = lerp(sdr, cCol * (sel ? 0.34 : 0.12), 0.85);
+                    sdr = hudOver(uiAlpha, sdr, cCol * (sel ? 0.34 : 0.12), 0.85);
                     if ((px.x - cMin.x < 1.1) || (cMax.x - px.x < 1.1) || (px.y - cMin.y < 1.1) || (cMax.y - px.y < 1.1))
-                        sdr = cCol;
+                        sdr = hudInk(uiAlpha, cCol);
                 }
                 float dMask = sampleGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
-                sdr = lerp(sdr, sel ? colEnamel : cCol, dMask);
+                sdr = hudOver(uiAlpha, sdr, sel ? colEnamel : cCol, dMask);
             }
 
             float2 bScnNxtMin = float2(barMin.x + 447.0 * u, r1MinY);
             float2 bScnNxtMax = float2(barMin.x + 465.0 * u, r1MaxY);
             if (px.x >= bScnNxtMin.x && px.x <= bScnNxtMax.x && px.y >= r1MinY && px.y <= r1MaxY)
             {
-                sdr = lerp(sdr, colJade * 0.26, 0.85);
+                sdr = hudOver(uiAlpha, sdr, colJade * 0.26, 0.85);
                 if ((px.x - bScnNxtMin.x < 1.1) || (bScnNxtMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
-                    sdr = colJade;
+                    sdr = hudInk(uiAlpha, colJade);
             }
-            sdr = lerp(sdr, colEnamel, sampleGlyph(px, bScnNxtMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 62u));
+            sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, bScnNxtMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 62u));
 
             // Active Scene Name Readout ("BATHRM", "FAUCET", "LEAVES", "ORCHID", "ENAMEL", "SANCTU", or "ACT 1..7")
             uint sn0=65u, sn1=67u, sn2=84u, sn3=32u, sn4=49u, sn5=32u;
@@ -3197,36 +4048,36 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             else                       { sn0=67u; sn1=85u; sn2=83u; sn3=84u; sn4=79u; sn5=77u; } // CUSTOM
             float tScnName = sampleWord8(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, sn0, sn1, sn2, sn3, sn4, sn5, 32u, 32u);
             tScnName = uiLabel(px, barMin + float2(470.0 * u, 9.5 * u), 1.35 * u, 8.9, snLabel, tScnName);
-            sdr = lerp(sdr, expOn ? colJade : colAmber, tScnName);
+            sdr = hudOver(uiAlpha, sdr, expOn ? colJade : colAmber, tScnName);
 
             // Row 2: Draggable [SUN] (34..152) + [AZM] (186..304) + [MP3] (312..350) + [MUSC/MUTE] (354..396) + [RST] (400..438) + [NEXT SCN >] (442..530)
             float tSunLbl = sampleWord4(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 83u, 85u, 78u, 32u);
             tSunLbl = uiLabel(px, barMin + float2(8.0 * u, 34.0 * u), 1.35 * u, 3.5, UI_LBL_SUN, tSunLbl);
-            sdr = lerp(sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
+            sdr = hudOver(uiAlpha, sdr, sunOvr ? colAmber : float3(0.68, 0.72, 0.80), tSunLbl);
 
             float2 sunMin  = barMin + float2(34.0 * u, 34.0 * u);
             float2 sunSize = float2(118.0 * u, 8.0 * u);
             float  sunVal  = saturate(gInteractiveState.y);
             float  sunBar  = segmentedBar(px, sunMin, sunSize, sunVal, 16u);
             float3 sunTint = lerp(float3(0.26, 0.42, 0.88), lerp(colAmber, colEnamel, smoothstep(0.45, 1.0, sunVal)), smoothstep(0.0, 0.55, sunVal));
-            sdr = lerp(sdr, sunTint, sunBar * 0.92);
+            sdr = hudOver(uiAlpha, sdr, sunTint, sunBar * 0.92);
             float sunThumbX = sunMin.x + sunVal * sunSize.x;
             if (abs(px.x - sunThumbX) <= 2.4 * u && px.y >= sunMin.y - 2.5 * u && px.y <= sunMin.y + sunSize.y + 2.5 * u)
-                sdr = colEnamel;
+                sdr = hudInk(uiAlpha, colEnamel);
 
             float tAzmLbl = sampleWord4(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 65u, 90u, 77u, 32u);
             tAzmLbl = uiLabel(px, barMin + float2(160.0 * u, 34.0 * u), 1.35 * u, 3.5, UI_LBL_AZIMUTH, tAzmLbl);
-            sdr = lerp(sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
+            sdr = hudOver(uiAlpha, sdr, sunOvr ? colCyan : float3(0.68, 0.72, 0.80), tAzmLbl);
 
             float2 azmMin  = barMin + float2(186.0 * u, 34.0 * u);
             float2 azmSize = float2(118.0 * u, 8.0 * u);
             float  azmVal  = saturate(gInteractiveState.z);
             float  azmBar  = segmentedBar(px, azmMin, azmSize, azmVal, 16u);
             float3 azmTint = colCyan;
-            sdr = lerp(sdr, azmTint, azmBar * 0.90);
+            sdr = hudOver(uiAlpha, sdr, azmTint, azmBar * 0.90);
             float azmThumbX = azmMin.x + azmVal * azmSize.x;
             if (abs(px.x - azmThumbX) <= 2.4 * u && px.y >= azmMin.y - 2.5 * u && px.y <= azmMin.y + azmSize.y + 2.5 * u)
-                sdr = colEnamel;
+                sdr = hudInk(uiAlpha, colEnamel);
 
             // [TRK1..4 / SYNT / MP3+] Built-In Soundtrack Selector (rx = 310..350; LMB/Z cycles tracks, Shift+Click imports MP3)
             float2 bMp3Min = barMin + float2(310.0 * u, 29.5 * u);
@@ -3235,15 +4086,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 mp3C = (trkSlot == 5u || (customMp3 && trkSlot == 0u)) ? colOrchid : (isSongTrack ? colJade : colCyan);
             if (px.x >= bMp3Min.x && px.x <= bMp3Max.x && px.y >= bMp3Min.y && px.y <= bMp3Max.y)
             {
-                sdr = lerp(sdr, mp3C * (isSongTrack ? 0.30 : 0.16), 0.86);
+                sdr = hudOver(uiAlpha, sdr, mp3C * (isSongTrack ? 0.30 : 0.16), 0.86);
                 if ((px.x - bMp3Min.x < 1.1) || (bMp3Max.x - px.x < 1.1) || (px.y - bMp3Min.y < 1.1) || (bMp3Max.y - px.y < 1.1))
-                    sdr = mp3C;
+                    sdr = hudInk(uiAlpha, mp3C);
             }
             uint tc0 = 83u, tc1 = 89u, tc2 = 78u, tc3 = 84u; // SYNT
             if (trkSlot >= 1u && trkSlot <= 4u) { tc0 = 84u; tc1 = 82u; tc2 = 75u; tc3 = 48u + trkSlot; } // TRK1..TRK4
             else if (trkSlot == 5u || customMp3) { tc0 = 77u; tc1 = 80u; tc2 = 51u; tc3 = 43u; }          // MP3+
             float tMp3 = sampleWord4(px, bMp3Min + float2(7.0 * u, 4.8 * u), 1.35 * u, tc0, tc1, tc2, tc3);
-            sdr = lerp(sdr, isSongTrack ? colEnamel : mp3C, tMp3);
+            sdr = hudOver(uiAlpha, sdr, isSongTrack ? colEnamel : mp3C, tMp3);
 
             // [MUSC] / [MUTE] Live Music Toggle Pill (rx = 354..396)
             float2 bMusMin = barMin + float2(354.0 * u, 29.5 * u);
@@ -3251,15 +4102,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 musC = audMuted ? colAmber : colJade;
             if (px.x >= bMusMin.x && px.x <= bMusMax.x && px.y >= bMusMin.y && px.y <= bMusMax.y)
             {
-                sdr = lerp(sdr, musC * (audMuted ? 0.28 : 0.22), 0.86);
+                sdr = hudOver(uiAlpha, sdr, musC * (audMuted ? 0.28 : 0.22), 0.86);
                 if ((px.x - bMusMin.x < 1.1) || (bMusMax.x - px.x < 1.1) || (px.y - bMusMin.y < 1.1) || (bMusMax.y - px.y < 1.1))
-                    sdr = musC;
+                    sdr = hudInk(uiAlpha, musC);
             }
             float tMus = audMuted
                 ? sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 84u, 69u)  // MUTE
                 : sampleWord4(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 77u, 85u, 83u, 67u); // MUSC
             tMus = uiLabel(px, bMusMin + float2(5.5 * u, 4.8 * u), 1.35 * u, 5.0, audMuted ? UI_LBL_MUTE : UI_LBL_MUSIC, tMus);
-            sdr = lerp(sdr, audMuted ? colEnamel : musC, tMus);
+            sdr = hudOver(uiAlpha, sdr, audMuted ? colEnamel : musC, tMus);
 
             // [RST] Lighting & Studio Reset Pill (rx = 400..438)
             float2 bRstMin = barMin + float2(400.0 * u, 29.5 * u);
@@ -3268,28 +4119,28 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float3 rstC = anyOvr ? colAmber : float3(0.42, 0.46, 0.56);
             if (px.x >= bRstMin.x && px.x <= bRstMax.x && px.y >= bRstMin.y && px.y <= bRstMax.y)
             {
-                sdr = lerp(sdr, rstC * (anyOvr ? 0.24 : 0.10), 0.85);
+                sdr = hudOver(uiAlpha, sdr, rstC * (anyOvr ? 0.24 : 0.10), 0.85);
                 if ((px.x - bRstMin.x < 1.1) || (bRstMax.x - px.x < 1.1) || (px.y - bRstMin.y < 1.1) || (bRstMax.y - px.y < 1.1))
-                    sdr = rstC;
+                    sdr = hudInk(uiAlpha, rstC);
             }
             float tRst = sampleWord4(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 82u, 83u, 84u, 32u);
             tRst = uiLabel(px, bRstMin + float2(7.5 * u, 4.8 * u), 1.35 * u, 4.1, UI_LBL_RESET, tRst);
-            sdr = lerp(sdr, rstC, tRst);
+            sdr = hudOver(uiAlpha, sdr, rstC, tRst);
 
             // Prominent Row-2 [NEXT SCN >] One-Click Scene Button (rx = 442..530)
             float2 bNxtScnMin = barMin + float2(442.0 * u, 29.5 * u);
             float2 bNxtScnMax = bNxtScnMin + float2(88.0 * u, 17.5 * u);
             if (px.x >= bNxtScnMin.x && px.x <= bNxtScnMax.x && px.y >= bNxtScnMin.y && px.y <= bNxtScnMax.y)
             {
-                sdr = lerp(sdr, colJade * 0.28, 0.88);
+                sdr = hudOver(uiAlpha, sdr, colJade * 0.28, 0.88);
                 if ((px.x - bNxtScnMin.x < 1.2) || (bNxtScnMax.x - px.x < 1.2) || (px.y - bNxtScnMin.y < 1.2) || (bNxtScnMax.y - px.y < 1.2))
-                    sdr = colJade;
+                    sdr = hudInk(uiAlpha, colJade);
             }
             float tNxtScn = max(
                 uiLabel(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 9.9, UI_LBL_NEXT_SCENE,
                     sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u)),
                 sampleGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
-            sdr = lerp(sdr, colEnamel, tNxtScn);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, tNxtScn);
         }
 
         // Pass-4 AOV Buffer Inspection Pill Banner (placed cleanly right above the Bottom Studio Dock!)
@@ -3300,10 +4151,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (px.x >= aovBoxMin.x && px.x <= aovBoxMin.x + aovBoxSz.x &&
                 px.y >= aovBoxMin.y && px.y <= aovBoxMin.y + aovBoxSz.y)
             {
-                sdr = lerp(sdr, float3(0.012, 0.020, 0.038), 0.90);
+                sdr = hudOver(uiAlpha, sdr, float3(0.012, 0.020, 0.038), 0.90);
                 if ((px.x - aovBoxMin.x < 1.3) || (aovBoxMin.x + aovBoxSz.x - px.x < 1.3) ||
                     (px.y - aovBoxMin.y < 1.3) || (aovBoxMin.y + aovBoxSz.y - px.y < 1.3))
-                    sdr = colAmber;
+                    sdr = hudInk(uiAlpha, colAmber);
                 uint a0=65u, a1=79u, a2=86u, a3=58u;
                 uint b0=65u, b1=76u, b2=66u, b3=69u, b4=68u, b5=79u, b6=32u, b7=32u; // ALBEDO
                 if (curAovMode == 2u) { b0=78u; b1=79u; b2=82u; b3=77u; b4=65u; b5=76u; b6=32u; b7=32u; } // NORMAL
@@ -3315,8 +4166,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 float tLbl = sampleWord4(px, aovBoxMin + float2(10.0 * u, 5.5 * u), 1.45 * u, a0, a1, a2, a3);
                 float tMod = sampleWord8(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, b0, b1, b2, b3, b4, b5, b6, b7);
                 tMod = uiLabel(px, aovBoxMin + float2(48.0 * u, 5.5 * u), 1.45 * u, 16.8, UI_LBL_AOV_FIRST + clamp(curAovMode, 1u, 7u) - 1u, tMod);
-                sdr = lerp(sdr, colAmber, tLbl);
-                sdr = lerp(sdr, colEnamel, tMod);
+                sdr = hudOver(uiAlpha, sdr, colAmber, tLbl);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, tMod);
             }
         }
 
@@ -3329,10 +4180,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 px.y >= ostBoxMin.y && px.y <= ostBoxMin.y + ostBoxSz.y)
             {
                 float3 bdrC = (trkSlot == 5u) ? colOrchid : ((trkSlot >= 1u && trkSlot <= 4u) ? colJade : colCyan);
-                sdr = lerp(sdr, float3(0.010, 0.022, 0.040), 0.90 * trkToastAlpha);
+                sdr = hudOver(uiAlpha, sdr, float3(0.010, 0.022, 0.040), 0.90 * trkToastAlpha);
                 if ((px.x - ostBoxMin.x < 1.3) || (ostBoxMin.x + ostBoxSz.x - px.x < 1.3) ||
                     (px.y - ostBoxMin.y < 1.3) || (ostBoxMin.y + ostBoxSz.y - px.y < 1.3))
-                    sdr = lerp(sdr, bdrC, trkToastAlpha);
+                    sdr = hudOver(uiAlpha, sdr, bdrC, trkToastAlpha);
 
                 uint w0a=80u, w0b=82u, w0c=79u, w0d=67u, w0e=69u, w0f=68u, w0g=85u, w0h=82u; // PROCEDUR
                 uint w1a=65u, w1b=76u, w1c=32u, w1d=82u, w1e=84u, w1f=88u, w1g=32u, w1h=83u; // AL RTX S
@@ -3367,7 +4218,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 // Track titles 1..4 are proper names; only the two descriptive notices are translated.
                 if (trkSlot == 0u || trkSlot == 5u)
                     ostTxt = uiLabel(px, ostBoxMin + float2(8.5 * u, 6.0 * u), ostSc, 24.0, (trkSlot == 5u) ? UI_LBL_OST_CUSTOM : UI_LBL_OST_SYNTH, ostTxt);
-                sdr = lerp(sdr, colEnamel, ostTxt * trkToastAlpha);
+                sdr = hudOver(uiAlpha, sdr, colEnamel, ostTxt * trkToastAlpha);
             }
         }
     }
@@ -3382,25 +4233,35 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         if (px.x >= soloMin.x && px.x <= soloMin.x + soloSz.x &&
             px.y >= soloMin.y && px.y <= soloMin.y + soloSz.y)
         {
-            sdr = lerp(sdr, float3(0.012, 0.028, 0.042), 0.92);
+            sdr = hudOver(uiAlpha, sdr, float3(0.012, 0.028, 0.042), 0.92);
             if ((px.x - soloMin.x < 1.5) || (soloMin.x + soloSz.x - px.x < 1.5) ||
                 (px.y - soloMin.y < 1.5) || (soloMin.y + soloSz.y - px.y < 1.5))
-                sdr = colJade;
+                sdr = hudInk(uiAlpha, colJade);
 
             uint s0=82u, s1=84u, s2=32u, s3=68u, s4=88u, s5=82u, s6=32u, s7=32u; // RT DXR
             if (curSolo == 2u) { s0=84u; s1=78u; s2=83u; s3=82u; s4=32u; s5=77u; s6=77u; s7=65u; } // TNSR MMA
-            if (curSolo == 3u) { s0=78u; s1=80u; s2=85u; s3=32u; s4=53u; s5=72u; s6=90u; s7=32u; } // NPU 5HZ
             if (curSolo == 4u) { s0=67u; s1=85u; s2=68u; s3=65u; s4=32u; s5=54u; s6=53u; s7=75u; } // CUDA 65K
             if (curSolo == 5u) { s0=67u; s1=79u; s2=68u; s3=67u; s4=32u; s5=49u; s6=77u; s7=66u; } // CODC 1MB
 
             float tSolo = sampleWord8(px, soloMin + float2(8.0 * u, 5.5 * u), 1.4 * u, 83u, 79u, 76u, 79u, 58u, 32u, 32u, 32u);
             float tEng  = sampleWord8(px, soloMin + float2(52.0 * u, 5.5 * u), 1.4 * u, s0, s1, s2, s3, s4, s5, s6, s7);
+            float3 engineColor = colJade;
+            if (curSolo == 3u) {
+                uint backend = measuredDirectorBackend();
+                float2 at = soloMin + float2(52.0, 5.5) * u;
+                tEng = directorStateLabel(px, at, 1.4 * u, backend);
+                if (backend == 2u) {
+                    float name = sampleWord4(px, at, 1.4 * u, 78u, 80u, 85u, 32u);
+                    tEng = max(name, directorStateLabel(px, at + float2(28.0 * u, 0), 1.4 * u, backend));
+                }
+                engineColor = backend == 0u ? badgeStatusColor(3u) : badgeStatusColor((gEnginePacked >> 8u) & 15u);
+            }
             float tAll  = sampleWord8(px, soloMin + float2(174.0 * u, 5.5 * u), 1.4 * u, 91u, 65u, 76u, 76u, 93u, 32u, 32u, 32u);
             tSolo = uiLabel(px, soloMin + float2(8.0 * u, 5.5 * u), 1.4 * u, 6.0, UI_LBL_SOLO, tSolo);
             tAll  = uiLabel(px, soloMin + float2(174.0 * u, 5.5 * u), 1.4 * u, 7.4, UI_LBL_ALL, tAll);
-            sdr = lerp(sdr, colAmber, tSolo);
-            sdr = lerp(sdr, colJade, tEng);
-            sdr = lerp(sdr, colEnamel, tAll);
+            sdr = hudOver(uiAlpha, sdr, colAmber, tSolo);
+            sdr = hudOver(uiAlpha, sdr, engineColor, tEng);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, tAll);
         }
     }
 
@@ -3427,7 +4288,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float2 fadeOut=1.0-smoothstep(plateMax-feather,plateMax,px);
             leftScrim=fadeIn.x*fadeIn.y*fadeOut.x*fadeOut.y;
         }
-        sdr=lerp(sdr,float3(.012,.024,.026),leftScrim*.68*titleAlpha);
+        sdr = hudOver(uiAlpha, sdr,float3(.012,.024,.026),leftScrim*.68*titleAlpha);
         float title=sampleWord8(px,titleOrigin,titleScale,66,79,79,32,83,65,72,32);
         title=max(title,sampleWord4(px,titleOrigin+float2(40*titleScale,0),titleScale,83,65,72,32));
         float2 motifOrigin=titleOrigin-float2(0,22*titleScale);
@@ -3441,9 +4302,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(40*subScale,0),subScale,83,32,79,82,67,72,73,68));
         subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(80*subScale,0),subScale,32,80,82,79,84,79,67,79));
         subtitle=max(subtitle,sampleGlyph(px,subOrigin+float2(120*subScale,0),subScale,76));
-        sdr=lerp(sdr,float3(.93,.88,.75),title*titleAlpha);
-        sdr=lerp(sdr,float3(.72,.82,.74),max(subtitle,roman)*titleAlpha);
-        sdr=lerp(sdr,colAmber,motif*titleAlpha*.85);
+        sdr = hudOver(uiAlpha, sdr,float3(.93,.88,.75),title*titleAlpha);
+        sdr = hudOver(uiAlpha, sdr,float3(.72,.82,.74),max(subtitle,roman)*titleAlpha);
+        sdr = hudOver(uiAlpha, sdr,colAmber,motif*titleAlpha*.85);
     }
 
     // A limited first-party Traditional Chinese numeral set paired with Roman
@@ -3466,7 +4327,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         uint second = (act == 1u || act == 2u || act == 5u || act == 6u) ? 73u : (act == 3u ? 86u : 32u);
         uint third = (act == 2u || act == 6u) ? 73u : 32u;
         roman = max(roman,sampleWord4(px,romanAt+float2(20*sc,0),sc,first,second,third,32u));
-        sdr = lerp(sdr,colAmber,max(glyph,roman)*saturate(gCaptionStyle.x)*.82);
+        sdr = hudOver(uiAlpha, sdr,colAmber,max(glyph,roman)*saturate(gCaptionStyle.x)*.82);
     }
 
     // Contrast-safe Pass-4 Subtitle / Non-Medical End-Card Plate (strictly excluded from CanvasClean & Spout2!)
@@ -3495,6 +4356,12 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         float padX  = 12.0 * capScale;
         float padY  = 6.0 * capScale;
         float2 boxSz = float2(textW + 2.0 * padX, textH + 2.0 * padY);
+        bool sdkCredit = isEndCard && (gHudFlags & (1u << 20u)) != 0u;
+        float creditScale = max(1.0, .76 * capScale);
+        if (sdkCredit) {
+            boxSz.x = max(boxSz.x, 110.0 * creditScale + 2.0 * padX);
+            boxSz.y += 10.0 * creditScale;
+        }
 
         float hudUiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
         float hudReserve = (showOverlay && (hudMode == 0u || hudMode == 2u))
@@ -3509,13 +4376,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         if (px.x >= boxMin.x && px.x <= boxMin.x + boxSz.x &&
             px.y >= boxMin.y && px.y <= boxMin.y + boxSz.y)
         {
-            sdr = lerp(sdr, float3(0.008, 0.014, 0.028), 0.88 * capAlpha);
+            sdr = hudOver(uiAlpha, sdr, float3(0.008, 0.014, 0.028), 0.88 * capAlpha);
             bool bdr = (px.x - boxMin.x < 1.3) || (boxMin.x + boxSz.x - px.x < 1.3) ||
                        (px.y - boxMin.y < 1.3) || (boxMin.y + boxSz.y - px.y < 1.3);
             if (bdr)
             {
                 float3 bdrCol = isEndCard ? colAmber : (isMidEd ? colOrchid : colJade);
-                sdr = lerp(sdr, bdrCol, 0.78 * capAlpha);
+                sdr = hudOver(uiAlpha, sdr, bdrCol, 0.78 * capAlpha);
             }
             float gMask = 0.0;
             if (capLocalized)
@@ -3529,7 +4396,14 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 gMask = samplePackedCaption(px, boxMin + float2(padX, padY), capScale, charCount);
             }
             float3 txtCol = isEndCard ? lerp(colEnamel, colAmber, 0.28) : colEnamel;
-            sdr = lerp(sdr, txtCol, gMask * capAlpha);
+            sdr = hudOver(uiAlpha, sdr, txtCol, gMask * capAlpha);
+            if (sdkCredit) {
+                float2 at = boxMin + float2((boxSz.x - 109.0 * creditScale) * .5, padY + textH + 3.0 * creditScale);
+                float credit = sampleWord8(px,at,creditScale,78u,86u,73u,68u,73u,65u,32u,82u);
+                credit = max(credit,sampleWord8(px,at+float2(40.0*creditScale,0),creditScale,84u,88u,32u,47u,32u,68u,76u,83u));
+                credit = max(credit,sampleWord8(px,at+float2(80.0*creditScale,0),creditScale,83u,32u,83u,68u,75u,32u,32u,32u));
+                sdr = hudOver(uiAlpha, sdr, colEnamel, credit * capAlpha);
+            }
         }
     }
 
@@ -3543,15 +4417,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             px.y >= pillMin.y && px.y <= pillMin.y + pillSz.y)
         {
             float3 recRed = float3(0.96, 0.18, 0.24);
-            sdr = lerp(sdr, float3(0.06, 0.01, 0.02), 0.90);
+            sdr = hudOver(uiAlpha, sdr, float3(0.06, 0.01, 0.02), 0.90);
             if ((px.x - pillMin.x < 1.4) || (pillMin.x + pillSz.x - px.x < 1.4) ||
                 (px.y - pillMin.y < 1.4) || (pillMin.y + pillSz.y - px.y < 1.4))
             {
-                sdr = recRed;
+                sdr = hudInk(uiAlpha, recRed);
             }
             float2 dotC = pillMin + float2(11.0 * camScale, 10.0 * camScale);
             if (length(px - dotC) <= 4.0 * camScale)
-                sdr = recRed;
+                sdr = hudInk(uiAlpha, recRed);
 
             // "LIVE CAMERA" (11 chars)
             float tScale = 1.55 * camScale;
@@ -3560,14 +4434,22 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 sampleWord8(px, tOrg, tScale, 76u, 73u, 86u, 69u, 32u, 67u, 65u, 77u),
                 sampleWord4(px, tOrg + float2(8.0 * 5.0 * tScale, 0.0), tScale, 69u, 82u, 65u, 32u));
             camTxt = uiLabel(px, tOrg, tScale, 13.4, UI_LBL_LIVE_CAMERA, camTxt);
-            sdr = lerp(sdr, colEnamel, camTxt);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, camTxt);
         }
     }
 
     float maxQuant = (gSwapchainBits >= 10u) ? 1023.0 : 255.0;
     float scDither = triangularDither(floor(px), 0x13572468u) / maxQuant;
     sdr = saturate(sdr + scDither.xxx);
+#ifdef BOO_FRAME_GENERATION_OUTPUTS
+    PresentOutputs outPixel;
+    outPixel.color = float4(sdr, 1.0);
+    outPixel.scene = float4(saturate(hudless + scDither.xxx), 1.0);
+    outPixel.alpha = uiAlpha;
+    return outPixel;
+#else
     return float4(sdr, 1.0);
+#endif
 }
 #endif
 
@@ -3708,8 +4590,98 @@ struct VSParticleOut
 #if defined(BOO_M1_PARTICLES_VS)
 StructuredBuffer<GpuLiveParticle> gInParticles : register(t0);
 
+cbuffer RotorWashCB : register(b1)
+{
+    float4 gRotorHubs[6];
+    float4 gWakeAxisAndMotion;
+};
+
+VSParticleOut rotorWashVertex(uint vertId, uint instId)
+{
+    VSParticleOut o = (VSParticleOut)0;
+    uint detail = min((gSceneFlags >> 8u) & 3u, 2u);
+    uint segments = 24u + 8u * detail;
+    uint strands = 1u + detail;
+    uint layerSize = 6u * strands * segments;
+    if (instId >= 2u * layerSize) return o;
+
+    bool surface = instId >= layerSize;
+    uint strip = (instId % layerSize) / segments;
+    uint rotor = strip / strands;
+    uint strand = strip % strands;
+    // Adjacent quads sample the exact same endpoint, even after a direct seek.
+    static const float2 ends[6] = {
+        float2(-1,0),float2(1,0),float2(-1,1),float2(-1,1),float2(1,0),float2(1,1)
+    };
+    float2 end = ends[vertId % 6u];
+    float u = (float(instId % segments) + end.y) / float(segments);
+    float3 hub = gRotorHubs[rotor].xyz;
+    float3 axis = gWakeAxisAndMotion.xyz;
+    float motion = gWakeAxisAndMotion.w;
+    float clock = gFilmTime * motion;
+    float spin = (rotor & 1u) != 0u ? -1.0 : 1.0;
+    // The CUDA vortex and HLSL substitute each advect one sample for this strand.
+    float3 flow = gInParticles[61u * strip + 13u].velAndKind.xyz;
+    float phase = 2.13 * float(rotor) + kTwoPi * float(strand) / float(strands) +
+                  0.16 * clamp(flow.x, -1.0, 1.0) * motion;
+    float3 center, widthAxis;
+    float opacity, width;
+
+    // Find the rotor axis' footprint on the wet deck or the canal underneath.
+    const float2 padCenter = float2(0.0, -2.0);
+    float lift = max(-axis.y, 0.25);
+    float padTravel = max(0.0, (hub.y - 3.73) / lift);
+    float2 padFoot = hub.xz + axis.xz * padTravel;
+    bool onPad = distance(padFoot, padCenter) < 4.78;
+    float travel = onPad ? padTravel : max(0.0, (hub.y + 1.04) / lift);
+    if (surface)
+    {
+        float contact = 1.0 - smoothstep(1.6, 6.0, travel);
+        if (contact <= 0.0001) return o;
+        float cycle = frac(clock * 0.30 + float(strand) / float(strands) + 0.09 * float(rotor));
+        float angle = kTwoPi * u + phase;
+        widthAxis = float3(cos(angle), 0, sin(angle));
+        float radius = 0.25 + cycle * (1.35 + 0.70 * gRotorHubs[rotor].w);
+        center = hub + axis * travel + widthAxis * radius;
+        float edge = onPad ? 1.0 - smoothstep(4.48, 4.78, distance(center.xz, padCenter)) : 1.0;
+        opacity = edge * contact * sin(3.14159 * cycle) * (0.50 + 0.24 * cos(2.0 * angle - phase));
+        width = 0.023 + 0.030 * cycle;
+    }
+    else
+    {
+        float3 side = safeNormalize(cross(axis, float3(0,0,1)));
+        float3 across = cross(axis, side);
+        float angle = phase + spin * (0.92 * clock + 4.8 * u);
+        float3 radial = side * cos(angle) + across * sin(angle);
+        float radius = gRotorHubs[rotor].w * (0.98 - 0.35 * u);
+        float trail = min(2.65, travel);
+        center = hub + axis * (0.13 + (trail - 0.13) * u) + radial * radius;
+        float3 tangent = axis * (trail - 0.13) +
+                         spin * 4.8 * radius * (-side * sin(angle) + across * cos(angle)) -
+                         radial * (0.35 * gRotorHubs[rotor].w);
+        widthAxis = safeNormalize(cross(center - gCamEye, tangent));
+        opacity = sin(3.14159 * u) * (0.50 - 0.14 * u);
+        width = 0.014 + 0.029 * u;
+    }
+
+    float3 rel = center + end.x * width * widthAxis - gCamEye;
+    float z = dot(rel, gCamForward);
+    if (z < 0.18 || z >= 52.0) return o;
+    float tanHalfFov = tan(0.5 * gFovY);
+    o.position = float4(dot(rel,gCamRight) / (gAspect * tanHalfFov), dot(rel,gCamUp) / tanHalfFov, 0.5 * z, z);
+    o.quadUv = float2(end.x, u);
+    float hue = 0.5 + 0.5 * cos(phase + 3.0 * u + 0.23 * clock);
+    o.colorAndKind = float4(lerp(float3(0.10,0.78,0.76), float3(0.64,0.27,0.82), hue), 2.0);
+    o.rayDist = length(rel);
+    o.energyScale = opacity;
+    return o;
+}
+
 VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_InstanceID)
 {
+    if (gWakeAxisAndMotion.w > 0.0)
+        return rotorWashVertex(vertId, instId);
+
     VSParticleOut vout;
     vout.position     = float4(0.0, 0.0, 0.0, 0.0);
     vout.quadUv       = float2(0.0, 0.0);
@@ -3727,9 +4699,13 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     bool isM2 = (gSceneFlags & 2u) != 0u;
     bool isMutiny = (gSceneFlags & 16u) != 0u;
     bool isShow3D = (gSceneFlags & 32u) != 0u;
+    uint detail = (gSceneFlags >> 8u) & 3u;
     // Keep the full simulation workload, but draw a stable sparse subset so
     // the velocity field frames the hero instead of veiling its silhouette.
-    if (isMutiny && (instId % 5u) != 0u) return vout;
+    if (isMutiny) {
+        uint stride = (detail == 0u) ? 9u : ((detail == 1u) ? 5u : 2u);
+        if (((instId ^ (instId >> 3u)) % stride) != 0u) return vout;
+    }
     if(isM2) {
         uint act=(gSceneFlags>>2u)&3u;
         if(act==0u) {
@@ -3737,15 +4713,6 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
             if(isMote || (instId%3u)!=0u) return vout;
             center.z+=gCamEye.z+3.2;
             center.x*=1.35;
-        }
-        if(act==1u) {
-            // Rotor downwash spray localized beneath the Hero Vertiport Pad (0, 3.65, -2.0) during VTOL hover/descent
-            if(gFilmTime < 88.0 || (instId%4u)!=0u) return vout;
-            float hoverGate = smoothstep(88.0, 102.0, gFilmTime);
-            float a = gFilmTime * 3.4 + instId * 0.031;
-            float r = (1.4 + frac(instId * 0.618) * 3.6) * (0.55 + 0.45 * age01);
-            center = float3(sin(a) * r, 3.85 - age01 * 2.2 * hoverGate, -2.0 + cos(a) * r) + center * 0.04;
-            vel = float3(cos(a) * 3.8, -1.6, -sin(a) * 3.8) + vel * 0.10;
         }
         if(act==2u) {
             if(!isMote && (instId%6u)!=0u) return vout;
@@ -3770,15 +4737,6 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
                 lerp(-0.32, 1.42, h1) + 0.06 * sin(driftT),
                 lerp(3.62, 5.02, h2) + 0.05 * cos(driftT * 0.85 + h3 * 4.0),
                 lerp(4.55, 6.28, h3) + 0.05 * sin(driftT * 0.72));
-        }
-        else if (gFilmTime >= 245.0 && gFilmTime < 275.0)
-        {
-            // Codec Hijack eVTOL Hovering Downwash Spray
-            if ((instId % 5u) != 0u) return vout;
-            float a = gFilmTime * 3.4 + instId * 0.031;
-            float r = (1.4 + frac(instId * 0.618) * 3.6) * (0.55 + 0.45 * age01);
-            center = float3(sin(a) * r, 3.85 - age01 * 2.1, -2.0 + cos(a) * r) + center * 0.04;
-            vel = float3(cos(a) * 3.8, -1.6, -sin(a) * 3.8) + vel * 0.10;
         }
         else
         {
@@ -3818,7 +4776,17 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         ? (.32 * smoothstep(0, 2, min(abs(gFilmTime - 60), abs(gFilmTime - 120))))
         : (isMutiny ? 0.36 : (isShow3D ? 0.34 : 1.0));
 
-    if (!isMote)
+    // Keep the two CUDA strands' dyes attached to their particles as the
+    // formation changes. The lower-density substitute uses the same palette.
+    float grain = frac(float(instId & 255u) * 0.6180339);
+    bool tracer = false;
+    if (isMutiny)
+    {
+        energy *= lerp(.48, detail > 0u ? .95 : .72, grain);
+        tracer = isMote && detail > 0u && (instId & 3u) == 1u;
+    }
+
+    if (!isMote || tracer)
     {
         float3 velProj = vel - viewDir * dot(vel, viewDir);
         float velMag = length(velProj);
@@ -3829,6 +4797,8 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         halfWid = max(desiredWid, pixelWorldSize * 0.75);
         energy *= saturate(desiredWid / max(halfWid, 1e-4));
         halfLen = clamp(length(vel) * ((isM2 || isShow3D) ? 0.010 : 0.013), halfWid * 3.0, (isM2 || isShow3D) ? 0.14 : (isMutiny ? 0.11 : 0.19));
+        if (tracer)
+            halfLen = max(halfWid * 2.8, min(0.095, 0.033 * velMag));
     }
     else
     {
@@ -3893,9 +4863,15 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
         tint = baseHue * (0.62 + 0.75 * gRevealOpen01) * (1.0 + gEmissivePulse * 0.45);
     }
 
+    if (isMutiny)
+    {
+        float3 cool = lerp(float3(0.035, 0.54, 0.70), float3(0.33, 1.00, 0.78), grain);
+        float3 warm = isMidnight ? float3(0.96, 0.25, 0.67) : float3(1.00, 0.56, 0.18);
+        tint = ((instId & 4u) != 0u ? warm : cool) * (0.62 + 0.25 * gEmissivePulse);
+    }
     vout.position     = float4(ndcX * zCam, ndcY * zCam, 0.5 * zCam, zCam);
     vout.quadUv       = corner;
-    vout.colorAndKind = float4(tint, isMote ? 1.0 : 0.0);
+    vout.colorAndKind = float4(tint, (isMote && !tracer) ? 1.0 : 0.0);
     vout.rayDist      = length(relCenter);
     vout.energyScale  = energy * lifeFade;
     return vout;
@@ -3916,7 +4892,11 @@ float4 PSLiveParticles(VSParticleOut pin) : SV_Target
     float2 q = pin.quadUv;
     float3 hdr = 0.0.xxx;
 
-    if (pin.colorAndKind.w < 0.5)
+    if (pin.colorAndKind.w > 1.5)
+    {
+        hdr = pin.colorAndKind.rgb * exp(-3.8 * q.x * q.x);
+    }
+    else if (pin.colorAndKind.w < 0.5)
     {
         // Cylindrical refractive rain filament profile with crisp specular spine
         float radial = abs(q.x);

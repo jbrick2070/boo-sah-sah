@@ -94,7 +94,7 @@ private:
     int64_t durationSamples_ = 2880000;
     Edition targetEdition_ = Edition::Family;
     float editionMidnightMix_ = 0.0f;
-    void evaluateVoiceSample(VoiceSlot& v, float& outLeft, float& outRight, float& outMono) noexcept;
+    void evaluateVoiceSample(VoiceSlot& v, float& outLeft, float& outRight) noexcept;
 
     std::array<VoiceSlot, kMaxVoices> voices_{};
     size_t primaryVoiceIndex_ = 0;
@@ -107,7 +107,9 @@ private:
 
     float residualLeft_ = 0.0f;
     float residualRight_ = 0.0f;
-    float residualMono_ = 0.0f;
+    float residualMusicLeft_ = 0.0f;
+    float residualMusicRight_ = 0.0f;
+    float residualSynthWeight_ = 0.0f;
     uint32_t residualPos_ = 64;
 
     float lp180_ = 0.0f;

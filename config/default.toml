@@ -16,7 +16,10 @@ height = 1080
 fullscreen = false
 vsync = true
 quality_preset = "balanced"
+effects_detail = "normal"
 show_overlay = true
+# Upper-left dashboard: "full", "mini" (two-line strip) or "hidden" (small HUD+ tab). Backtick cycles.
+dashboard = "full"
 captions = true
 reduced_flash = false
 reduced_motion = false
@@ -29,6 +32,37 @@ force_silent_clock = false
 audio_file = ""
 
 [hardware]
+path_tracing = "low"
+dlss = "quality"
+ray_reconstruction = true
+frame_generation = "auto"
+reflex = "on"
+# Neural rendering suite (Shift+N toggles; the dashboard's NEURAL rows switch and solo each part)
+neural_rendering = false
+neural_shading = true
+neural_textures = true
+neural_radiance_cache = true
+neural_solo = "none"
+# Tensor cores need a build with ENABLE_LINALG_PREVIEW and Windows Developer Mode; otherwise shader cores run it
+neural_tensor_cores = true
+# 0..10: a flock of extra ray-traced birds to load the GPU (0 = the authored film). Levels 1 to 9 ask for
+# 40 to 32,000 birds; level 10 asks for as many as the machine can fly at the floor below.
+gpu_workout = 0
+# The workout releases birds in batches and never takes the frame rate under this (24 = film speed).
+# 0 switches the floor off: every level then releases exactly the birds it asks for.
+workout_floor_fps = 24
+# Flight formation of the workout flock (Shift+F cycles): "cluster" (extended cluster following the film's
+# birds), "vee", "echelon", "column" and "front" (great egret line formations), or "kettle" (black kites
+# circling a thermal)
+flock_formation = "cluster"
+# true makes the camera follow the birds instead of the film's shots (Shift+B)
+bird_cam = false
+# PhysX suite, live (Shift+P dials through the genres): "off", "smoke" (NVIDIA Flow marking the thermals the
+# birds ride) or "rigid" (PhysX GPU rigid bodies poured over the city's buildings). Needs a build with
+# ENABLE_PHYSX and the PhysX SDK; otherwise it reports unavailable.
+physx = "off"
+# true turns on every GPU feature at once for hardware testing (same as --test-rig)
+test_rig = false
 enable_signal_hijack = false
 disable_rt = false
 disable_cuda = false

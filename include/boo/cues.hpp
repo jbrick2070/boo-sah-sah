@@ -33,6 +33,9 @@ struct AssetManifestEntry {
     std::string provenance;
     std::string license;
     bool attributionRequired = false;
+    std::string sourceUrl;
+    std::string author;
+    std::string sha256;
 };
 
 struct AssetManifest {
@@ -67,6 +70,9 @@ bool loadCueSheetFromFile(const std::filesystem::path& path, CueSheet& outSheet,
 ValidationReport validateCueSheet(const CueSheet& sheet, bool requireFull360Film = false);
 
 bool loadAssetManifestFromFile(const std::filesystem::path& path, AssetManifest& outManifest, ValidationReport& outReport);
+void verifyManifestAssetFiles(const AssetManifest& manifest, const std::filesystem::path& repoRoot, ValidationReport& report);
+// Lower-case hex SHA-256 of a file's bytes; empty if it cannot be read.
+std::string sha256OfFile(const std::filesystem::path& path);
 void validateCueSheetAgainstManifest(
     const CueSheet& sheet,
     const AssetManifest& manifest,

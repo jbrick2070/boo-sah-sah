@@ -1,0 +1,338 @@
+#include "boo/startup_progress.hpp"
+
+#include "boo/cues.hpp"
+#include "boo/logging.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <fstream>
+#include <mutex>
+#include <set>
+#include <thread>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define PSAPI_VERSION 2 // K32GetProcessMemoryInfo, in kernel32
+#include <windows.h>
+#include <psapi.h>
+
+namespace boo {
+
+namespace {
+uint64_t sizeOnDisk(const std::filesystem::path& file) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(file, ec);
+    return ec ? 0u : static_cast<uint64_t>(size);
+}
+// The most private memory this process has had committed at once. It only ever goes up.
+uint64_t peakCommittedBytes() {
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = sizeof(counters);
+    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
+               ? static_cast<uint64_t>(counters.PeakPagefileUsage) : 0u;
+}
+std::string megabytes(uint64_t bytes) {
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    return text;
+}
+} // namespace
+
+std::string startupAssetKey(const std::filesystem::path& file) {
+    const std::string generic = file.generic_string();
+    const size_t at = generic.rfind("assets/");
+    if (at != std::string::npos && (at == 0 || generic[at - 1] == '/')) return generic.substr(at);
+    return file.filename().generic_string();
+}
+
+struct StartupProgress::State {
+    mutable std::mutex mutex;
+    std::atomic<bool> active{false};
+    std::thread::id owner;
+    Setup setup;
+    std::function<uint64_t()> gpuProbe;
+
+    std::set<std::string, std::less<>> expected; // files the last start loaded (or the folders, on a first run)
+    std::set<std::string, std::less<>> counted;  // files counted this start
+    std::vector<std::pair<std::string, uint64_t>> loadedFiles; // key and bytes, in the order they loaded
+    uint64_t loaded = 0, total = 0, verified = 0;
+    uint32_t verifiedFiles = 0, mismatched = 0;
+    uint64_t gpuNow = 0, gpuPeak = 0, gpuExpected = 0;
+    uint64_t ramPeak = 0, ramExpected = 0;
+    float fraction = 0.0f;
+
+    // Checksums are checked off the loading thread, so they cost start-up no time.
+    struct Job { std::filesystem::path file; std::string key, digest; uint64_t bytes; };
+    std::deque<Job> jobs;
+    uint32_t jobsRunning = 0;
+    bool stop = false;
+    bool summarise = false;
+    std::condition_variable wake, idle;
+    std::thread worker;
+
+    StartupProgressView viewLocked() const {
+        StartupProgressView v;
+        v.fraction = fraction;
+        v.assetBytesLoaded = loaded;
+        v.assetBytesTotal = std::max(total, loaded);
+        v.assetBytesVerified = verified;
+        v.assetsVerified = verifiedFiles;
+        v.assetsMismatched = mismatched;
+        v.ramBytes = ramPeak;
+        v.ramBytesExpected = ramExpected;
+        v.gpuBytes = gpuNow;
+        v.gpuBytesExpected = gpuExpected;
+        return v;
+    }
+
+    void recomputeLocked() {
+        ramPeak = std::max(ramPeak, peakCommittedBytes());
+        const double all = static_cast<double>(std::max(total, loaded));
+        const double files = all > 0.0 ? static_cast<double>(loaded) / all : 0.0;
+        double f;
+        if (ramExpected > 0 && gpuExpected > 0) {
+            // The average of the three gauges.
+            const double ram = std::min(1.0, static_cast<double>(ramPeak) / static_cast<double>(ramExpected));
+            const double gpu = std::min(1.0, static_cast<double>(gpuPeak) / static_cast<double>(gpuExpected));
+            f = (files + ram + gpu) / 3.0;
+        } else {
+            // First run: how much memory start-up needs is not known yet, so the files alone
+            // never quite fill the bar.
+            f = files * 0.9;
+        }
+        // Never backwards, and never full before the first frame is on screen.
+        fraction = std::clamp(static_cast<float>(f), fraction, 0.99f);
+    }
+
+    void workerLoop() {
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            wake.wait(lock, [&] { return stop || !jobs.empty(); });
+            if (jobs.empty()) {
+                if (stop) return;
+                continue;
+            }
+            Job job = std::move(jobs.front());
+            jobs.pop_front();
+            ++jobsRunning;
+            lock.unlock();
+            const std::string digest = sha256OfFile(job.file);
+            lock.lock();
+            --jobsRunning;
+            if (!digest.empty() && digest == job.digest) {
+                verified += job.bytes;
+                ++verifiedFiles;
+            } else {
+                ++mismatched;
+                BOO_LOG_WARN("Assets", "Checksum mismatch: '" + job.key + "' is not the file the manifest describes.");
+            }
+            if (jobs.empty() && jobsRunning == 0u) {
+                if (summarise) {
+                    summarise = false;
+                    BOO_LOG_INFO("Assets", "Start-up checksums: " + std::to_string(verifiedFiles) + " files, " +
+                                           megabytes(verified) + " match the manifest's SHA-256; " +
+                                           std::to_string(mismatched) + " mismatched.");
+                }
+                idle.notify_all();
+            }
+        }
+    }
+};
+
+StartupProgress::StartupProgress() : state_(new State) {}
+
+StartupProgress::~StartupProgress() {
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->stop = true;
+        state_->jobs.clear();
+    }
+    state_->wake.notify_all();
+    if (state_->worker.joinable()) state_->worker.join();
+    delete state_;
+}
+
+StartupProgress& StartupProgress::instance() {
+    static StartupProgress progress;
+    return progress;
+}
+
+bool StartupProgress::active() const noexcept { return state_->active.load(std::memory_order_relaxed); }
+
+StartupProgressView StartupProgress::view() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->viewLocked();
+}
+
+void StartupProgress::begin(Setup setup) {
+    auto& s = *state_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.setup = std::move(setup);
+    s.owner = std::this_thread::get_id();
+    s.gpuProbe = nullptr;
+    s.expected.clear(); s.counted.clear(); s.loadedFiles.clear();
+    s.loaded = s.total = s.verified = 0;
+    s.verifiedFiles = s.mismatched = 0;
+    s.gpuNow = s.gpuPeak = s.gpuExpected = 0;
+    s.ramPeak = s.ramExpected = 0;
+    s.fraction = 0.0f;
+    s.summarise = false;
+
+    // What the last start on this machine loaded, and the GPU memory it reached.
+    if (!s.setup.memoryFile.empty()) {
+        std::ifstream file(s.setup.memoryFile);
+        std::string line;
+        if (file && std::getline(file, line) && line == "boo-startup-memory 1") {
+            while (std::getline(file, line) && s.expected.size() < 4096u) {
+                if (line.rfind("gpu ", 0) == 0) {
+                    try { s.gpuExpected = std::stoull(line.substr(4)); } catch (...) { s.gpuExpected = 0; }
+                } else if (line.rfind("ram ", 0) == 0) {
+                    try { s.ramExpected = std::stoull(line.substr(4)); } catch (...) { s.ramExpected = 0; }
+                } else if (line.rfind("asset ", 0) == 0) {
+                    // asset <bytes> <key>
+                    const size_t space = line.find(' ', 6);
+                    if (space == std::string::npos || space + 1 >= line.size()) continue;
+                    uint64_t bytes = 0;
+                    try { bytes = std::stoull(line.substr(6, space - 6)); } catch (...) { continue; }
+                    if (bytes > 0 && s.expected.insert(line.substr(space + 1)).second) s.total += bytes;
+                }
+            }
+        }
+    }
+    if (s.expected.empty()) {
+        // First run (or nothing remembered): every file in the asset folders.
+        s.gpuExpected = 0;
+        s.ramExpected = 0;
+        for (const auto& folder : s.setup.assetFolders) {
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                if (s.expected.insert(startupAssetKey(it->path())).second) s.total += sizeOnDisk(it->path());
+            }
+        }
+    }
+    if (!s.worker.joinable()) s.worker = std::thread([&s] { s.workerLoop(); });
+    s.active.store(true, std::memory_order_relaxed);
+}
+
+void StartupProgress::setGpuProbe(std::function<uint64_t()> gpuBytesInUse) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->gpuProbe = std::move(gpuBytesInUse);
+}
+
+void StartupProgress::assetLoaded(const std::filesystem::path& file) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    const uint64_t bytes = sizeOnDisk(file);
+    std::string key = startupAssetKey(file);
+    std::function<void(const StartupProgressView&)> notify;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed) || !s.counted.insert(key).second) return;
+        s.loaded += bytes;
+        if (!s.expected.contains(key)) s.total += bytes; // something the last start did not load
+        s.loadedFiles.emplace_back(key, bytes);
+        if (const auto it = s.setup.digests.find(key); it != s.setup.digests.end()) {
+            s.jobs.push_back({file, key, it->second, bytes});
+            s.wake.notify_one();
+        }
+        s.recomputeLocked();
+        if (std::this_thread::get_id() == s.owner) { notify = s.setup.onChange; v = s.viewLocked(); }
+    }
+    if (notify) notify(v);
+}
+
+void StartupProgress::checkpoint() {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::function<uint64_t()> probe;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (std::this_thread::get_id() != s.owner) return;
+        probe = s.gpuProbe;
+    }
+    const uint64_t gpu = probe ? probe() : 0u;
+    std::function<void(const StartupProgressView&)> notify;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed)) return;
+        s.gpuNow = gpu;
+        s.gpuPeak = std::max(s.gpuPeak, gpu);
+        s.recomputeLocked();
+        notify = s.setup.onChange;
+        v = s.viewLocked();
+    }
+    {
+        // For anyone following the bar in a debug log: the three gauges at each stage.
+        char line[200]{};
+        std::snprintf(line, sizeof(line), "Loading bar %.0f%%: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB",
+                      static_cast<double>(v.fraction) * 100.0, v.assetBytesLoaded / 1048576.0, v.assetBytesTotal / 1048576.0,
+                      v.ramBytes / 1048576.0, v.ramBytesExpected / 1048576.0, v.gpuBytes / 1048576.0, v.gpuBytesExpected / 1048576.0);
+        BOO_LOG_DEBUG("Startup", line);
+    }
+    if (notify) notify(v);
+}
+
+void StartupProgress::finish() {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::function<uint64_t()> probe;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        probe = s.gpuProbe;
+    }
+    const uint64_t gpu = probe ? probe() : 0u;
+    std::function<void(const StartupProgressView&)> notify;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.exchange(false)) return;
+        s.gpuNow = gpu;
+        s.gpuPeak = std::max(s.gpuPeak, gpu);
+        s.gpuProbe = nullptr;
+        s.ramPeak = std::max(s.ramPeak, peakCommittedBytes());
+        s.fraction = 1.0f;
+        // Remember what this start loaded and how much GPU memory it reached, for the next one.
+        if (!s.setup.memoryFile.empty() && !s.loadedFiles.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(s.setup.memoryFile.parent_path(), ec);
+            std::ofstream file(s.setup.memoryFile, std::ios::out | std::ios::trunc);
+            if (file) {
+                file << "boo-startup-memory 1\n" << "gpu " << s.gpuPeak << '\n' << "ram " << s.ramPeak << '\n';
+                for (const auto& [key, bytes] : s.loadedFiles) file << "asset " << bytes << ' ' << key << '\n';
+            }
+        }
+        BOO_LOG_INFO("Startup", "Loaded " + megabytes(s.loaded) + " of assets in " + std::to_string(s.loadedFiles.size()) +
+                                " files; system memory committed " + megabytes(s.ramPeak) +
+                                "; GPU memory in use " + megabytes(s.gpuNow) + ".");
+        if (s.jobs.empty() && s.jobsRunning == 0u) {
+            BOO_LOG_INFO("Assets", "Start-up checksums: " + std::to_string(s.verifiedFiles) + " files, " +
+                                   megabytes(s.verified) + " match the manifest's SHA-256; " +
+                                   std::to_string(s.mismatched) + " mismatched.");
+        } else {
+            s.summarise = true; // the worker reports when the last one is checked
+        }
+        if (std::this_thread::get_id() == s.owner) notify = s.setup.onChange;
+        v = s.viewLocked();
+        s.setup.onChange = nullptr; // whatever it captured may not outlive start-up
+    }
+    if (notify) notify(v);
+}
+
+bool StartupProgress::waitForChecksums(uint32_t timeoutMs) {
+    auto& s = *state_;
+    std::unique_lock<std::mutex> lock(s.mutex);
+    return s.idle.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return s.jobs.empty() && s.jobsRunning == 0u; });
+}
+
+void startupAssetLoaded(const std::filesystem::path& file) { StartupProgress::instance().assetLoaded(file); }
+void startupCheckpoint() { StartupProgress::instance().checkpoint(); }
+
+} // namespace boo
