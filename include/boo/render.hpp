@@ -121,6 +121,7 @@ struct HudTelemetrySnapshot {
     bool fullscreen = false;       // the window covers the whole display
     uint32_t physxGenre = 0;       // PhysX suite genre on the dial (boo/physx_genres.hpp)
     PhysxStats physx{};            // the active genre's figures
+    BakedClothInfo bakedCloth{};   // baked PhysX cloth on screen: the row reads BAKED when the dial is off
     float fullscreenPill = 0.0f;   // opacity of the top-right FULL SCREEN / EXIT FULL SCREEN pill
 };
 
@@ -313,6 +314,7 @@ public:
     uint32_t birdCount() const noexcept;
     uint32_t workoutBirdCapacity() const noexcept; // workout birds the buffers have room for
     const std::vector<CityCollisionBox>& cityCollision(uint32_t* act) const noexcept; // see TrilogyMeshRenderer
+    BakedClothInfo bakedCloth() const noexcept;     // see TrilogyMeshRenderer
     std::vector<CityCollisionBox> buildCityCollision(uint32_t act);
     bool reserveWorkoutBirds(uint32_t birds);      // make room for more; call between frames
     FlockFocus flockFocus() const noexcept;

@@ -1,6 +1,7 @@
 #include "boo/m1_scene.hpp"
 #include "boo/bmesh.hpp"
 #include "boo/city_modules.hpp"
+#include "boo/last_light.hpp"
 #include "bird_flight.hpp"
 
 #include <algorithm>
@@ -667,6 +668,24 @@ M1CameraState evaluateShowCamera(
             c.target[2] += 36.0f * cityView;
             c.fovYRadians += .12f * cityView;
             c.revealOpen01 = static_cast<float>(smootherstep01((t - 28.0) / 10.0));
+            if (t < kLastLightRejoin) {
+                // "Last Light" (include/boo/last_light.hpp): the dusk opening, handing over to the camera
+                // above at kLastLightRejoin. Under Reduced Motion it holds the wide view of the kettle and
+                // the tower instead of travelling, weighted by the motion setting.
+                const LastLightCamera film{{c.eye[0], c.eye[1], c.eye[2]}, {c.target[0], c.target[1], c.target[2]},
+                                           c.fovYRadians, c.focusDistance, c.focusWeight};
+                LastLightCamera shot = lastLightCamera(t, film);
+                if (mScale < 1.0) {
+                    const LastLightCamera held = lastLightCamera(std::max(t, kLastLightKeys[4].t), film);
+                    shot = last_light_detail::blend(held, shot, mScale);
+                }
+                for (int i = 0; i < 3; ++i) { c.eye[i] = shot.eye[i]; c.target[i] = shot.target[i]; }
+                c.fovYRadians = shot.fov;
+                c.focusDistance = shot.focusDistance;
+                c.focusWeight = shot.focusWeight;
+                // No insert tag: the renderer treats a change of insert as a cut and resets temporal history,
+                // and this camera runs continuously into the film's own.
+            }
         } else if (t < 100.0) {
             // Circle the orchid inside the mirror stelae. Ease into a constant angular
             // speed, then settle before the Shanghai insert at 82 seconds.

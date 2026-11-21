@@ -1,6 +1,7 @@
 ﻿#include "boo/physx_route_test.hpp"
 
 #include "../render/bird_flight.hpp"
+#include "boo/last_light.hpp"
 
 #include <cmath>
 
@@ -128,6 +129,17 @@ BirdRouteReport sweepBirdRoutes(PhysxSuite& runtime, const std::vector<CityColli
         nudge.across = bestAcross;
         nudge.above = bestAbove;
         report.nudges.push_back(nudge);
+    }
+
+    // "Last Light": the film's own kettle over Taipei in the opening, every bird, every tenth of a second.
+    if (act == 2u) {
+        for (float t = 0.f; t < float(kLastLightEnd); t += 0.1f) {
+            auto frame = workoutFlockFrame(act, t, 1.f, false);
+            frame.lean = kLastLightKettleLean;
+            for (uint32_t w = 0; w < kLastLightKites; ++w)
+                test(workoutBirdPose(act, FlockFormation::Kettle, w, kLastLightKites, float(kLastLightKites), t, 1.f, false, frame),
+                     std::string("film kettle bird ") + std::to_string(w), t, false);
+        }
     }
 
     // The workout flock: every formation at three kettles' worth, every 13th bird, two minutes.

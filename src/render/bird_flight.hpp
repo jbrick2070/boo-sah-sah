@@ -227,6 +227,9 @@ struct WorkoutFlockFrame {
     float motion = 1.f;
     float roofline = -1e9f;        // cityRoofline of this city
     FlockLift lift{0.f, 0.f, 0.f}; // cityFlockLift of this city
+    // How far a kettle's column drifts sideways per metre of climb (x, z). The workout flock keeps the
+    // lean it was measured with; the film's own kettle in "Last Light" leans along the terrace wind.
+    std::array<float, 2> lean{.18f, .07f};
 };
 
 inline WorkoutFlockFrame workoutFlockFrame(uint32_t kit, float filmTime, float motionScale, bool trilogy) noexcept {
@@ -394,9 +397,9 @@ inline std::array<float, 3> kettlePosition(float flockSize, uint32_t w, const Wo
     const float theta = kTau * birdHash01(id, 6u) + omega * time;
     // The column leans downwind: the same wind for every thermal.
     const auto base = thermalBase(thermal, frame);
-    return {base[0] + .18f * height + radius * std::cos(theta),
+    return {base[0] + frame.lean[0] * height + radius * std::cos(theta),
             base[1] + height,
-            base[2] + .07f * height + radius * std::sin(theta)};
+            base[2] + frame.lean[1] * height + radius * std::sin(theta)};
 }
 
 inline BirdFlightPose kettlePose(float flockSize, uint32_t w, const WorkoutFlockFrame& frame) noexcept {

@@ -168,7 +168,7 @@ const BakedPhysics& filmBakedPhysics() {
     static std::once_flag once;
     std::call_once(once, [] {
         for (const char* name : {"assets/physics/parcel_winch.bphys", "assets/physics/iris_mechanism.bphys", "assets/physics/taipei_damper.bphys",
-                                 "assets/physics/canopy_cloth.bphys"}) {
+                                 "assets/physics/canopy_cloth.bphys", "assets/physics/wind_banner.bphys"}) {
             BakedPhysics part;
             const auto path = resolveResourcePath(name);
             if (loadBakedPhysics(path, part)) {

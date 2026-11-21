@@ -67,7 +67,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "d7c3dc7fd44534b74bb59a72239eb902beb85ccd1e10aacf2c9c5283fe936326"
+      "sha256": "d697109c2ab0e935a55592dfecb69a6801628d0118e74d5556500cfd7ec8fba4"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -158,7 +158,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "775a352378d5c198fd373bf4cac5e2690b0509fe30532b0b1a121bd7e7bca9de"
+      "sha256": "ff257c5a476c253ecc1cbb2f5e37753d17cb92aa62788e8f697011f86befe58b"
     },
     {
       "id": "model_madame_n_director_xml",
@@ -501,6 +501,17 @@
       "license": "MIT",
       "attribution_required": true,
       "sha256": "f4d1356816c3af934f4834e8cc767fcc83d0db1285ff938f475ad2ba04ef9137"
+    },
+    {
+      "id": "physics_wind_banner",
+      "path": "assets/physics/wind_banner.bphys",
+      "kind": "baked_physics",
+      "provenance": "Baked offline with NVIDIA PhysX 5.13 by tools/physx_bake (the Last Light silk banner streaming in the terrace wind)",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "42409e32aeb24fc817dd72a9b9da6a610218690239d9422cd6d4a76ab7ef0086"
     }
   ],
   "visual_presets": [
@@ -783,7 +794,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "c35d501725b19bbc1d54f9f7867fb79a2a2c2f288008f4c023da8128d3a9b890"
+      "sha256": "05825e4ab86a8e3685431f914c3f52c25e78f912e14da05cde9f792fd7a5e53f"
     }
   ],
   "source_audio": [

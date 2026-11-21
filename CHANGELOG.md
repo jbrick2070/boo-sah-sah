@@ -2,6 +2,12 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.8.0 — "Last Light"
+
+- A new 45-second opening at dusk: the sunset in the reflecting pool, a silk banner streaming in the terrace wind (baked PhysX GPU cloth), a kettle of 32 black kites leaning with the same wind beside Taipei 101, the sun setting and the city's lights coming on, then the orchid. Written by Claude Fable, reviewed by Codex and Antigravity.
+- The dashboard's PhysX row reads `BAKED CLOTH` while baked PhysX cloth is on screen with the dial off.
+- The renderer's moving-mesh path now drives any number of baked cloth surfaces (the canopy refits its ray-tracing structures, the banner rebuilds its own each frame).
+
 ## 1.1.7.0 — Hardware sensors, the GPU workout, the bird flock and the PhysX suite
 
 - The dashboard reads the GPU's own sensors: temperature, power against its limit, clock and load, with a warning while the card is power or thermally limited. On a PC with several GPUs it follows the one the app renders on. A CPU line shows system load and the app's share.

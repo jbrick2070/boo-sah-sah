@@ -105,6 +105,19 @@ bool sunOverridden() {
     return (interFlags & 1u) != 0u;
 }
 
+// "Last Light" (include/boo/last_light.hpp): the full film's opening at dusk on the Taipei terrace.
+// Bit 64 of showFlags is set by the full film only (solo loops excluded), during its first 45 s.
+bool duskOpening() {
+    return (showFlags & 65u) == 65u && act == 2u && time < 45.0 && !sunOverridden();
+}
+
+// The setting sun of the opening: low in the west-south-west (behind the banner as the camera first
+// sees it), dropping below the horizon between 14 and 30 s.
+float3 duskSunDir() {
+    float e = radians(lerp(11.0, -5.0, smoothstep(14.0, 30.0, time)));
+    return norm(float3(-0.92 * cos(e), sin(e), -0.38 * cos(e)));
+}
+
 bool accumulating() {
     return (interFlags & 2u) != 0u;
 }
@@ -189,6 +202,10 @@ float3 sceneSunDir() {
     if (act == 1u) {
         return norm(float3(-0.48, 0.22 + 0.28 * daylight, 0.72));
     }
+    // The opening's sun until it has set (its light is gone by 26 s), then the night key.
+    if (duskOpening() && time < 26.0) {
+        return duskSunDir();
+    }
     return norm(float3(-0.44, 0.74, -0.32));
 }
 
@@ -251,6 +268,16 @@ float3 sceneSunRadiance() {
         return lerp(float3(0.55, 0.62, 0.82), float3(4.68, 3.36, 2.04), dawnRamp);
     }
     float3 nightKey = (act == 1u) ? float3(0.30, 0.44, 0.66) : float3(0.52, 0.78, 1.08);
+    if (duskOpening()) {
+        // Low gold sunlight, reddening and fading as the sun meets the horizon; the night key rises after
+        // it has set, so the light's direction never jumps while it is lit.
+        if (time < 26.0) {
+            float elevation = duskSunDir().y;
+            float3 sunCol = lerp(float3(3.30, 1.70, 0.72), float3(3.60, 2.45, 1.30), smoothstep(0.02, 0.19, elevation));
+            return sunCol * smoothstep(-0.03, 0.06, elevation);
+        }
+        return nightKey * smoothstep(26.0, 31.0, time);
+    }
     return lerp(nightKey, float3(1.85, 1.32, 0.88), daylight);
 }
 
@@ -285,6 +312,11 @@ float3 sampleIblEnv(float3 d, float rough, bool insideBathroom) {
         return lerp(nightEnv, harbEnv, saturate(daylight * 1.15));
     }
     float3 s0 = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 0.0), mip).rgb;
+    if (duskOpening() && daylight > 0.0) {
+        // The opening's dusk sky lights the terrace, cooling to the night environment as the light goes.
+        float3 duskEnv = gEnvHdrTex.SampleLevel(equirectSampler, float3(uv, 2.0), mip).rgb * float3(1.0, 0.82, 0.70);
+        s0 = lerp(s0, duskEnv, saturate(daylight * 1.15));
+    }
     if ((showFlags & 2u) != 0u) {
         s0 = lerp(s0, s0.bgr * float3(1.15, 0.75, 1.25), 0.35);
     }
@@ -872,6 +904,12 @@ bool citySkyFinish(uint part, uint material, inout float3 base, inout float4 orm
         if (material == 12u) base = float3(.038, .12, .17);
         if (part == 88u) base = float3(.54, .40, .21);
         ormt = float4(1.0, material == 12u ? .19 : .37, transport ? .28 : .45, 0.0);
+        return true;
+    }
+    if (part == 191u && material == 33u) {
+        // "Last Light"'s banner: vermilion habotai silk, a soft sheen, no metal.
+        base = float3(0.62, 0.07, 0.035);
+        ormt = float4(1.0, 0.45, 0.0, 0.0);
         return true;
     }
     if (part == 172u) {
@@ -2046,6 +2084,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 B = cross(nGeom, T) * bSign;
 
     float3 base = albSample.rgb;
+    // A reflecting pool is deep, dark-bottomed water: at dusk its body would otherwise be lit by the low sun
+    // and the warm sky and swamp the few per cent the surface reflects, which is all a pool can reflect
+    // seen from above. In "Last Light" the water body is dark, so the sky, the tower and the kites carry it.
+    if (matId == 7u && duskOpening()) base *= 0.12;
     float2 nxy = norSample * 2.0 - 1.0;
     if (citySkyFinish(partId, matId, base, ormSample)) nxy = float2(0.0, 0.0);
     float normFade = 1.0 / (1.0 + dist * 0.016);
@@ -2090,7 +2132,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         streetLight = avenueLighting(road, roadFootprint, crossRoad - road.y, partId, viewAlong, base);
     }
     if (matId == 7u || (matId == 1u && wetPuddle > 0.15)) {
-        float baseRip = ((matId == 7u) ? 0.010 : (0.005 * wetPuddle)) * (1.0 + 0.28 * audioLow());
+        // "Last Light" opens on the sky reflected in the pool: the evening air is calmer than the night's
+        // rain, so the water is near-still and the tower and the kites read in it.
+        float calm = (duskOpening() && matId == 7u) ? 0.22 : 1.0;
+        float baseRip = ((matId == 7u) ? 0.010 : (0.005 * wetPuddle)) * (1.0 + 0.28 * audioLow()) * calm;
         float ripScale = baseRip / (1.0 + dist * 0.022);
         float wx = sin(i.world.z * 5.7 + i.world.x * 2.3 + time * 2.4) * 0.55
                  + sin(i.world.z * 12.3 - i.world.x * 6.1 - time * 1.9) * 0.30
@@ -2100,7 +2145,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                  + sin(i.world.x * 13.7 + time * 2.7) * 0.15;
         n = norm(n + float3(wx * ripScale, 0.0, wz * ripScale));
         // Rain-impact rings on upward-facing wet exterior surfaces, faded out before they can alias.
-        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 0.55 * audioLow());
+        float ringAmt = ((matId == 7u) ? 0.010 : 0.016 * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 0.55 * audioLow()) * calm;
         if (ringAmt > 0.0 && !inBath) {
             // Projected pixel footprint on the surface, scaled by the real canvas height and field of view.
             // 3.4888 = 1440 / (900 * tan(0.43)): identical to the hand-tuned value at the 1440p, 0.86 rad
@@ -2269,7 +2314,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 ++queries;
             }
         }
-        hasTracedReflection = reflHit || (cityWeatherLighting() && reflect(-v, n).y > 0.008);
+        hasTracedReflection = reflHit || ((cityWeatherLighting() || (duskOpening() && matId == 7u)) && reflect(-v, n).y > 0.008);
     } else {
         bool wantRayRefl =
             (matId == 34u) || // Silvered flat mirror (always crisp ray-traced reflection + thin-glass shower transmission!)
@@ -2292,7 +2337,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 uint mQueries = 0u;
                 reflHit = traceMirrorScene(i.world + nGeom * 0.016, reflect(-v, n), reflected, mQueries, rrHitDistance);
                 if (reflHit) rrHitDistance = length(nGeom * 0.016 + reflect(-v,n) * rrHitDistance);
-                hasTracedReflection = reflHit || (cityWeatherLighting() && reflect(-v, n).y > 0.008);
+                hasTracedReflection = reflHit || ((cityWeatherLighting() || (duskOpening() && matId == 7u)) && reflect(-v, n).y > 0.008);
                 specHitDist = 4.0;
                 queries += mQueries;
             } else {
@@ -2310,7 +2355,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 reflHit = traceSceneEx(i.world + nGeom * 0.016, rDir0, 180.0, 0x03u, spread, reflected, rHitT0);
                 specHitDist = reflHit ? rHitT0 : 32.0;
                 rrHitDistance = reflHit ? length(nGeom * 0.016 + rDir0 * rHitT0) : 65504.0;
-                hasTracedReflection = reflHit || (cityWeatherLighting() && rDir0.y > 0.008);
+                // A ray that escapes returns the real sky (traceSceneEx); in "Last Light" the pool shows that
+                // dusk sky, clouds and sun, not the environment map.
+                hasTracedReflection = reflHit || ((cityWeatherLighting() || (duskOpening() && matId == 7u)) && rDir0.y > 0.008);
                 ++queries;
 
                 // 2-ray satin GGX lobe filter for close brushed nickel, bronze & honed Calacatta marble in bathroom
@@ -2698,6 +2745,11 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                      * (lampsOff() ? 0.0 : lerp(1.0, 0.28, daylight));
     }
     float3 nonIndirectColor = directSunOnly + emissiveTerm;
+    if (partId == 191u) {
+        // Thin silk lets the low sun through: lit from behind, the banner glows.
+        float3 L = sceneSunDir();
+        nonIndirectColor += sceneSunRadiance() * base * 0.55 * saturate(dot(-n, L)) * smoothstep(-0.02, 0.06, L.y);
+    }
     float3 indirectColor = diffIndirectTerm + specIndirectTerm + restirDirect;
 
     // Subtle upward vertiport pad bounce illumination on hovering eVTOL airframe & wings at night

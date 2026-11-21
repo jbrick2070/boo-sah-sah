@@ -3451,6 +3451,7 @@ int main(int argc, char** argv) {
             if (liveM1Ptr) hud.birdCount = liveM1Ptr->birdCount();
             hud.fullscreen = window.isFullscreen();
             hud.physxGenre = settings.physxGenre;
+            hud.bakedCloth = liveM1Ptr ? liveM1Ptr->bakedCloth() : BakedClothInfo{};
             hud.physx = physxStatsFor(settings.physxGenre, liveM1Ptr ? liveM1Ptr->physxSmokeStats() : FlowSmokeStats{}, physxRuntime.info(),
                                       physxRigid.get(), physxFluid.get(), physxSoft.get());
             hud.fullscreenPill = interactiveCtrl.fullscreenPillOpacity;

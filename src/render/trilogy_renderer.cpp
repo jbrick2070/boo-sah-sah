@@ -9,6 +9,8 @@
 #include "boo/wind_field.hpp"
 #include "boo/baked_physics.hpp"
 #include "boo/canopy_cloth.hpp"
+#include "boo/last_light.hpp"
+#include "boo/wind_banner.hpp"
 #include "boo/nrd_bridge.hpp"
 #include "boo/logging.hpp"
 #include <windows.h>
@@ -558,20 +560,32 @@ struct TrilogyMeshRenderer::Impl {
     bool verified=false,rtReady=false;
     RendererFeatureState pathTracingState = RendererFeatureState::Unavailable;
     PathTracingLevel lastPathTracingLevel = PathTracingLevel::Off;
-    // Deforming meshes (docs/physx_suite_plan.md, step 5): the canopy ribbons as baked PhysX cloth
-    // (include/boo/canopy_cloth.hpp). Their vertices are rewritten inside the vertex buffer each frame,
-    // so raster, ray queries and the path tracer all see the same cloth; their acceleration structures
-    // are rebuilt from a small ring, so a frame still in flight keeps its own; and last frame's
-    // positions go to the motion-vector pass, so DLSS and Ray Reconstruction track the cloth.
-    struct CanopyCloth {
+    // Deforming meshes (docs/physx_suite_plan.md, step 5): baked PhysX cloth played back on a mesh. The
+    // canopy ribbons (include/boo/canopy_cloth.hpp) and the "Last Light" banner (include/boo/wind_banner.hpp).
+    // Their vertices are rewritten inside the vertex buffer each frame, so raster, ray queries and the path
+    // tracer all see the same cloth; their acceleration structures come from a small ring, so a frame
+    // still in flight keeps its own; and last frame's positions go to the motion-vector pass, so DLSS and
+    // Ray Reconstruction track the cloth. The mesh samples a baked grid of node offsets by its texture
+    // coordinates (u along, v across, each 0..1).
+    struct DeformingSurface {
         static constexpr uint32_t kRing = 8;
+        // What it is.
+        const char* name = "";
+        uint32_t kit = 0, firstPart = 0, ribbons = 0, material = 0;
+        int gridU = 0, gridV = 0;
+        bool rebuild = false; // rebuild the structures each frame (motion of metres); otherwise refit from rest
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+        std::array<float,3> (*restPoint)(int ribbon, float u, float v) = nullptr; // u, v in 0..1
+        int gridNodes() const noexcept { return gridU * gridV; }
+        int trackNodes() const noexcept { return int(ribbons) * gridNodes(); }
+        // State.
         bool ready = false;
-        std::vector<uint32_t> partIndices;           // lamella submeshes in `parts`
+        std::vector<uint32_t> partIndices;           // its submeshes in `parts`
         uint32_t first = 0, count = 0;               // the vertex range that is rewritten
         std::vector<BmeshVertex> rest, current;
         struct Moving { uint32_t local, ribbon; float gu, gv; };
         std::vector<Moving> moving;
-        std::vector<float> restNodes;                // kCanopyTrackNodes x xyz, the woven mid-surface
+        std::vector<float> restNodes;                // trackNodes x xyz, the rest mid-surface
         std::vector<float> offsets, deformedNodes, restNormals, deformedNormals;
         std::vector<float> lastPositions, positions; // xyz per vertex in range
         bool haveLast = false;
@@ -579,143 +593,174 @@ struct TrilogyMeshRenderer::Impl {
         ComPtr<ID3D12Resource> upload, previous, scratch;
         uint8_t* uploadMapped = nullptr;
         uint8_t* previousMapped = nullptr;
-        // The acceleration structures are built from compact inputs of their own: each lamella's
-        // indices rebased to its first vertex, and its positions in an upload ring. Built against the
-        // whole vertex buffer, four rebuilds cost over a millisecond.
-        std::vector<uint32_t> localIndices;             // all lamellae, rebased
-        std::vector<uint32_t> partIndexStart, partPositionStart; // per lamella, in localIndices / in positions
-        uint32_t rayVertices = 0;                       // lamella vertices, all parts
+        // The acceleration structures are built from compact inputs of their own: each part's indices
+        // rebased to its first vertex, and its positions in an upload ring. Built against the whole
+        // vertex buffer, four canopy rebuilds cost over a millisecond.
+        std::vector<uint32_t> localIndices;
+        std::vector<uint32_t> partIndexStart, partPositionStart;
+        uint32_t rayVertices = 0;
         ComPtr<ID3D12Resource> rayIndexBuffer, rayPositions;
         uint8_t* rayPositionsMapped = nullptr;
-        std::vector<std::array<ComPtr<ID3D12Resource>,kRing>> blases; // per lamella part, per ring slot
-        std::vector<ComPtr<ID3D12Resource>> restBlases;  // per lamella: the woven shape, refitted from each frame
-        uint64_t scratchStride = 0;                      // one scratch region per lamella, so refits overlap
-        float lastOffset = 0.f;                      // widest node offset this frame, metres
-    } canopy;
+        std::vector<std::array<ComPtr<ID3D12Resource>,kRing>> blases; // per part, per ring slot
+        std::vector<ComPtr<ID3D12Resource>> restBlases;  // per part: the rest shape, refitted from each frame
+        uint64_t scratchStride = 0;                      // one scratch region per part, so builds overlap
+        float lastOffset = 0.f;                          // widest node offset this frame, metres
+        float keyRate = 0.f;                             // of the track that played this frame
+    };
+    DeformingSurface canopy, banner;
+    const DeformingSurface* activeDeforming = nullptr; // the surface playing this frame, for the dashboard
     ComPtr<ID3D12Resource> noDeform;                 // an empty range for the motion pass
 
-    // Finds the lamella vertices and the woven rest shape they sample. Called with the assembled
-    // vertex array, before it is uploaded.
-    void prepareCanopy(const std::vector<BmeshVertex>& vertices, const std::vector<uint32_t>& indices) {
-        canopy = CanopyCloth{};
-        const BakedGridTrack* velvet = filmBakedPhysics().findGrid(kCanopySpans[0].track);
-        if (!velvet || velvet->nodes != uint32_t(kCanopyTrackNodes)) return;
+    void configureDeformingSurfaces() {
+        canopy = DeformingSurface{};
+        canopy.name = "canopy ribbons"; canopy.kit = 4; canopy.firstPart = uint32_t(kCanopyFirstPart);
+        canopy.ribbons = uint32_t(kCanopyRibbons); canopy.material = kCanopyMaterial;
+        canopy.gridU = kCanopyGridU; canopy.gridV = kCanopyGridV; canopy.rebuild = false;
+        // Fast trace: the ribbons are glass that fills the frame, so their rays matter more than the build.
+        canopy.buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+        canopy.restPoint = [](int ribbon, float u, float v) { return canopyRibbonPoint(ribbon, u, v * 2.f - 1.f); };
+        banner = DeformingSurface{};
+        banner.name = "banner"; banner.kit = 2; banner.firstPart = kBannerCloth; banner.ribbons = 1; banner.material = kBannerClothMaterial;
+        banner.gridU = kBannerGridU; banner.gridV = kBannerGridV;
+        // The banner swings through tens of degrees: a refit from the hanging shape would degrade, so it
+        // is rebuilt each frame (one small mesh).
+        banner.rebuild = true;
+        banner.buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        banner.restPoint = [](int, float u, float v) { return bannerRestPoint(u, v); };
+    }
+
+    // The track a surface plays at `time`, the time to sample it at, and the scale for its offsets.
+    const BakedGridTrack* deformTrack(const DeformingSurface& c, float time, float motion, float& sampleTime, float& scale) const {
+        if (&c == &banner) {
+            sampleTime = time;
+            scale = 1.f;
+            const auto* g = filmBakedPhysics().findGrid(bannerTrackFor(motion));
+            return g && g->nodes == uint32_t(c.trackNodes()) ? g : nullptr;
+        }
+        sampleTime = canopyBakeTime(time, visualMode == ShowVisualMode::SoloTensor);
+        scale = motion;
+        const BakedGridTrack* track = nullptr;
+        for (const auto& span : kCanopySpans)
+            if (const auto* g = filmBakedPhysics().findGrid(span.track); g && g->nodes == uint32_t(c.trackNodes()) &&
+                                                                          sampleTime >= g->firstTime - 0.5f && sampleTime <= g->lastTime() + 0.5f)
+                track = g;
+        return track;
+    }
+
+    // Finds a surface's vertices and the rest shape they sample. Called with the assembled vertex array,
+    // before it is uploaded.
+    void prepareDeforming(DeformingSurface& c, const std::vector<BmeshVertex>& vertices, const std::vector<uint32_t>& indices) {
+        const DeformingSurface config = c;
+        auto off = [&](const std::string& why) {
+            if (!why.empty()) BOO_LOG_WARN("Cloth", std::string(config.name) + ": " + why + "; it stays still");
+            c = config;
+        };
+        float unusedTime = 0.f, unusedScale = 1.f;
+        if (!deformTrack(c, &c == &banner ? 1.f : 120.f, 1.f, unusedTime, unusedScale) &&
+            !(&c == &canopy && filmBakedPhysics().findGrid(kCanopySpans[0].track))) return off("");
+        const int nodesPerRibbon = c.gridNodes();
         uint32_t lo = UINT32_MAX, hi = 0;
-        std::array<bool,kCanopyRibbons> seen{};
+        std::vector<bool> seen(c.ribbons, false);
         for (uint32_t i = 0; i < parts.size(); ++i) {
             const auto& p = parts[i];
-            if (p.kit != 4 || p.sub.material != kCanopyMaterial || p.sub.part < uint32_t(kCanopyFirstPart) ||
-                p.sub.part >= uint32_t(kCanopyFirstPart + kCanopyRibbons) || !p.sub.vertexCount) continue;
-            canopy.partIndices.push_back(i);
-            seen[p.sub.part - kCanopyFirstPart] = true;
+            if (p.kit != c.kit || p.sub.material != c.material || p.sub.part < c.firstPart || p.sub.part >= c.firstPart + c.ribbons || !p.sub.vertexCount) continue;
+            c.partIndices.push_back(i);
+            seen[p.sub.part - c.firstPart] = true;
             lo = std::min(lo, p.sub.firstVertex);
             hi = std::max(hi, p.sub.firstVertex + p.sub.vertexCount);
         }
-        if (std::find(seen.begin(), seen.end(), false) != seen.end()) {
-            BOO_LOG_WARN("Cloth", "Canopy ribbons not found in the enamel cathedral mesh; the cloth stays off");
-            canopy = CanopyCloth{};
-            return;
-        }
-        canopy.first = lo;
-        canopy.count = hi - lo;
-        canopy.rest.assign(vertices.begin() + lo, vertices.begin() + hi);
-        // Each lamella vertex carries its generator coordinates as its texture coordinates: u along the
-        // ribbon, v across. The rest node at a grid point is the mean of the vertices there (both faces
-        // of the fabric), which is the mid-surface.
-        std::vector<double> sums(size_t(kCanopyTrackNodes) * 3u, 0.0);
-        std::vector<uint32_t> nodeHits(size_t(kCanopyTrackNodes), 0u);
-        for (uint32_t index : canopy.partIndices) {
+        if (std::find(seen.begin(), seen.end(), false) != seen.end()) return off("its mesh was not found");
+        c.first = lo;
+        c.count = hi - lo;
+        c.rest.assign(vertices.begin() + lo, vertices.begin() + hi);
+        // The rest node at a grid point is the mean of the vertices there (both faces of the fabric),
+        // which is the mid-surface.
+        std::vector<double> sums(size_t(c.trackNodes()) * 3u, 0.0);
+        std::vector<uint32_t> nodeHits(size_t(c.trackNodes()), 0u);
+        for (uint32_t index : c.partIndices) {
             const auto& p = parts[index];
-            const uint32_t ribbon = p.sub.part - kCanopyFirstPart;
+            const uint32_t ribbon = p.sub.part - c.firstPart;
             for (uint32_t v = p.sub.firstVertex; v < p.sub.firstVertex + p.sub.vertexCount; ++v) {
                 const auto& vertex = vertices[v];
-                const float gu = std::clamp(vertex.uvThicknessRoughness[0], 0.f, 1.f) * float(kCanopyGridU - 1);
-                const float gv = std::clamp(vertex.uvThicknessRoughness[1], 0.f, 1.f) * float(kCanopyGridV - 1);
-                canopy.moving.push_back({v - lo, ribbon, gu, gv});
+                const float gu = std::clamp(vertex.uvThicknessRoughness[0], 0.f, 1.f) * float(c.gridU - 1);
+                const float gv = std::clamp(vertex.uvThicknessRoughness[1], 0.f, 1.f) * float(c.gridV - 1);
+                c.moving.push_back({v - lo, ribbon, gu, gv});
                 const float ru = std::round(gu), rv = std::round(gv);
                 if (std::fabs(gu - ru) < 0.02f && std::fabs(gv - rv) < 0.02f) {
-                    const size_t node = size_t(ribbon) * kCanopyGridNodes + size_t(ru) * kCanopyGridV + size_t(rv);
+                    const size_t node = size_t(ribbon) * nodesPerRibbon + size_t(ru) * c.gridV + size_t(rv);
                     for (int axis = 0; axis < 3; ++axis) sums[node * 3 + axis] += vertex.positionMaterial[axis];
                     ++nodeHits[node];
                 }
             }
         }
-        if (std::find(nodeHits.begin(), nodeHits.end(), 0u) != nodeHits.end()) {
-            BOO_LOG_WARN("Cloth", "Canopy ribbon texture coordinates do not cover the cloth grid; the cloth stays off");
-            canopy = CanopyCloth{};
-            return;
-        }
-        canopy.restNodes.resize(sums.size());
+        if (std::find(nodeHits.begin(), nodeHits.end(), 0u) != nodeHits.end()) return off("its texture coordinates do not cover the cloth grid");
+        c.restNodes.resize(sums.size());
         for (size_t n = 0; n < nodeHits.size(); ++n)
-            for (int axis = 0; axis < 3; ++axis) canopy.restNodes[n * 3 + axis] = float(sums[n * 3 + axis] / nodeHits[n]);
-        // The bake's grid is laid out with the generator's formula. Check the mesh agrees with it, in
-        // which sense its texture coordinates run, and that it sits where the formula puts it.
+            for (int axis = 0; axis < 3; ++axis) c.restNodes[n * 3 + axis] = float(sums[n * 3 + axis] / nodeHits[n]);
+        // The bake's grid is laid out with the shared rest formula. Check the mesh agrees with it and in
+        // which sense its texture coordinates run.
         double best = 1e30; int bestFlip = 0;
         for (int flip = 0; flip < 4; ++flip) {
             double error = 0.0;
-            for (int r = 0; r < kCanopyRibbons; ++r)
-                for (int i = 0; i < kCanopyGridU; ++i)
-                    for (int j = 0; j < kCanopyGridV; ++j) {
-                        const int mi = (flip & 1) ? kCanopyGridU - 1 - i : i, mj = (flip & 2) ? kCanopyGridV - 1 - j : j;
-                        const auto f = canopyRibbonPoint(r, float(i) / float(kCanopyGridU - 1), float(j) / float(kCanopyGridV - 1) * 2.f - 1.f);
-                        const float* m = &canopy.restNodes[(size_t(r) * kCanopyGridNodes + size_t(mi) * kCanopyGridV + size_t(mj)) * 3];
+            for (int r = 0; r < int(c.ribbons); ++r)
+                for (int i = 0; i < c.gridU; ++i)
+                    for (int j = 0; j < c.gridV; ++j) {
+                        const int mi = (flip & 1) ? c.gridU - 1 - i : i, mj = (flip & 2) ? c.gridV - 1 - j : j;
+                        const auto f = c.restPoint(r, float(i) / float(c.gridU - 1), float(j) / float(c.gridV - 1));
+                        const float* m = &c.restNodes[(size_t(r) * nodesPerRibbon + size_t(mi) * c.gridV + size_t(mj)) * 3];
                         for (int axis = 0; axis < 3; ++axis) error += double(m[axis] - f[size_t(axis)]) * double(m[axis] - f[size_t(axis)]);
                     }
             if (error < best) { best = error; bestFlip = flip; }
         }
-        const double rms = std::sqrt(best / double(kCanopyTrackNodes));
-        if (rms > 0.05) {
-            BOO_LOG_WARN("Cloth", "Canopy ribbon mesh does not match the cloth grid (" + std::to_string(rms) + " m); the cloth stays off");
-            canopy = CanopyCloth{};
-            return;
-        }
+        const double rms = std::sqrt(best / double(c.trackNodes()));
+        if (rms > 0.05) return off("its mesh does not match the cloth grid (" + std::to_string(rms) + " m)");
         if (bestFlip) {
-            // Re-index the mesh's grid into the bake's sense.
-            for (auto& m : canopy.moving) {
-                if (bestFlip & 1) m.gu = float(kCanopyGridU - 1) - m.gu;
-                if (bestFlip & 2) m.gv = float(kCanopyGridV - 1) - m.gv;
+            for (auto& m : c.moving) {
+                if (bestFlip & 1) m.gu = float(c.gridU - 1) - m.gu;
+                if (bestFlip & 2) m.gv = float(c.gridV - 1) - m.gv;
             }
-            std::vector<float> nodes(canopy.restNodes.size());
-            for (int r = 0; r < kCanopyRibbons; ++r)
-                for (int i = 0; i < kCanopyGridU; ++i)
-                    for (int j = 0; j < kCanopyGridV; ++j) {
-                        const int mi = (bestFlip & 1) ? kCanopyGridU - 1 - i : i, mj = (bestFlip & 2) ? kCanopyGridV - 1 - j : j;
-                        std::copy_n(&canopy.restNodes[(size_t(r) * kCanopyGridNodes + size_t(mi) * kCanopyGridV + size_t(mj)) * 3], 3,
-                                    &nodes[(size_t(r) * kCanopyGridNodes + size_t(i) * kCanopyGridV + size_t(j)) * 3]);
+            std::vector<float> nodes(c.restNodes.size());
+            for (int r = 0; r < int(c.ribbons); ++r)
+                for (int i = 0; i < c.gridU; ++i)
+                    for (int j = 0; j < c.gridV; ++j) {
+                        const int mi = (bestFlip & 1) ? c.gridU - 1 - i : i, mj = (bestFlip & 2) ? c.gridV - 1 - j : j;
+                        std::copy_n(&c.restNodes[(size_t(r) * nodesPerRibbon + size_t(mi) * c.gridV + size_t(mj)) * 3], 3,
+                                    &nodes[(size_t(r) * nodesPerRibbon + size_t(i) * c.gridV + size_t(j)) * 3]);
                     }
-            canopy.restNodes = std::move(nodes);
+            c.restNodes = std::move(nodes);
         }
-        for (uint32_t index : canopy.partIndices) {
+        for (uint32_t index : c.partIndices) {
             const auto& sub = parts[index].sub;
-            canopy.partIndexStart.push_back(static_cast<uint32_t>(canopy.localIndices.size()));
-            canopy.partPositionStart.push_back(canopy.rayVertices);
-            for (uint32_t i = 0; i < sub.indexCount; ++i) canopy.localIndices.push_back(indices[sub.firstIndex + i] - sub.firstVertex);
-            canopy.rayVertices += sub.vertexCount;
+            c.partIndexStart.push_back(static_cast<uint32_t>(c.localIndices.size()));
+            c.partPositionStart.push_back(c.rayVertices);
+            for (uint32_t i = 0; i < sub.indexCount; ++i) c.localIndices.push_back(indices[sub.firstIndex + i] - sub.firstVertex);
+            c.rayVertices += sub.vertexCount;
         }
-        canopy.current = canopy.rest;
-        canopy.offsets.resize(canopy.restNodes.size());
-        canopy.deformedNodes.resize(canopy.restNodes.size());
-        canopy.restNormals.resize(canopy.restNodes.size());
-        canopy.deformedNormals.resize(canopy.restNodes.size());
-        gridNormals(canopy.restNodes, canopy.restNormals);
-        canopy.positions.resize(size_t(canopy.count) * 3u);
-        canopy.lastPositions.resize(size_t(canopy.count) * 3u);
-        canopy.ready = true;
-        BOO_LOG_INFO("Cloth", "Canopy ribbons on baked PhysX cloth: " + std::to_string(canopy.moving.size()) + " lamella vertices in a range of " +
-                     std::to_string(canopy.count) + ", mesh matches the cloth grid to " + std::to_string(int(std::lround(rms * 1000.0))) + " mm");
+        c.current = c.rest;
+        c.offsets.resize(c.restNodes.size());
+        c.deformedNodes.resize(c.restNodes.size());
+        c.restNormals.resize(c.restNodes.size());
+        c.deformedNormals.resize(c.restNodes.size());
+        gridNormals(c, c.restNodes, c.restNormals);
+        c.positions.resize(size_t(c.count) * 3u);
+        c.lastPositions.resize(size_t(c.count) * 3u);
+        c.ready = true;
+        BOO_LOG_INFO("Cloth", std::string(c.name) + " on baked PhysX cloth: " + std::to_string(c.moving.size()) + " vertices in a range of " +
+                     std::to_string(c.count) + ", mesh matches the cloth grid to " + std::to_string(int(std::lround(rms * 1000.0))) + " mm");
     }
-    static void gridNormals(const std::vector<float>& nodes, std::vector<float>& normals) {
-        for (int r = 0; r < kCanopyRibbons; ++r)
-            for (int i = 0; i < kCanopyGridU; ++i)
-                for (int j = 0; j < kCanopyGridV; ++j) {
+    static void gridNormals(const DeformingSurface& c, const std::vector<float>& nodes, std::vector<float>& normals) {
+        const int perRibbon = c.gridNodes();
+        for (int r = 0; r < int(c.ribbons); ++r)
+            for (int i = 0; i < c.gridU; ++i)
+                for (int j = 0; j < c.gridV; ++j) {
                     auto at = [&](int a, int b) {
-                        return &nodes[(size_t(r) * kCanopyGridNodes + size_t(std::clamp(a, 0, kCanopyGridU - 1)) * kCanopyGridV + size_t(std::clamp(b, 0, kCanopyGridV - 1))) * 3];
+                        return &nodes[(size_t(r) * perRibbon + size_t(std::clamp(a, 0, c.gridU - 1)) * c.gridV + size_t(std::clamp(b, 0, c.gridV - 1))) * 3];
                     };
-                    const float* a = at(i + 1, j); const float* b = at(i - 1, j); const float* c = at(i, j + 1); const float* e = at(i, j - 1);
-                    const float du[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]}, dv[3] = {c[0] - e[0], c[1] - e[1], c[2] - e[2]};
+                    const float* a = at(i + 1, j); const float* b = at(i - 1, j); const float* cc = at(i, j + 1); const float* e = at(i, j - 1);
+                    const float du[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]}, dv[3] = {cc[0] - e[0], cc[1] - e[1], cc[2] - e[2]};
                     float n[3] = {du[1] * dv[2] - du[2] * dv[1], du[2] * dv[0] - du[0] * dv[2], du[0] * dv[1] - du[1] * dv[0]};
                     const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-                    float* out = &normals[(size_t(r) * kCanopyGridNodes + size_t(i) * kCanopyGridV + size_t(j)) * 3];
+                    float* out = &normals[(size_t(r) * perRibbon + size_t(i) * c.gridV + size_t(j)) * 3];
                     for (int axis = 0; axis < 3; ++axis) out[axis] = len > 1e-9f ? n[axis] / len : 0.f;
                 }
     }
@@ -729,29 +774,27 @@ struct TrilogyMeshRenderer::Impl {
         const float cvc[3] = {c[1] * vc[2] - c[2] * vc[1], c[2] * vc[0] - c[0] * vc[2], c[0] * vc[1] - c[1] * vc[0]};
         for (int axis = 0; axis < 3; ++axis) v[axis] += vc[axis] + k * cvc[axis];
     }
-    // Poses the cloth at `time`, copies it into the vertex buffer, rebuilds the ribbons' acceleration
-    // structures and points their parts at them. Returns the motion pass's previous-position view.
-    D3D12_GPU_VIRTUAL_ADDRESS updateCanopy(ID3D12GraphicsCommandList* cmd, float time, float motion, bool rebuildRays) {
-        auto& c = canopy;
-        const float t = canopyBakeTime(time, visualMode == ShowVisualMode::SoloTensor);
-        const BakedGridTrack* track = nullptr;
-        for (const auto& span : kCanopySpans)
-            if (const auto* g = filmBakedPhysics().findGrid(span.track); g && g->nodes == uint32_t(kCanopyTrackNodes) && t >= g->firstTime - 0.5f && t <= g->lastTime() + 0.5f)
-                track = g;
-        if (track) track->sample(t, c.offsets.data());
+    // Poses a surface at `time`, copies it into the vertex buffer, rebuilds or refits its acceleration
+    // structures and points its parts at them. Returns the motion pass's previous-position view.
+    D3D12_GPU_VIRTUAL_ADDRESS updateDeforming(DeformingSurface& c, ID3D12GraphicsCommandList* cmd, float time, float motion, bool rebuildRays) {
+        float sampleTime = time, scale = 1.f;
+        const BakedGridTrack* track = deformTrack(c, time, motion, sampleTime, scale);
+        if (track) track->sample(sampleTime, c.offsets.data());
         else std::fill(c.offsets.begin(), c.offsets.end(), 0.f);
+        c.keyRate = track ? track->keyRate : 0.f;
         c.lastOffset = 0.f;
         for (size_t n = 0; n < c.offsets.size(); n += 3) {
-            for (int axis = 0; axis < 3; ++axis) c.offsets[n + axis] *= motion;
+            for (int axis = 0; axis < 3; ++axis) c.offsets[n + axis] *= scale;
             c.lastOffset = std::max(c.lastOffset, std::sqrt(c.offsets[n] * c.offsets[n] + c.offsets[n + 1] * c.offsets[n + 1] + c.offsets[n + 2] * c.offsets[n + 2]));
         }
         for (size_t n = 0; n < c.offsets.size(); ++n) c.deformedNodes[n] = c.restNodes[n] + c.offsets[n];
-        gridNormals(c.deformedNodes, c.deformedNormals);
+        gridNormals(c, c.deformedNodes, c.deformedNormals);
+        const int perRibbon = c.gridNodes();
         for (const auto& m : c.moving) {
-            const int i0 = std::min(int(m.gu), kCanopyGridU - 2), j0 = std::min(int(m.gv), kCanopyGridV - 2);
+            const int i0 = std::min(int(m.gu), c.gridU - 2), j0 = std::min(int(m.gv), c.gridV - 2);
             const float fu = m.gu - float(i0), fv = m.gv - float(j0);
-            const size_t base = size_t(m.ribbon) * kCanopyGridNodes;
-            const size_t n00 = (base + size_t(i0) * kCanopyGridV + size_t(j0)) * 3, n10 = n00 + size_t(kCanopyGridV) * 3, n01 = n00 + 3, n11 = n10 + 3;
+            const size_t base = size_t(m.ribbon) * perRibbon;
+            const size_t n00 = (base + size_t(i0) * c.gridV + size_t(j0)) * 3, n10 = n00 + size_t(c.gridV) * 3, n01 = n00 + 3, n11 = n10 + 3;
             const float w00 = (1.f - fu) * (1.f - fv), w10 = fu * (1.f - fv), w01 = (1.f - fu) * fv, w11 = fu * fv;
             float d[3], nr[3], nd[3];
             for (int axis = 0; axis < 3; ++axis) {
@@ -770,25 +813,25 @@ struct TrilogyMeshRenderer::Impl {
                 rotateBetween(nr, nd, out.tangentSign);
             }
         }
-        // Last frame's positions for motion vectors, then this frame's.
         for (uint32_t v = 0; v < c.count; ++v)
             std::copy_n(c.current[v].positionMaterial, 3, &c.positions[size_t(v) * 3]);
-        const uint32_t slot = c.ring++ % CanopyCloth::kRing;
+        const uint32_t slot = c.ring++ % DeformingSurface::kRing;
         const size_t bytes = size_t(c.count) * sizeof(BmeshVertex);
-        // Only the fabric's own vertices move; the tendons between them keep their loaded copy.
+        // Only the fabric's own vertices move; anything between its parts keeps its loaded copy.
         for (uint32_t index : c.partIndices) {
             const auto& sub = parts[index].sub;
             std::memcpy(c.uploadMapped + slot * bytes + size_t(sub.firstVertex - c.first) * sizeof(BmeshVertex),
                         c.current.data() + (sub.firstVertex - c.first), size_t(sub.vertexCount) * sizeof(BmeshVertex));
         }
+        // Last frame's positions for motion vectors, then this frame's.
         const size_t previousBytes = (size_t(c.count) + 1u) * 16u;
         uint8_t* previous = c.previousMapped + slot * previousBytes;
         const uint32_t header[4] = {c.first, c.count, 0u, 0u};
         std::memcpy(previous, header, 16);
         const auto& prior = (c.haveLast && !dlssReset) ? c.lastPositions : c.positions;
         for (uint32_t v = 0; v < c.count; ++v) {
-            const float p[4] = {prior[size_t(v) * 3], prior[size_t(v) * 3 + 1], prior[size_t(v) * 3 + 2], 1.f};
-            std::memcpy(previous + 16u * (v + 1u), p, 16);
+            const float pp[4] = {prior[size_t(v) * 3], prior[size_t(v) * 3 + 1], prior[size_t(v) * 3 + 2], 1.f};
+            std::memcpy(previous + 16u * (v + 1u), pp, 16);
         }
         std::swap(c.lastPositions, c.positions);
         c.haveLast = true;
@@ -802,23 +845,26 @@ struct TrilogyMeshRenderer::Impl {
         }
         transition(cmd, vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST, srvState);
         if (rebuildRays && !c.blases.empty()) {
-            writeCanopyRayPositions(slot);
+            writeDeformRayPositions(c, slot);
             ComPtr<ID3D12GraphicsCommandList4> c4;
             check(cmd->QueryInterface(IID_PPV_ARGS(&c4)));
             uav(cmd, c.scratch.Get());
             std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometry(c.partIndices.size());
             for (size_t k = 0; k < c.partIndices.size(); ++k) {
                 Part& part = parts[c.partIndices[k]];
-                geometry[k] = canopyGeometry(k, slot);
-                // A refit of the woven shape's structure onto this frame's cloth: cheap, and since it
-                // always starts from the rest shape its quality never drifts.
+                geometry[k] = deformGeometry(c, k, slot);
                 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
                 build.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-                build.Inputs.Flags = kCanopyBuildFlags | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+                build.Inputs.Flags = c.buildFlags;
                 build.Inputs.NumDescs = 1;
                 build.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
                 build.Inputs.pGeometryDescs = &geometry[k];
-                build.SourceAccelerationStructureData = c.restBlases[k]->GetGPUVirtualAddress();
+                if (!c.rebuild) {
+                    // A refit of the rest shape's structure onto this frame's cloth: cheap, and since it
+                    // always starts from the rest shape its quality never drifts.
+                    build.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+                    build.SourceAccelerationStructureData = c.restBlases[k]->GetGPUVirtualAddress();
+                }
                 build.DestAccelerationStructureData = c.blases[k][slot]->GetGPUVirtualAddress();
                 build.ScratchAccelerationStructureData = c.scratch->GetGPUVirtualAddress() + k * c.scratchStride;
                 c4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
@@ -830,12 +876,8 @@ struct TrilogyMeshRenderer::Impl {
         }
         return c.previous->GetGPUVirtualAddress() + slot * previousBytes;
     }
-    // Fast trace: the ribbons are glass that fills the frame, so their rays matter more than the build.
-    static constexpr D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS kCanopyBuildFlags =
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
-    // Lamella k's positions for ring slot `slot`, from the cloth's current pose.
-    void writeCanopyRayPositions(uint32_t slot) {
-        auto& c = canopy;
+    // Part k's positions for ring slot `slot`, from the surface's current pose.
+    void writeDeformRayPositions(DeformingSurface& c, uint32_t slot) {
         float* out = reinterpret_cast<float*>(c.rayPositionsMapped + size_t(slot) * c.rayVertices * 12u);
         for (size_t k = 0; k < c.partIndices.size(); ++k) {
             const auto& sub = parts[c.partIndices[k]].sub;
@@ -846,8 +888,7 @@ struct TrilogyMeshRenderer::Impl {
     }
     // Triangles in the same order as the part's own indices, so a hit's primitive index still finds
     // its vertices through the scene's index buffer.
-    D3D12_RAYTRACING_GEOMETRY_DESC canopyGeometry(size_t k, uint32_t slot) const {
-        const auto& c = canopy;
+    D3D12_RAYTRACING_GEOMETRY_DESC deformGeometry(const DeformingSurface& c, size_t k, uint32_t slot) const {
         const auto& sub = parts[c.partIndices[k]].sub;
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -943,6 +984,11 @@ struct TrilogyMeshRenderer::Impl {
     bool isPartActiveInShow(const Part& p,float time) const noexcept {
         const uint32_t pt=p.sub.part;
         const bool hero=p.kit>=4;
+        // "Last Light" keeps the dusk sky clean: the blimp joins the city after the opening's 45 s cut.
+        if (p.kit==2 && pt==kSkyBlimp && visualMode==ShowVisualMode::FullFilm360s && time<float(kLastLightEnd)) return false;
+        // Its banner stands on the terrace only in the full film's opening.
+        if (p.kit==2 && (pt==kBannerMast || pt==kBannerCloth))
+            return visualMode==ShowVisualMode::FullFilm360s && time<float(kLastLightEnd);
         if (p.kit==2 && (pt==kSkyPlane || pt==kSkyDrone || pt==kSkyBlimp || (pt>=kParcelCase && pt<=kParcelDock)) &&
             visualMode==ShowVisualMode::FullFilm360s && time>=335.5f) return false;
         if(visualMode==ShowVisualMode::SoloRT) {
@@ -1175,6 +1221,9 @@ struct TrilogyMeshRenderer::Impl {
             }
         }
         float lineLength=1.f;
+        if(p.kit==2 && (p.sub.part==kBannerMast || p.sub.part==kBannerCloth)) {
+            x=0.f; y=0.f; z=0.f; yaw=0.f; pitch=0.f; roll=0.f; scale=1.f; // built in world coordinates
+        }
         if(p.kit==2 && p.sub.part==kParcelDock) {
             x=kParcelDockPosition[0]; y=kParcelDockPosition[1]; z=kParcelDockPosition[2]; scale=1.f;
         } else if(p.kit==2 && (p.sub.part==kParcelCase || p.sub.part==kParcelLine)) {
@@ -1380,6 +1429,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                 appendKit(buildCityAircraft(kSkyDrone));
                 appendKit(buildCityBlimp(cityBlimpSigns(UiStrings::instance().languageTag())));
                 for (auto part : {kParcelCase,kParcelLine,kParcelDock}) appendKit(buildParcelHardware(part));
+                for (auto part : {kBannerMast,kBannerCloth}) appendKit(buildWindBanner(part)); // "Last Light"
             }
         }
         if(visualMode!=ShowVisualMode::M2Trilogy180s) {
@@ -1480,7 +1530,9 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         }
         s.meshOffsets = buffer(d, firstIndices.size()*sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         upload(s.meshOffsets.Get(),firstIndices.data(),firstIndices.size()*sizeof(uint32_t));
-        s.prepareCanopy(vertices, indices);
+        s.configureDeformingSurfaces();
+        s.prepareDeforming(s.canopy, vertices, indices);
+        s.prepareDeforming(s.banner, vertices, indices);
         const size_t vbBytes = vertices.size() * sizeof(BmeshVertex);
         const size_t ibBytes = indices.size() * sizeof(uint32_t);
         auto vbUpload = buffer(d, vbBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -1844,35 +1896,37 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             s.noDeform=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
             upload(s.noDeform.Get(),emptyRange,sizeof(emptyRange));
         }
-        if (s.canopy.ready) {
-            auto& c=s.canopy;
-            constexpr uint32_t ring=Impl::CanopyCloth::kRing;
+        for (Impl::DeformingSurface* surface : {&s.canopy, &s.banner}) {
+            if (!surface->ready) continue;
+            auto& c=*surface;
+            constexpr uint32_t ring=Impl::DeformingSurface::kRing;
             c.upload=buffer(d,uint64_t(c.count)*sizeof(BmeshVertex)*ring,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
             c.uploadMapped=mapForWriting(c.upload.Get());
             c.previous=buffer(d,(uint64_t(c.count)+1u)*16u*ring,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
             c.previousMapped=mapForWriting(c.previous.Get());
             if (s.rtReady) {
-                // One small acceleration structure per lamella per ring slot, each built from the rest
-                // shape now so every slot is valid before the cloth first moves.
+                // One small acceleration structure per part per ring slot, each built from the rest shape
+                // now so every slot is valid before the cloth first moves.
                 c.rayIndexBuffer=buffer(d,c.localIndices.size()*4u,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
                 upload(c.rayIndexBuffer.Get(),c.localIndices.data(),c.localIndices.size()*4u);
                 c.rayPositions=buffer(d,uint64_t(c.rayVertices)*12u*ring,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
                 c.rayPositionsMapped=mapForWriting(c.rayPositions.Get());
-                for (uint32_t slot=0;slot<ring;++slot) s.writeCanopyRayPositions(slot);
+                for (uint32_t slot=0;slot<ring;++slot) s.writeDeformRayPositions(c,slot);
                 uint64_t scratchBytes=256;
                 std::vector<std::array<D3D12_RAYTRACING_GEOMETRY_DESC,ring>> geometry(c.partIndices.size());
                 c.blases.resize(c.partIndices.size());
-                c.restBlases.resize(c.partIndices.size());
+                if (!c.rebuild) c.restBlases.resize(c.partIndices.size());
                 for (size_t k=0;k<c.partIndices.size();++k) {
-                    for (uint32_t slot=0;slot<ring;++slot) geometry[k][slot]=s.canopyGeometry(k,slot);
+                    for (uint32_t slot=0;slot<ring;++slot) geometry[k][slot]=s.deformGeometry(c,k,slot);
                     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-                    in.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;in.Flags=Impl::kCanopyBuildFlags;
+                    in.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;in.Flags=c.buildFlags;
                     in.NumDescs=1;in.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;in.pGeometryDescs=&geometry[k][0];
                     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};d5->GetRaytracingAccelerationStructurePrebuildInfo(&in,&pre);
                     scratchBytes=std::max({scratchBytes,pre.ScratchDataSizeInBytes,pre.UpdateScratchDataSizeInBytes});
                     for (auto& blas : c.blases[k])
                         blas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-                    c.restBlases[k]=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                    if (!c.rebuild)
+                        c.restBlases[k]=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
                 }
                 constexpr uint64_t align=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
                 c.scratchStride=(scratchBytes+align-1)&~(align-1);
@@ -1881,9 +1935,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                     ComPtr<ID3D12GraphicsCommandList4> cmd;check(static_cast<ID3D12GraphicsCommandList*>(raw)->QueryInterface(IID_PPV_ARGS(&cmd)));
                     for (size_t k=0;k<c.blases.size();++k)
                         for (uint32_t slot=0;slot<=ring;++slot) {
+                            if (slot==ring && c.rebuild) break;
                             auto& blas=slot<ring ? c.blases[k][slot] : c.restBlases[k];
                             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
-                            build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;build.Inputs.Flags=Impl::kCanopyBuildFlags;
+                            build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;build.Inputs.Flags=c.buildFlags;
                             build.Inputs.NumDescs=1;build.Inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;build.Inputs.pGeometryDescs=&geometry[k][slot<ring ? slot : 0u];
                             build.DestAccelerationStructureData=blas->GetGPUVirtualAddress();build.ScratchAccelerationStructureData=c.scratch->GetGPUVirtualAddress();
                             cmd->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd.Get(),c.scratch.Get());uav(cmd.Get(),blas.Get());
@@ -2039,13 +2094,21 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     }
     const uint32_t dynMarbles=orbital ? 0u : std::min<uint32_t>(iv.marbleCount,InteractiveView::kMaxMarbles);
 
-    // The PhysX cloth canopy, posed before any instance is written so the ribbons' parts point at this
-    // frame's acceleration structures.
+    // Baked PhysX cloth (the canopy, the "Last Light" banner), posed before any instance is written so
+    // their parts point at this frame's acceleration structures. The motion pass carries one moving
+    // range; the two surfaces are never on screen together (the banner before 45 s, the canopy later).
     D3D12_GPU_VIRTUAL_ADDRESS deformedPrevious=s.noDeform ? s.noDeform->GetGPUVirtualAddress() : 0;
-    if (s.canopy.ready && !isM2 && riverSample<0 && !orbital && s.isPartActiveInShow(s.parts[s.canopy.partIndices[0]],filmTime))
-        deformedPrevious=s.updateCanopy(cmd,sceneTime,cityFlightMotion(f),useRt);
-    else
-        s.canopy.haveLast=false;
+    s.activeDeforming=nullptr;
+    for (Impl::DeformingSurface* surface : {&s.banner, &s.canopy}) {
+        const bool active=surface->ready && !s.activeDeforming && !isM2 && riverSample<0 && !orbital &&
+                          s.isPartActiveInShow(s.parts[surface->partIndices[0]],filmTime);
+        if (active) {
+            deformedPrevious=s.updateDeforming(*surface,cmd,sceneTime,cityFlightMotion(f),useRt);
+            s.activeDeforming=surface;
+        } else {
+            surface->haveLast=false;
+        }
+    }
 
     s.frameInstances.clear();
     s.batches.clear();
@@ -2199,6 +2262,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         FlockFormation formation = FlockFormation::ExtendedCluster;
         float motion = 1.f, leadYaw = 0.f;
         bool trilogyRoutes = false;
+        uint32_t filmKettle = 0;  // "Last Light": the film's own kettle, flown whatever the workout dial says
         std::array<std::array<float,3>,kCityBirdCount> authoredCenters{};
     } flockPlan;
     if (!orbital && (s.visualMode != ShowVisualMode::FullFilm360s || filmTime < 335.5f)) {
@@ -2246,6 +2310,16 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         const auto& joinTemplates = s.birdTemplates[joinSpecies == BirdSpecies::BlackKite ? 0 : 1];
         if (!joinTemplates.empty() && joinTemplates.size() <= kMaxBirdParts)
             flockPlan.birds = std::min({f.workout.birds, s.workoutBirdCapacity, kMaxWorkoutBirds});
+        // "Last Light": over Taipei at dusk the film flies its own kettle of kites. A workout released
+        // during the opening joins that kettle rather than replacing it.
+        const auto& kiteTemplates = s.birdTemplates[0];
+        if (s.visualMode == ShowVisualMode::FullFilm360s && act == 2 && !trilogyRoutes && filmTime < float(kLastLightEnd) &&
+            !kiteTemplates.empty() && kiteTemplates.size() <= kMaxBirdParts && s.workoutBirdCapacity >= kLastLightKites) {
+            flockPlan.filmKettle = kLastLightKites;
+            flockPlan.formation = FlockFormation::Kettle;
+            flockPlan.species = BirdSpecies::BlackKite;
+            flockPlan.birds = std::max(flockPlan.birds, kLastLightKites);
+        }
     }
 
     // Append dynamic rigid-body ray-traced physics marbles (with 3D rotation quaternion + world motion vectors!)
@@ -2328,9 +2402,12 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             const bool glass=(m==3 || m==4 || m==18 || m==21 || m==35 || m==40);
             partInfo[p]={part.meshId,m,part.sub.part,std::min<uint32_t>(part.sub.part-firstPart,4u),glass?2u:1u,part.compactBlas};
         }
-        const auto flockFrame=workoutFlockFrame(act,sceneTime,flockPlan.motion,flockPlan.trilogyRoutes);
+        auto flockFrame=workoutFlockFrame(act,sceneTime,flockPlan.motion,flockPlan.trilogyRoutes);
+        if (flockPlan.filmKettle) flockFrame.lean=kLastLightKettleLean;
         const WorkoutFlock arrival=f.workout;
-        const float flockSize=arrival.size>0.f ? std::min(arrival.size,float(flockBirds)) : float(flockBirds);
+        // The film's kettle is always fully grown; only birds the dial adds beyond it arrive.
+        const float flockSize=flockPlan.filmKettle ? std::max(float(flockPlan.filmKettle), arrival.size>0.f ? std::min(arrival.size,float(flockBirds)) : float(flockBirds))
+                                                   : (arrival.size>0.f ? std::min(arrival.size,float(flockBirds)) : float(flockBirds));
 
         // Last frame's transforms, for motion vectors. They are kept bird by bird so that a flock
         // which has grown since still finds each bird where it was.
@@ -2360,7 +2437,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             for (uint32_t b=b0; b<b1; ++b) {
                 auto pose=workoutBirdPose(act,flockPlan.formation,b,flockBirds,flockSize,sceneTime,
                                           flockPlan.motion,flockPlan.trilogyRoutes,flockFrame);
-                pose.scale*=workoutBirdArrival(b,arrival.grown,arrival.front,arrival.band);
+                if (b>=flockPlan.filmKettle) pose.scale*=workoutBirdArrival(b,arrival.grown,arrival.front,arrival.band);
                 centers[b]=pose.center;
                 local[b-b0]=articulateCityBird(pose);
             }
@@ -2558,6 +2635,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     } else {
         auto sm=[](float v){v=std::clamp(v,0.f,1.f);return v*v*v*(v*(v*6.f-15.f)+10.f);};
         c.day=(s.visualMode==ShowVisualMode::FullFilm360s&&c.time>=335.5f)?(0.84f*sm((c.time-335.5f)/12.5f)):0.0f;
+        // "Last Light": the opening is at dusk, and the city's lights come on as the sun sets.
+        if (s.visualMode==ShowVisualMode::FullFilm360s&&c.time<float(kLastLightEnd)) c.day=lastLightDaylight(c.time);
         const bool isHijack=(s.visualMode==ShowVisualMode::FullFilm360s&&c.time>=245.f&&c.time<275.f);
         c.showFlags=1u|((f.edition==Edition::Midnight)?2u:0u)|(std::min<uint32_t>(camera.shotIndex,7u)<<2u);
         if (orbital) c.showFlags |= 128u;
@@ -2982,6 +3061,16 @@ std::vector<CityCollisionBox> TrilogyMeshRenderer::buildCityCollision(uint32_t a
     const DrawConstants kit=impl_->transform(kitPart,f,0.f);
     impl_->computeCityCollision(act,kit.rows,out);
     return out;
+}
+BakedClothInfo TrilogyMeshRenderer::bakedCloth() const noexcept {
+    BakedClothInfo info;
+    if (!impl_ || !impl_->activeDeforming) return info;
+    const auto& c = *impl_->activeDeforming;
+    info.active = c.keyRate > 0.f;
+    info.nodes = uint32_t(c.trackNodes());
+    info.keyRate = c.keyRate;
+    info.widestOffset = c.lastOffset;
+    return info;
 }
 const std::vector<CityCollisionBox>& TrilogyMeshRenderer::cityCollision(uint32_t* act) const noexcept {
     if (act) *act = impl_->collisionAct;

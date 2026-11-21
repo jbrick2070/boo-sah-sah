@@ -39,6 +39,8 @@ ShanghaiPolicePose shanghaiPolicePose(float riverSeconds, float motionScale) noe
 inline constexpr uint32_t kParcelCase=173, kParcelLine=174, kParcelDock=175;
 inline constexpr std::array<float,3> kParcelDockPosition{3.35f,0.f,8.53f};
 Bmesh buildParcelHardware(uint32_t part);
+// "Last Light": the banner's mast (kBannerMast) or its silk (kBannerCloth), include/boo/wind_banner.hpp.
+Bmesh buildWindBanner(uint32_t part);
 inline constexpr uint32_t kObservatoryLiftShaft=180, kObservatoryLiftCab=181;
 inline constexpr uint32_t kWaterfrontLiftRails=182, kWaterfrontLiftCab=183;
 Bmesh buildCityLift(uint32_t part);

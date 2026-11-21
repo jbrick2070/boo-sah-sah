@@ -45,6 +45,7 @@ public:
     // The buildings of the city last drawn (act 1 Shenzhen or 2 Taipei) as world-space boxes. Filled
     // on the first canonical frame of each act; `act` reports which (UINT32_MAX before any).
     const std::vector<CityCollisionBox>& cityCollision(uint32_t* act) const noexcept;
+    BakedClothInfo bakedCloth() const noexcept; // the baked PhysX cloth played back in the last frame
     std::vector<CityCollisionBox> buildCityCollision(uint32_t act); // the same, for a city not being drawn
     bool reserveWorkoutBirds(uint32_t birds);
     FlockFocus flockFocus() const noexcept; // where they were, for the bird camera

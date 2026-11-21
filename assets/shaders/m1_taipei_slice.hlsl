@@ -3307,7 +3307,20 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if (tablePoint.y - physxTop < 1.0) sdr = hudInk(uiAlpha, colJade * 0.5);
                 sdr = hudOver(uiAlpha, sdr, colJade, sampleWord8(px, at, sc, 80u, 72u, 89u, 83u, 88u, 32u, 32u, 32u)); // PHYSX
                 float2 nameAt = at + float2(compactTable ? 40.0 : 52.0, 0) * uiScale;
-                if (genre == 0u) {
+                if (genre == 0u && (bits & 64u) != 0u) {
+                    // BAKED  CLOTH  3.40 M   287 NODES: PhysX cloth simulated offline, playing back now.
+                    sdr = hudOver(uiAlpha, sdr, colJade, sampleWord8(px, nameAt, sc, 66u, 65u, 75u, 69u, 68u, 32u, 32u, 32u)); // BAKED
+                    if (!compactTable) {
+                        const float ts = sc * 0.85;
+                        float2 f = nameAt + float2(36.0, 0) * uiScale;
+                        float t = sampleWord8(px, f, ts, 67u, 76u, 79u, 84u, 72u, 32u, 32u, 32u);                       // CLOTH
+                        t = max(t, sampleFixedMs6(px, f + float2(30.0, 0) * uiScale, ts, gPhysx.y));
+                        t = max(t, sampleGlyph(px, f + float2(30.0 + 34.0, 0) * uiScale, ts, 77u));                     // M
+                        t = max(t, sampleUint6(px, f + float2(74.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
+                        t = max(t, sampleWord8(px, f + float2(108.0, 0) * uiScale, ts, 78u, 79u, 68u, 69u, 83u, 32u, 32u, 32u)); // NODES
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, t);
+                    }
+                } else if (genre == 0u) {
                     sdr = hudOver(uiAlpha, sdr, colCyan * 0.85, sampleWord4(px, nameAt, sc, 79u, 70u, 70u, 32u)); // OFF
                 } else {
                     const float3 c = state == 2u ? colAmber : (state == 0u ? float3(0.98, 0.35, 0.40) : colCyan * 0.85);

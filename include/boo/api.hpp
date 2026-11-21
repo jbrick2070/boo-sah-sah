@@ -88,6 +88,15 @@ struct CityCollisionBox {
 
 // PhysX rigid bodies to draw this frame (the PhysX suite's rigid genre). Spheres drawn with the
 // renderer's marble meshes: body i uses marble look `look[i]`, and bodies sharing a look are contiguous.
+// Baked PhysX cloth being played back this frame (the canopy, the "Last Light" banner), for the
+// dashboard: it reads BAKED, never LIVE, since nothing is simulated at run time.
+struct BakedClothInfo {
+    bool active = false;
+    uint32_t nodes = 0;       // stored grid nodes
+    float keyRate = 0.0f;     // keys a second
+    float widestOffset = 0.0f; // metres from the rest shape, this frame
+};
+
 struct PhysxBodyFrame {
     uint32_t count = 0;
     const float* poses = nullptr;         // 8 floats a body: position xyz, rotation quaternion xyzw, radius

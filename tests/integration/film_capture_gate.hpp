@@ -997,6 +997,7 @@ bool testEffectsDetailCaptures() {
                 auto compact = ctx;
                 compact.showOverlay = true;
                 compact.hudMode = 1;
+                fx.resetTo(ctx.filmTimeSeconds); // start from the same history as the clean render it is compared with
                 BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(compact, hud, w, h, scratch, &error));
                 BOO_CHECK(writeCapturePng(out / "film_260s_compact.png", scratch, w, h));
                 BOO_CHECK(fx.readLastRenderedCanvasForTest(scratch, w, h, &error, &repeated10));
@@ -1005,10 +1006,14 @@ bool testEffectsDetailCaptures() {
             previous.swap(rgba);
         }
         // A beat left over from the last live audio update must disappear immediately when reduced flash is enabled.
+        // Each render advances frame history (particles, temporal filters), so only renders that start from
+        // the same reset can be compared.
         ctx.reducedFlash = true;
         ctx.audioReactive = {};
+        fx.resetTo(ctx.filmTimeSeconds);
         BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, w, h, &error, &rgb10));
         ctx.audioReactive.beat = 1.0f;
+        fx.resetTo(ctx.filmTimeSeconds);
         BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, scratch, w, h, &error, &repeated10));
         BOO_CHECK(repeated10 == rgb10);
         fx.shutdown();

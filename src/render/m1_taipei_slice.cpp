@@ -3029,6 +3029,9 @@ FlockFocus M1TaipeiSliceEffect::flockFocus() const noexcept {
 uint32_t M1TaipeiSliceEffect::birdCount() const noexcept {
     return impl_ && impl_->trilogyMesh ? impl_->trilogyMesh->birdCount() : 0u;
 }
+BakedClothInfo M1TaipeiSliceEffect::bakedCloth() const noexcept {
+    return impl_ && impl_->trilogyMesh ? impl_->trilogyMesh->bakedCloth() : BakedClothInfo{};
+}
 const std::vector<CityCollisionBox>& M1TaipeiSliceEffect::cityCollision(uint32_t* act) const noexcept {
     static const std::vector<CityCollisionBox> none;
     if (impl_ && impl_->trilogyMesh) return impl_->trilogyMesh->cityCollision(act);
@@ -4089,6 +4092,12 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     pc.physx[1] = hud.physx.stepGpuMs > 0.0f ? hud.physx.stepGpuMs : hud.physx.stepWallMs;
     pc.physx[2] = hud.physx.renderGpuMs;
     pc.physx[3] = hud.physx.counters[0];
+    if (hud.physxGenre == 0u && hud.bakedCloth.active) {
+        // Bit 6: baked PhysX cloth on screen with the dial off. y: its widest offset now, w: its nodes.
+        pc.physx[0] = static_cast<float>(64u);
+        pc.physx[1] = hud.bakedCloth.widestOffset;
+        pc.physx[3] = static_cast<float>(hud.bakedCloth.nodes);
+    }
 
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;
     uint8_t* mappedCb = nullptr;

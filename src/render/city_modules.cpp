@@ -1,4 +1,5 @@
 #include "boo/city_modules.hpp"
+#include "boo/wind_banner.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -525,6 +526,77 @@ Bmesh buildCityLift(uint32_t part) {
         b.box(11,0.f,-.957f,.045f,.041f,.42f,3.00f);
         b.tank(trim,0.f,0.f,3.20f,2.25f,2.98f,3.22f);
         b.box(light,0.f,-1.09f,2.42f,.045f,3.01f,3.12f);
+    }
+    return b.finish();
+}
+
+// "Last Light" (include/boo/wind_banner.hpp): the bronze mast and yard, and the silk banner they carry.
+// Built in world coordinates. The cloth's texture coordinates are its grid coordinates, u along its
+// length from the yard and v across, which is how the renderer maps it onto the baked cloth.
+Bmesh buildWindBanner(uint32_t part) {
+    ModuleBuilder b{part,{}};
+    if (part==kBannerMast) {
+        const float x=kBannerMastBase[0], z=kBannerMastBase[2];
+        b.tank(38,x,z,.12f,.12f,kBannerMastBase[1],kBannerMastTop);           // the mast
+        b.tank(8,x,z,.26f,.26f,kBannerMastBase[1],kBannerMastBase[1]+.10f);  // a brass collar at its foot
+        b.tank(8,x,z,.16f,.16f,kBannerMastTop,kBannerMastTop+.05f);          // and a finial cap
+        // A square-section bar between two points.
+        auto bar=[&](uint32_t mat, Point a, Point c, float half) {
+            const Point along=unit(subtract(c,a));
+            const Point side=unit(cross(along,Point{0.f,1.f,0.f}));
+            const Point up=cross(side,along);
+            auto at=[&](const Point& o, float s1, float s2) {
+                return Point{o[0]+side[0]*s1+up[0]*s2, o[1]+side[1]*s1+up[1]*s2, o[2]+side[2]*s1+up[2]*s2};
+            };
+            const std::array<std::array<float,2>,4> corners{{{-half,-half},{half,-half},{half,half},{-half,half}}};
+            for (size_t i=0;i<4;++i) {
+                const auto& p0=corners[i]; const auto& p1=corners[(i+1)%4];
+                b.quad(mat,at(a,p0[0],p0[1]),at(a,p1[0],p1[1]),at(c,p1[0],p1[1]),at(c,p0[0],p0[1]));
+            }
+            b.quad(mat,at(a,-half,-half),at(a,-half,half),at(a,half,half),at(a,half,-half));
+            b.quad(mat,at(c,-half,-half),at(c,half,-half),at(c,half,half),at(c,-half,half));
+        };
+        const Point top{kBannerTop[0],kBannerTop[1],kBannerTop[2]};
+        // The bracket from the mast head out to the yard, then the yard square to the wind.
+        bar(38,Point{x,kBannerTop[1],z},top,.025f);
+        const float h=.52f*kBannerWidth;
+        bar(38,Point{top[0]-kBannerAcross[0]*h,top[1],top[2]-kBannerAcross[2]*h},
+               Point{top[0]+kBannerAcross[0]*h,top[1],top[2]+kBannerAcross[2]*h},.02f);
+        return b.finish();
+    }
+    // The banner: a two-sided sheet, 81 by 13 vertices a side, its faces 1.2 mm apart.
+    auto& surface=b.surfaces[{part,kBannerClothMaterial,0u,0u}];
+    const Point across{kBannerAcross[0],kBannerAcross[1],kBannerAcross[2]};
+    const Point normal=unit(cross(across,Point{0.f,-1.f,0.f})); // faces downwind
+    constexpr int nu=kBannerSimU, nv=kBannerSimV;
+    for (int side=0; side<2; ++side) {
+        const float sign=side ? -1.f : 1.f;
+        const auto first=static_cast<uint32_t>(surface.vertices.size());
+        for (int i=0;i<nu;++i)
+            for (int j=0;j<nv;++j) {
+                const float u=float(i)/float(nu-1), v=float(j)/float(nv-1);
+                const auto pos=bannerRestPoint(u,v);
+                BmeshVertex vertex{};
+                for (int axis=0;axis<3;++axis) {
+                    vertex.positionMaterial[axis]=pos[size_t(axis)]+sign*.0006f*normal[size_t(axis)];
+                    vertex.normalPart[axis]=sign*normal[size_t(axis)];
+                    vertex.tangentSign[axis]=across[size_t(axis)];
+                }
+                vertex.positionMaterial[3]=float(kBannerClothMaterial);
+                vertex.normalPart[3]=float(part);
+                vertex.tangentSign[3]=sign;
+                vertex.uvThicknessRoughness[0]=u;
+                vertex.uvThicknessRoughness[1]=v;
+                vertex.uvThicknessRoughness[2]=.0012f;
+                vertex.uvThicknessRoughness[3]=.45f;
+                surface.vertices.push_back(vertex);
+            }
+        for (int i=1;i<nu;++i)
+            for (int j=1;j<nv;++j) {
+                const uint32_t a=first+uint32_t((i-1)*nv+(j-1)), c=first+uint32_t(i*nv+(j-1)), d=first+uint32_t(i*nv+j), e=first+uint32_t((i-1)*nv+j);
+                if (side) { for (uint32_t k : {a,c,d,a,d,e}) surface.indices.push_back(k); }
+                else      { for (uint32_t k : {a,d,c,a,e,d}) surface.indices.push_back(k); }
+            }
     }
     return b.finish();
 }

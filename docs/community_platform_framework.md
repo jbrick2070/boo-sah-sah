@@ -2,6 +2,8 @@
 
 Draft v0.1, 2026-11-20. Working title: **Orchid Commons** (rename freely).
 
+> **Status, 2026-11-21:** the network and multi-world design has moved to the Demo-Verse repository (see [community_platform_implementation_plan.md](community_platform_implementation_plan.md)), where Orchid Commons is the name of Boo Sah Sah's founding world. Keep this draft for its readout, Store and safety analysis. Where it disagrees with Demo-Verse, Demo-Verse wins.
+
 Tags used below: **[exists]** I read it in this repo. **[refactor]** it exists but is not shaped for this yet. **[new]** it does not exist. Anything without a tag is a proposal.
 
 ## 0. What this is

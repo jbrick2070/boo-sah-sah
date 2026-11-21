@@ -1694,6 +1694,7 @@ bool testUiStringCatalogs() {
 #include "workout_governor_tests.hpp"
 #include "startup_progress_tests.hpp"
 #include "physx_suite_tests.hpp"
+#include "last_light_tests.hpp"
 
 int main() {
     boo::Logger::instance().setConsoleEnabled(false);
@@ -1705,6 +1706,7 @@ int main() {
     runTest("WorkoutGovernor", testWorkoutGovernor);
     runTest("StartupProgress", testStartupProgress);
     runTest("PhysxSuite", testPhysxSuite);
+    runTest("LastLight", testLastLight);
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
     runTest("FilmOrbits", testFilmOrbits);
     runTest("AircraftHeroFraming",testAircraftHeroFraming);

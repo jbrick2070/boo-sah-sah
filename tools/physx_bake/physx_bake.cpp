@@ -9,9 +9,11 @@
 //   boo_physx_bake iris [output.bphys]    Madame N's iris as a geared mechanism, over its opening range
 //   boo_physx_bake damper [output.bphys]  Taipei 101's tuned mass damper swinging in the tower, the whole film
 //   boo_physx_bake cloth [output.bphys]   the canopy ribbons as GPU cloth, where they are on screen (needs CUDA)
+//   boo_physx_bake banner [output.bphys]  "Last Light"'s silk banner in the terrace wind, film 0:00 to 0:45 (needs CUDA)
 
 #include "boo/baked_physics.hpp"
 #include "boo/canopy_cloth.hpp"
+#include "boo/wind_banner.hpp"
 #include "boo/city_modules.hpp"
 #include "boo/wind_field.hpp"
 
@@ -469,10 +471,170 @@ std::vector<boo::BakedGridTrack> bakeCloth(PxFoundation& foundation, PxPhysics& 
 }
 } // namespace
 
+namespace {
+// "Last Light"'s banner (include/boo/wind_banner.hpp): 1 m by 6 m of light silk pinned along its top to
+// the yard, streamed by the shared terrace wind over the opening's 45 seconds. Light silk pinned on one
+// edge swings by metres where the canopy, pinned all round, can only belly. GPU only, like the canopy;
+// the committed file is the truth.
+std::vector<boo::BakedGridTrack> bakeBanner(PxFoundation& foundation, PxPhysics& physics, PxCpuDispatcher& dispatcher) {
+    using namespace boo;
+    constexpr float kThickness = 0.002f;
+    constexpr float kArealDensity = 0.045f; // habotai silk, about 10 momme (0.030 was tried: it streams flatter but swings less)
+    constexpr float kWarmup = 12.0f;
+    constexpr double kBannerStep = 1.0 / 240.0; // fabric this light needs the finer step
+    PxCudaContextManagerDesc cudaDesc;
+    PxCudaContextManager* cuda = PxCreateCudaContextManager(foundation, cudaDesc, PxGetProfilerCallback());
+    if (!cuda || !cuda->contextIsValid()) {
+        std::printf("banner: PhysX could not start CUDA; the cloth solver runs only on the GPU\n");
+        if (cuda) cuda->release();
+        return {};
+    }
+    PxCookingParams cooking(physics.getTolerancesScale());
+    cooking.meshWeldTolerance = 0.0f;
+    cooking.buildTriangleAdjacencies = false;
+    cooking.buildGPUData = true;
+    cooking.midphaseDesc = PxMeshMidPhase::eBVH34;
+    cooking.meshPreprocessParams = PxMeshPreprocessingFlag::eENABLE_VERT_MAPPING;
+    const int nodes = kBannerSimU * kBannerSimV;
+    auto at = [](int i, int j) { return i * kBannerSimV + j; };
+    std::vector<PxU32> triangles;
+    for (int i = 1; i < kBannerSimU; ++i)
+        for (int j = 1; j < kBannerSimV; ++j) {
+            triangles.insert(triangles.end(), {PxU32(at(i - 1, j - 1)), PxU32(at(i, j - 1)), PxU32(at(i - 1, j))});
+            triangles.insert(triangles.end(), {PxU32(at(i - 1, j)), PxU32(at(i, j - 1)), PxU32(at(i, j))});
+        }
+    std::vector<PxVec3> rest(static_cast<size_t>(nodes));
+    for (int i = 0; i < kBannerSimU; ++i)
+        for (int j = 0; j < kBannerSimV; ++j) {
+            const auto r = bannerRestPoint(float(i) / float(kBannerSimU - 1), float(j) / float(kBannerSimV - 1));
+            rest[size_t(at(i, j))] = PxVec3(r[0], r[1], r[2]);
+        }
+
+    struct Pass { const char* name; float windScale; float rate; };
+    const Pass passes[] = {{kBannerWindTrack, 1.0f, kBannerWindRate}, {kBannerCalmTrack, kBannerCalmWind, kBannerCalmRate}};
+    std::vector<BakedGridTrack> tracks;
+    for (const Pass& pass : passes) {
+        PxSceneDesc desc(physics.getTolerancesScale());
+        desc.gravity = PxVec3(0.0f, -9.81f, 0.0f);
+        desc.cpuDispatcher = &dispatcher;
+        desc.filterShader = PxDefaultSimulationFilterShader;
+        desc.cudaContextManager = cuda;
+        desc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
+        desc.broadPhaseType = PxBroadPhaseType::eGPU;
+        desc.solverType = PxSolverType::eTGS;
+        PxScene* scene = physics.createScene(desc);
+        PxDeformableSurfaceMaterial* silk = physics.createDeformableSurfaceMaterial(2.0e7f, 0.3f, 0.4f, kThickness, 2.0e-5f);
+        silk->setBendingDamping(0.02f);
+        PxTriangleMeshDesc mesh;
+        mesh.points.count = PxU32(nodes);
+        mesh.points.stride = sizeof(PxVec3);
+        mesh.points.data = rest.data();
+        mesh.triangles.count = PxU32(triangles.size() / 3);
+        mesh.triangles.stride = 3 * sizeof(PxU32);
+        mesh.triangles.data = triangles.data();
+        PxTriangleMesh* triangleMesh = PxCreateTriangleMesh(cooking, mesh, physics.getPhysicsInsertionCallback());
+        if (!triangleMesh) { std::printf("banner: could not cook the sheet\n"); return {}; }
+        PxDeformableSurface* body = physics.createDeformableSurface(*cuda);
+        PxDeformableSurfaceMaterial* materials[] = {silk};
+        PxShape* shape = physics.createShape(PxTriangleMeshGeometry(triangleMesh), reinterpret_cast<PxDeformableSurfaceMaterial**>(materials), 1, true,
+                                             PxShapeFlag::eSIMULATION_SHAPE);
+        body->attachShape(*shape);
+        shape->setContactOffset(2.0f * kThickness);
+        shape->setRestOffset(kThickness);
+        shape->release();
+        triangleMesh->release();
+        scene->addActor(*body);
+        std::vector<PxVec3> velocity(static_cast<size_t>(nodes), PxVec3(0.0f));
+        PxVec4 *pos = nullptr, *vel = nullptr, *restPinned = nullptr;
+        PxDeformableSurfaceExt::allocateAndInitializeHostMirror(*body, rest.data(), velocity.data(), rest.data(), 1.0f, PxTransform(PxIdentity), cuda,
+                                                                pos, vel, restPinned);
+        PxDeformableSurfaceExt::distributeDensityToVertices(*body, kArealDensity / kThickness, kThickness, pos);
+        std::vector<float> invMass(static_cast<size_t>(nodes));
+        for (int j = 0; j < kBannerSimV; ++j) pos[at(0, j)].w = 0.0f; // the top row is lashed to the yard
+        for (int n = 0; n < nodes; ++n) invMass[size_t(n)] = pos[n].w;
+        PxDeformableSurfaceExt::copyToDevice(*body, PxDeformableSurfaceDataFlag::eALL, PxU32(nodes), pos, vel, restPinned);
+        PX_EXT_PINNED_MEMORY_FREE(*cuda, restPinned);
+        body->setLinearDamping(0.02f);
+        body->setSolverIterationCounts(24, 1);
+        body->setDeformableBodyFlag(PxDeformableBodyFlag::eDISABLE_SELF_COLLISION, true);
+        body->setSettlingThreshold(0.0f);
+        body->setSleepThreshold(0.0f);
+
+        BakedGridTrack track;
+        track.name = pass.name;
+        track.firstTime = kBannerFirst;
+        track.keyRate = pass.rate;
+        track.offsetScale = kBannerOffsetScale;
+        track.nodes = kBannerGridNodes;
+        const int stepsPerKey = int(std::lround(1.0 / kBannerStep / pass.rate));
+        const int warmSteps = int(std::lround(kWarmup / kBannerStep));
+        std::vector<PxVec3> normals(static_cast<size_t>(nodes));
+        float widest = 0.0f, lowestTip = 1e9f, highestTip = -1e9f;
+        const float patch = (kBannerLength * kBannerWidth) / float(nodes);
+        for (int step = 0;; ++step) {
+            const double t = double(kBannerFirst) - kWarmup + double(step) * kBannerStep;
+            if (t > double(kBannerLast) + 1e-6) break;
+            {
+                PxScopedCudaLock lock(*cuda);
+                cuda->getCudaContext()->memcpyDtoH(pos, reinterpret_cast<CUdeviceptr>(body->getPositionInvMassBufferD()), nodes * sizeof(PxVec4));
+                cuda->getCudaContext()->memcpyDtoH(vel, reinterpret_cast<CUdeviceptr>(body->getVelocityBufferD()), nodes * sizeof(PxVec4));
+            }
+            if (step >= warmSteps && (step - warmSteps) % stepsPerKey == 0) {
+                for (int gi = 0; gi < kBannerGridU; ++gi)
+                    for (int gj = 0; gj < kBannerGridV; ++gj) {
+                        const int n = at(gi * 2, gj * 2);
+                        const PxVec3 d = PxVec3(pos[n].x, pos[n].y, pos[n].z) - rest[size_t(n)];
+                        widest = std::max(widest, d.magnitude());
+                        for (float c : {d.x, d.y, d.z})
+                            track.offsets.push_back(int16_t(std::clamp(std::lround(c / kBannerOffsetScale), -32767l, 32767l)));
+                    }
+                const int tip = at(kBannerSimU - 1, kBannerSimV / 2);
+                lowestTip = std::min(lowestTip, pos[tip].y);
+                highestTip = std::max(highestTip, pos[tip].y);
+            }
+            // The wind on the silk: pressure along each node's normal, from the shared terrace breeze.
+            for (int i = 0; i < kBannerSimU; ++i)
+                for (int j = 0; j < kBannerSimV; ++j) {
+                    auto p = [&](int a, int b) { const PxVec4& q = pos[at(std::clamp(a, 0, kBannerSimU - 1), std::clamp(b, 0, kBannerSimV - 1))]; return PxVec3(q.x, q.y, q.z); };
+                    normals[size_t(at(i, j))] = (p(i + 1, j) - p(i - 1, j)).cross(p(i, j + 1) - p(i, j - 1)).getNormalized();
+                }
+            for (int n = 0; n < nodes; ++n) {
+                if (invMass[size_t(n)] == 0.0f) continue;
+                const float here[3] = {pos[n].x, pos[n].y, pos[n].z};
+                const auto w = windAt(here, float(t));
+                const PxVec3 relative = PxVec3(w[0], w[1], w[2]) * pass.windScale - PxVec3(vel[n].x, vel[n].y, vel[n].z);
+                const PxVec3 nrm = normals[size_t(n)];
+                const float across = relative.dot(nrm);
+                const PxVec3 dv = nrm * (0.5f * 1.2f * 1.2f * patch * across * std::fabs(across)) * (invMass[size_t(n)] * float(kBannerStep));
+                vel[n].x += dv.x; vel[n].y += dv.y; vel[n].z += dv.z;
+            }
+            {
+                PxScopedCudaLock lock(*cuda);
+                cuda->getCudaContext()->memcpyHtoD(reinterpret_cast<CUdeviceptr>(body->getVelocityBufferD()), vel, nodes * sizeof(PxVec4));
+                body->markDirty(PxDeformableSurfaceDataFlag::eVELOCITY);
+            }
+            scene->simulate(static_cast<PxReal>(kBannerStep));
+            scene->fetchResults(true);
+        }
+        std::printf("banner: %s, %u keys at %.0f Hz from %.1f s to %.1f s, widest offset %.2f m, tip height %.2f to %.2f m\n", track.name.c_str(),
+                    track.keyCount(), track.keyRate, track.firstTime, track.lastTime(), widest, lowestTip, highestTip);
+        tracks.push_back(std::move(track));
+        scene->removeActor(*body);
+        body->release();
+        PX_EXT_PINNED_MEMORY_FREE(*cuda, pos);
+        PX_EXT_PINNED_MEMORY_FREE(*cuda, vel);
+        silk->release();
+        scene->release();
+    }
+    cuda->release();
+    return tracks;
+}
+} // namespace
+
 int main(int argc, char** argv) {
     const std::string what = argc > 1 ? argv[1] : "";
-    if (what != "winch" && what != "iris" && what != "damper" && what != "cloth") {
-        std::printf("usage: boo_physx_bake winch|iris|damper|cloth [output.bphys]\n");
+    if (what != "winch" && what != "iris" && what != "damper" && what != "cloth" && what != "banner") {
+        std::printf("usage: boo_physx_bake winch|iris|damper|cloth|banner [output.bphys]\n");
         return 2;
     }
     PxFoundation* foundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrors);
@@ -485,11 +647,15 @@ int main(int argc, char** argv) {
     else if (what == "cloth") {
         out.grids = bakeCloth(*foundation, *physics, *dispatcher);
         if (out.grids.empty()) return 1;
+    } else if (what == "banner") {
+        out.grids = bakeBanner(*foundation, *physics, *dispatcher);
+        if (out.grids.empty()) return 1;
     }
     else out.tracks = bakeIris(*physics, *dispatcher);
     const std::string path = argc > 2 ? argv[2]
         : (what == "winch" ? "assets/physics/parcel_winch.bphys" : what == "damper" ? "assets/physics/taipei_damper.bphys"
-           : what == "cloth" ? "assets/physics/canopy_cloth.bphys" : "assets/physics/iris_mechanism.bphys");
+           : what == "cloth" ? "assets/physics/canopy_cloth.bphys" : what == "banner" ? "assets/physics/wind_banner.bphys"
+           : "assets/physics/iris_mechanism.bphys");
     std::string error;
     const bool ok = boo::saveBakedPhysics(path, out, &error);
     std::printf("%s %s\n", ok ? "wrote" : "could not write", path.c_str());
