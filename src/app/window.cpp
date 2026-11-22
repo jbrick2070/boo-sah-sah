@@ -386,6 +386,10 @@ void AppWindow::destroy() noexcept {
     }
 }
 
+void AppWindow::hide() noexcept {
+    if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
+}
+
 bool AppWindow::pumpMessages() {
     MSG msg{};
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {

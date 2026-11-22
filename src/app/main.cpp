@@ -3704,15 +3704,38 @@ int main(int argc, char** argv) {
             " s (GPU p50=" + std::to_string(summary.gpuFrameStats.p50Ms).substr(0, 5) +
             " ms, p95=" + std::to_string(summary.gpuFrameStats.p95Ms).substr(0, 5) + " ms).");
 
+    // For anyone following shutdown in a debug log: how long each step took.
+    auto shutdownStep = [last = std::chrono::steady_clock::now()](const char* what) mutable {
+        const auto now = std::chrono::steady_clock::now();
+        char line[160]{};
+        std::snprintf(line, sizeof(line), "Step done in %.0f ms: %s",
+                      std::chrono::duration<double, std::milli>(now - last).count(), what);
+        BOO_LOG_DEBUG("Shutdown", line);
+        last = now;
+    };
     d3d.retireGpuForShutdown();
+    shutdownStep("GPU retired");
     if (settings.enableD3DDebug && (summary.d3dDebugErrors != 0 || summary.d3dDebugWarnings != 0)) runtimeExitCode = 1;
     mediaIngest.shutdown();
+    shutdownStep("media ingest");
     spoutSender.shutdown();
+    shutdownStep("Spout");
     clock.shutdown();
+    shutdownStep("clock");
     orchestrator.shutdown();
-    d3d.shutdown();
-    window.destroy();
+    shutdownStep("effects");
+    // The sound stops and the window leaves the screen before the device goes: after a start
+    // that compiled shaders (the first after an update, with an empty driver cache), releasing
+    // the D3D12 device waits while the driver finishes its own shader work, which can take
+    // most of a minute. The app should look and sound closed meanwhile.
     audio.shutdown();
+    shutdownStep("audio");
+    window.hide();
+    shutdownStep("window hidden");
+    d3d.shutdown();
+    shutdownStep("D3D12");
+    window.destroy();
+    shutdownStep("window");
     Logger::instance().closeLogFile();
     return runtimeExitCode;
 }

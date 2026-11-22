@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <limits>
 
@@ -426,9 +427,21 @@ bool D3D12Context::initialize(
 
 void D3D12Context::shutdown() noexcept {
     if (!impl_) return;
+    auto t = std::chrono::steady_clock::now();
+    auto lap = [&t](const char* what) {
+        const auto now = std::chrono::steady_clock::now();
+        char line[160]{};
+        std::snprintf(line, sizeof(line), "D3D12 shutdown: %s took %.0f ms", what,
+                      std::chrono::duration<double, std::milli>(now - t).count());
+        BOO_LOG_DEBUG("Shutdown", line);
+        t = now;
+    };
     retireGpuForShutdown();
+    lap("GPU retire");
     impl_->frameGeneration.shutdown();
+    lap("frame generation (Streamline)");
     if (impl_->directNgxInitialized) shutdownNgxDevice(impl_->device.Get());
+    lap("NGX");
     if (impl_->waitableHandle) {
         CloseHandle(impl_->waitableHandle);
         impl_->waitableHandle = nullptr;
@@ -437,7 +450,10 @@ void D3D12Context::shutdown() noexcept {
         CloseHandle(impl_->fenceEvent);
         impl_->fenceEvent = nullptr;
     }
+    // After a start that compiled shaders, the driver finishes its own background shader work
+    // when the device is released: measured at 43 s after a cold start, under 0.1 s when warm.
     impl_.reset();
+    lap("device and resources released");
     presentCount_ = 0;
     presentStallCount_ = 0;
 }

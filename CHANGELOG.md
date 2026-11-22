@@ -2,6 +2,10 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## Unreleased
+
+- The app looks and sounds closed the moment you close it. After a start that compiled shaders (the first after an update), releasing the D3D12 device waits while the graphics driver finishes its own background shader work: 43 s after a cold start, under 0.1 s once the cache is warm. Until now the music played on and, when closed with Esc, the window sat frozen on screen through that wait. The sound now stops and the window leaves the screen and taskbar first; the driver then finishes out of sight, so its cache is still complete for the next start. `--log-level debug` logs each shutdown step's time.
+
 ## 1.1.11.0 — A faster first start
 
 - The first start after an update takes 58 s instead of 2½ minutes on an RTX 5080 Laptop GPU. After every app or driver update the graphics driver's shader cache is empty, and timing each stage showed where the time went: 44 s for each of the two shaders that draw the dashboard over the film (plain, and with frame-generation inputs), about 16 s for each of the two ray-traced city shaders, and under half a second for everything else. The CUDA, tensor and codec runtimes load in under 0.1 s. Those big pipelines now compile side by side on threads of their own while the rest of start-up carries on (`PipelineCompiler`).

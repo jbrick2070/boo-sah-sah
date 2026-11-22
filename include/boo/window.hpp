@@ -121,6 +121,8 @@ public:
         bool noActivate);
 
     void destroy() noexcept;
+    // Takes the window off the screen and the taskbar at once, while the app finishes closing.
+    void hide() noexcept;
 
     // Pumps Win32 messages without blocking; returns false when WM_QUIT received.
     bool pumpMessages();
