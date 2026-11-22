@@ -206,6 +206,11 @@ float3 sceneSunDir() {
     if (duskOpening() && time < 26.0) {
         return duskSunDir();
     }
+    // Over the open city the moon stands lower (30 degrees, from the south-south-east), so the towers'
+    // faces take a raking light and keep their form at night. The terrace keeps its high key.
+    if (act == 2u && ((showFlags & 64u) != 0u || showFlags == 0u)) {   // cityExterior(), defined below
+        return norm(float3(0.36, 0.52, -0.78));
+    }
     return norm(float3(-0.44, 0.74, -0.32));
 }
 
@@ -982,6 +987,39 @@ bool isCurtainWall(uint m) { return m == 5u || m == 13u || m == 14u; }
 
 bool isDistrictGlazing(uint m, uint partId) {
     return isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u || partId == 62u)));
+}
+
+// City street furniture (module part 63) and rooftop sets (64), src/render/city_modules.cpp. A tree or
+// a lamp is one mesh in one material, told apart by height in its own frame (0 at the ground, 1 at its
+// top), so each costs one instance. Trees: bark below 0.30 of the height, leaves varied tree by tree.
+// Lamps: a dark steel pole below the lit luminaire. Rooftop shrubs vary their leaves the same way.
+// Returns false where the surface does not glow (a lamp's pole).
+bool streetFurniture(uint partId, uint m, float localY, uint seed, inout float3 base, inout float4 orm) {
+    if (partId < 63u || partId > 65u) return true;
+    float h = hash21(float2(float(seed & 4095u) * 0.137, 7.31));
+    if (partId == 65u && m == 38u) {
+        // A grove's trunks (part 65 keeps them in their own material).
+        base = float3(0.15, 0.115, 0.085) * (0.80 + 0.40 * h);
+        orm = float4(1.0, 0.86, 0.0, 0.0);
+        return true;
+    }
+    if (m == 10u) {
+        if (partId == 63u && localY < 0.30) {
+            base = float3(0.15, 0.115, 0.085) * (0.80 + 0.40 * h);
+            orm = float4(1.0, 0.86, 0.0, 0.0);
+        } else {
+            // Subtropical evergreens: camphor, banyan and Taiwan ash in deep greens, a few yellow-green.
+            base *= lerp(float3(0.66, 0.84, 0.60), float3(1.12, 1.04, 0.70), h * h);
+            if (partId == 63u) base *= 0.70 + 0.40 * saturate((localY - 0.30) / 0.70);
+        }
+        return true;
+    }
+    if (partId == 63u && m == 16u && localY < 0.90) {
+        base = float3(0.085, 0.09, 0.10);
+        orm = float4(1.0, 0.40, 0.80, 0.0);
+        return false;
+    }
+    return true;
 }
 
 // Unit-room slabs in tangent space. Face slices are back, left, right, floor and ceiling.
@@ -1919,6 +1957,8 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float2 hNorXY = gNormalTex.SampleLevel(anisoWrap, hCoord, mipLod).xy * 2.0 - 1.0;
         float4 hOrm   = gOrmtTex.SampleLevel(anisoWrap, hCoord, mipLod);
         uint hitPart = (sceneInstances[q.CommittedInstanceID()].flags & 0xffffu);
+        float hitLocalY = v0.p.y + bary.x * (v1.p.y - v0.p.y) + bary.y * (v2.p.y - v0.p.y);
+        bool hitGlows = streetFurniture(hitPart, hm, hitLocalY, sceneInstances[q.CommittedInstanceID()].buildingSeed, hBase, hOrm);
         if (citySkyFinish(hitPart, hm, hBase, hOrm)) hNorXY = float2(0.0, 0.0);
 
         float3 wT = mul(o2w, objT);
@@ -2055,6 +2095,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float3 hitEmission = districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT);
         if (hitPart >= 86u && hitPart <= 88u) hitEmission = relayLight(hitPart, hm, hitNGeom, -direction);
         if (hitPart == 172u) hitEmission = blimpEmission(hm);
+        if (!hitGlows) hitEmission = 0.0.xxx;
         if (hitPart == 62u && hm == 15u && abs(hitNGeom.y) < 0.55)
             hitEmission = shopLightbox(hitUv, hitUvWidth * taipeiKit.w / 0.08, sceneInstances[q.CommittedInstanceID()].buildingSeed);
         float3 hitCol = direct2 + ibl2 + stageTrim + streetLight + hitEmission;
@@ -2491,6 +2532,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 B = cross(nGeom, T) * bSign;
 
     float3 base = albSample.rgb;
+    bool furnitureGlows = streetFurniture(partId, matId, i.localY, i.seed, base, ormSample);
     // A reflecting pool is deep, dark-bottomed water: at dusk its body would otherwise be lit by the low sun
     // and the warm sky and swamp the few per cent the surface reflects, which is all a pool can reflect
     // seen from above. In "Last Light" the water body is dark, so the sky, the tower and the kites carry it.
@@ -3142,6 +3184,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 specIndirectTerm = (specRadiance * (f0 * envBrdf.x + envBrdf.y) + coatRefl * coatWeight) * specOcclusion;
 
     float3 emissiveTerm = stageTrim + streetLight + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
+    if (!furnitureGlows) emissiveTerm = 0.0.xxx;
     if (partId >= 86u && partId <= 88u) emissiveTerm = relayLight(partId, matId, nGeom, v);
     if (partId == 172u) emissiveTerm = blimpEmission(matId);
     if (partId == 62u && matId == 15u && abs(nGeom.y) < 0.55)

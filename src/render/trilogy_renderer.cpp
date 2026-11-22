@@ -1033,7 +1033,8 @@ struct TrilogyMeshRenderer::Impl {
     void computeCityCollision(uint32_t forAct, const float* kitRows, std::vector<CityCollisionBox>& out) const {
         out.clear();
         for (const auto& location : city.placements) {
-            if (location.kit!=forAct || location.modules[0]>=moduleBounds.size()) continue;
+            // Street furniture (part 63), rooftop sets (64) and groves (65) are not buildings: birds and bodies ignore them.
+            if (location.kit!=forAct || location.modules[0]>=moduleBounds.size() || (location.part>=63u && location.part<=65u)) continue;
             const auto& b=moduleBounds[location.modules[0]];
             float rows[12];
             composeAffine(kitRows,location.rows.data(),rows);

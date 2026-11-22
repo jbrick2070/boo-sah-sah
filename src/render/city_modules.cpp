@@ -91,6 +91,68 @@ struct ModuleBuilder {
     void box(uint32_t mat, float x, float z, float w, float d, float bottom, float top) {
         loft(mat,{x,z,w,d,bottom},{x,z,w,d,top});
     }
+    void tri(uint32_t mat, Point a, Point b, Point c) {
+        auto& surface = surfaces[{part,mat,detailTier,detailTier ? detailSolid : 0u}];
+        const uint32_t first = static_cast<uint32_t>(surface.vertices.size());
+        const Point tangent = unit(subtract(b, a));
+        const Point normal = unit(cross(subtract(b, a), subtract(c, a)));
+        // Texture coordinates in metres in the triangle's own plane.
+        const float metres = facadeMeters[0] == 0.f ? 1.f : facadeMeters[0];
+        const Point ab = subtract(b, a), ac = subtract(c, a);
+        const float abLength = std::sqrt(ab[0]*ab[0]+ab[1]*ab[1]+ab[2]*ab[2]);
+        const float along = ac[0]*tangent[0]+ac[1]*tangent[1]+ac[2]*tangent[2];
+        const Point rest{ac[0]-tangent[0]*along, ac[1]-tangent[1]*along, ac[2]-tangent[2]*along};
+        const std::array<std::array<float,2>,3> uv{{{0.f,0.f},{abLength*metres,0.f},
+            {along*metres,std::sqrt(rest[0]*rest[0]+rest[1]*rest[1]+rest[2]*rest[2])*metres}}};
+        const std::array<Point,3> positions{a,b,c};
+        for (size_t i = 0; i < 3; ++i) {
+            BmeshVertex vertex{};
+            std::copy_n(positions[i].begin(),3,vertex.positionMaterial);
+            std::copy_n(normal.begin(),3,vertex.normalPart);
+            std::copy_n(tangent.begin(),3,vertex.tangentSign);
+            vertex.positionMaterial[3] = static_cast<float>(mat);
+            vertex.normalPart[3] = static_cast<float>(part);
+            vertex.tangentSign[3] = 1.f;
+            vertex.uvThicknessRoughness[0] = uv[i][0];
+            vertex.uvThicknessRoughness[1] = uv[i][1];
+            vertex.uvThicknessRoughness[2] = .015f;
+            vertex.uvThicknessRoughness[3] = .6f;
+            surface.vertices.push_back(vertex);
+        }
+        for (uint32_t i : {0u,1u,2u}) surface.indices.push_back(first + i);
+    }
+    // A faceted ellipsoid (a crown of leaves, a shrub). Each vertex's radius varies a little with the
+    // seed, so neighbouring crowns differ and the outline is not a perfect ball.
+    void blob(uint32_t mat, Point c, Point r, uint32_t segments, uint32_t rings, uint32_t seed, float jitter) {
+        if(detailTier) ++detailSolid;
+        constexpr float pi = 3.14159265f;
+        auto wobble = [&](uint32_t k) {
+            return 1.f + jitter*(float(mixBits(seed*0x9e3779b9u + k)&1023u)/1023.f - .5f);
+        };
+        std::vector<Point> grid(size_t(rings-1)*segments);
+        for (uint32_t k = 1; k < rings; ++k) {
+            const float polar = pi*float(k)/float(rings);
+            for (uint32_t j = 0; j < segments; ++j) {
+                // Azimuth decreases, the winding the loft uses, so every face points outward.
+                const float azimuth = -2.f*pi*(float(j)+.5f*float(k&1u))/float(segments);
+                const float w = wobble(k*64u+j);
+                grid[size_t(k-1)*segments+j] = {c[0]+r[0]*std::sin(polar)*std::cos(azimuth)*w,
+                    c[1]+r[1]*std::cos(polar)*(.94f+.06f*w), c[2]+r[2]*std::sin(polar)*std::sin(azimuth)*w};
+            }
+        }
+        const Point top{c[0],c[1]+r[1]*(.96f+.08f*wobble(5u)),c[2]}, bottom{c[0],c[1]-r[1]*.85f,c[2]};
+        for (uint32_t j = 0; j < segments; ++j) {
+            const uint32_t n = (j+1)%segments;
+            tri(mat,grid[j],grid[n],top);
+            for (uint32_t k = 0; k + 2 < rings; ++k) {
+                const Point* upper = &grid[size_t(k)*segments];
+                const Point* lower = &grid[size_t(k+1)*segments];
+                quad(mat,lower[j],lower[n],upper[n],upper[j]);
+            }
+            const Point* last = &grid[size_t(rings-2)*segments];
+            tri(mat,last[n],last[j],bottom);
+        }
+    }
     void tank(uint32_t mat,float x,float z,float w,float d,float bottom,float top) {
         if(detailTier) ++detailSolid;
         constexpr std::array<Vec2,8> outline{{{-.21f,-.5f},{-.5f,-.21f},{-.5f,.21f},{-.21f,.5f},
@@ -301,6 +363,11 @@ Bmesh makeModule(uint32_t kit, uint32_t style, uint32_t glazing, uint32_t lod) {
         b.detailTier=2;
         if(lod<2) b.box(2,.035f,.065f,.90f,.82f,.723f,.741f);
     }
+    if(lod < 2 && style < 3) {
+        // Lit shopfronts and lobbies round the foot of every tower, so the street level glows at night.
+        b.detailTier=0;
+        b.box(15,0,0,1.004f,1.004f,.004f,.033f);
+    }
     if(lod == 0 && style < 3) {
         b.detailTier=1;
         // Recessed ground-floor arcade behind street columns and a shade canopy.
@@ -308,6 +375,119 @@ Bmesh makeModule(uint32_t kit, uint32_t style, uint32_t glazing, uint32_t lod) {
         for(int i=0;i<5;++i) b.box(11,-.44f+.22f*float(i),-.527f,.032f,.034f,0,.115f);
     }
     return b.finish();
+}
+
+// ---- Street furniture (module part 63) and rooftop sets (part 64) ----
+// A tree, lamp or planter is one mesh in as few materials as possible, so each costs one instance:
+// the shader tells a tree's bark from its leaves, and a lamp's pole from its lit head, by height in
+// the module (see streetFurniture in m2_mesh.hlsl). Modules are authored in proportion inside a unit
+// cube and placed with a uniform scale in metres.
+constexpr uint32_t kFurniturePart = 63, kRooftopPart = 64, kGrovePart = 65;
+constexpr uint32_t kTreeRound = 20, kTreeTall = 21, kStreetLamp = 22, kPlanter = 23;
+constexpr uint32_t kRoofPlant = 24, kRoofGarden = 25, kRoofSign = 26;
+constexpr uint32_t kGroveA = 27, kGroveC = 29;
+bool isRooftopStyle(uint32_t style) { return style >= kRoofPlant && style <= kRoofSign; }
+bool isGroveStyle(uint32_t style) { return style >= kGroveA && style <= kGroveC; }
+
+// A grove: five to seven trees of mixed size in a 24 m patch, one instance for the lot. Crowns in the
+// foliage material, trunks in material 38, which the shader turns to bark for this part.
+Bmesh makeGrove(uint32_t style, uint32_t lod) {
+    ModuleBuilder b{kGrovePart,{}};
+    b.facadeMeters = {24.f,24.f,24.f};
+    const uint32_t variant = style-kGroveA, trees = 5+variant;
+    for (uint32_t i = 0; i < trees; ++i) {
+        const uint32_t h = mixBits(variant*97u+i*31u+7u);
+        auto random = [&](uint32_t channel) { return float(mixBits(h+channel)&1023u)/1023.f; };
+        const float angle = 6.2831853f*(float(i)+.35f*random(1))/float(trees);
+        const float distance = i == 0 ? .04f : .20f+.16f*random(2);
+        const float x = std::cos(angle)*distance, z = std::sin(angle)*distance;
+        const float size = .82f+.36f*random(3);
+        const float crownY = .25f*size, crownR = .13f*size;
+        // Trunks only close up: from 120 m they hide under the crowns, and each material is an instance.
+        if (lod == 0) b.loft(38,{x,z,.022f*size,.022f*size,0},{x,z,.014f*size,.014f*size,crownY});
+        if (lod == 2 && (i & 1u)) continue;            // far away: half the crowns, a little larger
+        const float grow = lod == 2 ? 1.3f : 1.f;
+        b.blob(10,{x,crownY+.02f,z},{crownR*grow,crownR*.82f*grow,crownR*grow},
+               lod == 0 ? 7u : (lod == 1 ? 6u : 5u),lod == 0 ? 4u : 3u,h,.24f);
+    }
+    return b.finish();
+}
+
+Bmesh makeStreetFurniture(uint32_t style, uint32_t lod) {
+    ModuleBuilder b{kFurniturePart,{}};
+    constexpr uint32_t segments[3]{9,7,5}, rings[3]{5,4,3};
+    if (style == kTreeRound || style == kTreeTall) {
+        // Taipei's street trees (camphor, Indian almond, Taiwan ash): a short trunk under a broad crown,
+        // or a narrower, taller crown. Bark is everything below 0.30 of the height.
+        b.facadeMeters = {10.f,10.f,10.f};
+        const bool tall = style == kTreeTall;
+        b.loft(10,{0,0,.05f,.05f,0},{0,0,.032f,.032f,.40f});
+        if (!tall && lod == 0) {
+            b.loft(10,{0,0,.03f,.03f,.30f},{.10f,.06f,.018f,.018f,.48f});
+            b.loft(10,{0,0,.03f,.03f,.30f},{-.09f,-.07f,.018f,.018f,.46f});
+        }
+        if (tall) {
+            b.blob(10,{0,.55f,0},{.25f,.25f,.25f},segments[lod],rings[lod],11u,.22f);
+            if (lod < 2) b.blob(10,{.02f,.79f,-.01f},{.19f,.19f,.19f},segments[lod],rings[lod],23u,.22f);
+        } else {
+            b.blob(10,{0,.64f,0},{.37f,.29f,.37f},segments[lod],rings[lod],5u,.24f);
+            if (lod < 2) b.blob(10,{.15f,.73f,-.08f},{.23f,.20f,.23f},segments[lod]-1,rings[lod],17u,.22f);
+            if (lod == 0) b.blob(10,{-.14f,.71f,.11f},{.24f,.19f,.24f},segments[lod]-1,rings[lod],29u,.22f);
+        }
+    } else if (style == kStreetLamp) {
+        // An 8 m pole with a short arm. Only the luminaire, above 0.90 of the height, glows.
+        b.facadeMeters = {8.f,8.f,8.f};
+        b.box(16,0,0,.024f,.024f,0,.885f);
+        b.box(16,.07f,0,.15f,.016f,.858f,.882f);
+        b.box(16,.16f,0,.13f,.05f,.905f,.95f);
+    } else {
+        // A stone planter with a shrub, set along the arcades.
+        b.facadeMeters = {2.4f,2.4f,2.4f};
+        b.box(39,0,0,.92f,.92f,0,.34f);
+        b.blob(10,{0,.59f,0},{.40f,.26f,.40f},segments[lod],rings[lod],41u,.25f);
+    }
+    return b.finish();
+}
+
+// What stands on a flat roof: a stair hut always, then plant (tank, condensers, a mast), a garden
+// (planters and a pergola) or a lit blade sign. Authored for a 12 m square roof patch.
+Bmesh makeRooftop(uint32_t style, uint32_t lod) {
+    ModuleBuilder b{kRooftopPart,{}};
+    b.facadeMeters = {12.f,12.f,12.f};
+    b.box(2,-.30f,.28f,.26f,.22f,0,.26f);
+    b.box(2,-.30f,.28f,.29f,.25f,.26f,.285f);
+    if (style == kRoofPlant) {
+        b.tank(11,.26f,.22f,.22f,.22f,0,.30f);
+        if (lod < 2) for (int i = 0; i < 3; ++i) b.box(11,-.06f+.16f*float(i),-.28f,.12f,.14f,0,.09f);
+        if (lod == 0) b.box(0,.36f,-.34f,.016f,.016f,0,.92f);
+    } else if (style == kRoofGarden) {
+        constexpr std::array<std::array<float,2>,4> beds{{{.10f,-.20f},{.30f,-.06f},{.14f,.16f},{-.12f,-.26f}}};
+        for (size_t i = 0; i < beds.size(); ++i) {
+            if (lod == 2 && i > 1) break;
+            b.box(39,beds[i][0],beds[i][1],.17f,.17f,0,.06f);
+            b.blob(10,{beds[i][0],.12f,beds[i][1]},{.11f,.08f,.11f},lod == 0 ? 7u : 5u,3u,uint32_t(53+i),.3f);
+        }
+        if (lod < 2) {
+            for (float x : {-.05f,.35f}) for (float z : {.05f,.40f}) b.box(0,x,z,.02f,.02f,0,.24f);
+            b.box(0,.15f,.225f,.44f,.39f,.24f,.255f);
+        }
+    } else {
+        for (float x : {-.18f,.18f}) b.box(0,x,.30f,.022f,.022f,0,.36f);
+        b.box(6,0,.30f,.46f,.026f,.17f,.40f);
+        if (lod < 2) for (int i = 0; i < 2; ++i) b.box(11,.05f+.18f*float(i),-.26f,.13f,.15f,0,.10f);
+    }
+    return b.finish();
+}
+
+// The highest flat roof of each generated tower profile, in the module's unit frame: centre x and z,
+// size along x and z, and the roof's height. Clutter and crowns stand on it. Sails have no flat roof.
+struct RoofPatch { float x, z, width, depth, top; bool flat; };
+RoofPatch towerRoof(uint32_t kit, uint32_t style) {
+    if (kit == 2 && style == 0) return {-.20f,-.19f,.55f,.44f,1.027f,true};
+    if (kit == 2 && style == 1) return {-.07f,.09f,.60f,.60f,1.029f,true};
+    if (kit == 1 && style == 0) return {-.27f,.08f,.30f,.70f,1.151f,true};
+    if (kit == 1 && style == 1) return {0,0,0,0,0,false};
+    return {.12f,.19f,.52f,.42f,1.06f,true};
 }
 
 // The BMESH exporter splits vertices at UV seams and flat normals. Group connected
@@ -408,6 +588,236 @@ void addXinyiStreetFronts(std::vector<Site>& sites) {
             Footprint plot{(x-18.5f)/scale,(row.z-60.f)/scale,kFrontage,kPlotDepth,
                            row.facesNorth ? -1.f : 1.f,0.f};
             sites.push_back({plot,.01f/scale,streetHeight(style),2,13,style,seed});
+        }
+    }
+}
+
+// A furniture or rooftop module at a point in kit coordinates, turned by yaw and scaled uniformly.
+struct FreePlacement { uint32_t style, part, seed; float x, y, z, yaw, scale; };
+
+// Rooftops: each generated tower with a flat roof gets either a crown (the same feature profiles the
+// surveyed buildings carry) or a set of roof clutter, so the skyline is not a field of identical tops.
+void addRooftops(const std::vector<Site>& sites, uint32_t kit, std::vector<Site>& crowns,
+                 std::vector<FreePlacement>& out) {
+    const float scale = kit == 2 ? .08f : 1.f;           // kit units -> world units
+    const float kitPerMetre = kit == 2 ? 1.f : .08f;     // kit units per metre
+    for (const Site& site : sites) {
+        if (site.style >= 3) continue;                    // towers only, not arcades, crowns or plates
+        const RoofPatch roof = towerRoof(kit, site.style);
+        if (!roof.flat) continue;
+        const auto& p = site.plot;
+        // The roof patch in kit coordinates, by the same transform as the tower's placement.
+        const float lx = roof.x*p.width, lz = roof.z*p.depth;
+        const float cx = p.x + lx*p.cosine - lz*p.sine, cz = p.z + lx*p.sine + lz*p.cosine;
+        const float top = site.bottom + roof.top*site.height;
+        const float w = roof.width*p.width, d = roof.depth*p.depth;
+        const uint32_t pick = mixBits(site.seed ^ 0x5bd1e995u);
+        if (pick % 10u < 3u && site.height >= 18.f*kitPerMetre) {
+            constexpr uint32_t profiles[]{3,7,8};
+            const float rise = std::clamp(.23f*site.height, 6.f*kitPerMetre, 5.5f/scale);
+            crowns.push_back({{cx,cz,w*.92f,d*.92f,p.cosine,p.sine},top-.002f*site.height,rise,
+                              kRooftopPart,site.material,profiles[(pick>>4)%3u],pick});
+        } else {
+            const float metres = std::clamp(std::min(w,d)/kitPerMetre*.75f,9.f,28.f);
+            const float yaw = std::atan2(p.sine,p.cosine)+1.5707963f*float((pick>>6)&3u);
+            out.push_back({kRoofPlant+(pick>>9)%3u,kRooftopPart,pick,cx,top,cz,yaw,metres*kitPerMetre});
+        }
+    }
+}
+
+// Street trees and lamps along the mapped Taipei roads. The road ribbons (parts 7 and 8, material 1,
+// tools/taipei_city_mesh.py) carry U = metres along the road / 35 and V = metres across / 35. Each kerb
+// is walked at a steady spacing: a tree stands about 2 m onto the pavement, and every third spot a lamp
+// at the kerb. An occupancy grid of road surfaces and buildings keeps them out of junctions and walls,
+// and nothing is placed beside an elevated road. Planters line the Xinyi arcades below the terrace.
+void plantStreets(const Bmesh& mesh, const std::vector<Site>& sites, std::vector<FreePlacement>& out) {
+    // Only near what the film looks at: round the sanctuary terrace and round Taipei 101 (kit metres).
+    constexpr std::array<Vec2,2> centres{{{-231.f,-710.f},{0.f,0.f}}};
+    constexpr float reach = 900.f, cell = 1.f, groundCell = 8.f;
+    constexpr float x0 = -231.f-reach, x1 = reach, z0 = -710.f-reach, z1 = reach;
+    const int nx = int((x1-x0)/cell)+1, nz = int((z1-z0)/cell)+1;
+    const int gx = int((x1-x0)/groundCell)+1, gz = int((z1-z0)/groundCell)+1;
+    constexpr uint8_t kRoad = 1, kBuilt = 2;
+    std::vector<uint8_t> grid(size_t(nx)*size_t(nz), 0);
+    std::vector<float> groundHeight(size_t(gx)*size_t(gz), 0.f);
+    auto edge = [](Vec2 a, Vec2 b, Vec2 p) { return (b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]); };
+    // Visits each cell whose centre lies in the triangle, with its barycentric weights.
+    auto raster = [&](Vec2 a, Vec2 b, Vec2 c, float size, int cols, int rows, auto&& visit) {
+        const float area = edge(a,b,c);
+        if (std::abs(area) < 1e-6f) return;
+        const int i0 = std::max(0,int(std::floor((std::min({a[0],b[0],c[0]})-x0)/size)));
+        const int i1 = std::min(cols-1,int(std::floor((std::max({a[0],b[0],c[0]})-x0)/size)));
+        const int j0 = std::max(0,int(std::floor((std::min({a[1],b[1],c[1]})-z0)/size)));
+        const int j1 = std::min(rows-1,int(std::floor((std::max({a[1],b[1],c[1]})-z0)/size)));
+        for (int j = j0; j <= j1; ++j) for (int i = i0; i <= i1; ++i) {
+            const Vec2 p{x0+(float(i)+.5f)*size, z0+(float(j)+.5f)*size};
+            const float w0 = edge(b,c,p)/area, w1 = edge(c,a,p)/area, w2 = edge(a,b,p)/area;
+            if (w0 >= 0.f && w1 >= 0.f && w2 >= 0.f) visit(size_t(j)*size_t(cols)+size_t(i), w0, w1, w2);
+        }
+    };
+    auto position = [&](uint32_t index) {
+        const float* v = mesh.vertices[index].positionMaterial;
+        return Point{v[0],v[1],v[2]};
+    };
+    // Ground: the surveyed relief (part 6, material 19), never below the plain at 0 m.
+    for (const auto& sub : mesh.submeshes) {
+        if (sub.part != 6 || sub.material != 19) continue;
+        for (uint32_t t = 0; t+2 < sub.indexCount; t += 3) {
+            const Point a = position(mesh.indices[sub.firstIndex+t]);
+            const Point b = position(mesh.indices[sub.firstIndex+t+1]);
+            const Point c = position(mesh.indices[sub.firstIndex+t+2]);
+            raster({a[0],a[2]},{b[0],b[2]},{c[0],c[2]},groundCell,gx,gz,[&](size_t k,float w0,float w1,float w2) {
+                groundHeight[k] = std::max(groundHeight[k], w0*a[1]+w1*b[1]+w2*c[1]);
+            });
+        }
+    }
+    auto ground = [&](float x, float z) {
+        const int i = std::clamp(int((x-x0)/groundCell),0,gx-1), j = std::clamp(int((z-z0)/groundCell),0,gz-1);
+        return groundHeight[size_t(j)*size_t(gx)+size_t(i)];
+    };
+    // Occupancy: road surfaces, roofs of the surveyed buildings, and every generated plot.
+    for (const auto& sub : mesh.submeshes) {
+        const bool road = (sub.part == 7 || sub.part == 8) && sub.material == 1;
+        const bool water = sub.material == 7;
+        const bool built = sub.part <= 5 || water;
+        if (!road && !built) continue;
+        for (uint32_t t = 0; t+2 < sub.indexCount; t += 3) {
+            const Point a = position(mesh.indices[sub.firstIndex+t]);
+            const Point b = position(mesh.indices[sub.firstIndex+t+1]);
+            const Point c = position(mesh.indices[sub.firstIndex+t+2]);
+            const Point n = cross(subtract(b,a),subtract(c,a));
+            const float len = std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);
+            if (len < 1e-8f || std::abs(n[1]) < .7f*len) continue;
+            if (built && !water && (a[1]+b[1]+c[1])/3.f < ground((a[0]+b[0]+c[0])/3.f,(a[2]+b[2]+c[2])/3.f)+1.5f) continue;
+            const uint8_t bit = road ? kRoad : kBuilt;
+            raster({a[0],a[2]},{b[0],b[2]},{c[0],c[2]},cell,nx,nz,[&](size_t k,float,float,float) { grid[k] |= bit; });
+        }
+    }
+    for (const Site& site : sites) {
+        const auto& p = site.plot;
+        const float hw = .5f*p.width, hd = .5f*p.depth;
+        std::array<Vec2,4> corner;
+        for (int k = 0; k < 4; ++k) {
+            const float u = (k == 1 || k == 2) ? hw : -hw, v = k >= 2 ? hd : -hd;
+            corner[k] = {p.x+u*p.cosine-v*p.sine, p.z+u*p.sine+v*p.cosine};
+        }
+        for (const auto& t : {std::array<int,3>{0,1,2}, std::array<int,3>{0,2,3}})
+            raster(corner[t[0]],corner[t[1]],corner[t[2]],cell,nx,nz,[&](size_t k,float,float,float) { grid[k] |= kBuilt; });
+    }
+    auto occupied = [&](float x, float z, int roadRadius, int builtRadius) {
+        const int i = int(std::floor((x-x0)/cell)), j = int(std::floor((z-z0)/cell));
+        const int r = std::max(roadRadius,builtRadius);
+        for (int dj = -r; dj <= r; ++dj) for (int di = -r; di <= r; ++di) {
+            const int ii = i+di, jj = j+dj;
+            if (ii < 0 || jj < 0 || ii >= nx || jj >= nz) return true;
+            const uint8_t bits = grid[size_t(jj)*size_t(nx)+size_t(ii)];
+            const int far = std::max(std::abs(di),std::abs(dj));
+            if (((bits & kRoad) && far <= roadRadius) || ((bits & kBuilt) && far <= builtRadius)) return true;
+        }
+        return false;
+    };
+    // One tree or lamp per 4 m cell, so crossing kerbs at a junction do not stack them.
+    const int tx = nx/4+1, tz = nz/4+1;
+    std::vector<uint8_t> taken(size_t(tx)*size_t(tz), 0);
+    auto claim = [&](float x, float z) {
+        const size_t k = size_t(std::clamp(int((z-z0)/4.f),0,tz-1))*size_t(tx)+size_t(std::clamp(int((x-x0)/4.f),0,tx-1));
+        if (taken[k]) return false;
+        taken[k] = 1;
+        return true;
+    };
+
+    // Planters on the pavement in front of each Xinyi arcade bay.
+    for (const Site& site : sites) {
+        if (site.style != kWalkup && site.style != kShop) continue;
+        const auto& p = site.plot;
+        const float lx = (site.seed & 1u) ? 1.96f : -1.96f, lz = -(.5f*kPlotDepth+1.3f);
+        const float px = p.x+lx*p.cosine-lz*p.sine, pz = p.z+lx*p.sine+lz*p.cosine;
+        if (occupied(px,pz,0,0)) continue;
+        out.push_back({kPlanter,kFurniturePart,site.seed,px,site.bottom,pz,std::atan2(p.sine,p.cosine),2.4f});
+    }
+
+    constexpr float spacing = 10.f, metresPerUv = 35.f;
+    for (const auto& sub : mesh.submeshes) {
+        if ((sub.part != 7 && sub.part != 8) || sub.material != 1) continue;
+        for (uint32_t t = 0; t+2 < sub.indexCount; t += 3) {
+            std::array<const BmeshVertex*,3> v{};
+            for (int k = 0; k < 3; ++k) v[k] = &mesh.vertices[mesh.indices[sub.firstIndex+t+uint32_t(k)]];
+            const Point a0 = position(mesh.indices[sub.firstIndex+t]);
+            const Point n = cross(subtract(position(mesh.indices[sub.firstIndex+t+1]),a0),
+                                  subtract(position(mesh.indices[sub.firstIndex+t+2]),a0));
+            const float len = std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);
+            if (len < 1e-8f || n[1] < .9f*len) continue;          // the road's top surface only
+            for (int e = 0; e < 3; ++e) {
+                // A kerb is the edge whose two ends share V; the third vertex is across the road.
+                const BmeshVertex& a = *v[e];
+                const BmeshVertex& b = *v[(e+1)%3];
+                const BmeshVertex& o = *v[(e+2)%3];
+                const float va = a.uvThicknessRoughness[1], vb = b.uvThicknessRoughness[1], vo = o.uvThicknessRoughness[1];
+                if (std::abs(va-vb) > 1e-4f) continue;
+                const float width = std::abs(va-vo)*metresPerUv;
+                if (width < 9.f || width > 40.f) continue;        // no lanes, service roads or expressways
+                const Point A{a.positionMaterial[0],a.positionMaterial[1],a.positionMaterial[2]};
+                const Point B{b.positionMaterial[0],b.positionMaterial[1],b.positionMaterial[2]};
+                const Point O{o.positionMaterial[0],o.positionMaterial[1],o.positionMaterial[2]};
+                const float length = std::hypot(B[0]-A[0],B[2]-A[2]);
+                if (length < .5f) continue;
+                float ua = a.uvThicknessRoughness[0]*metresPerUv, ub = b.uvThicknessRoughness[0]*metresPerUv;
+                if (std::abs(std::abs(ub-ua)-length) > .25f*length+1.f) { ua = 0.f; ub = length; }
+                const Vec2 along{(B[0]-A[0])/length,(B[2]-A[2])/length};
+                Vec2 outward{-along[1],along[0]};
+                if ((O[0]-A[0])*outward[0]+(O[2]-A[2])*outward[1] > 0.f) outward = {-outward[0],-outward[1]};
+                const float lo = std::min(ua,ub), hi = std::max(ua,ub);
+                for (float d = std::ceil(lo/spacing)*spacing; d < hi; d += spacing) {
+                    const float s = (d-ua)/(ub-ua);
+                    const float kx = A[0]+(B[0]-A[0])*s, ky = A[1]+(B[1]-A[1])*s, kz = A[2]+(B[2]-A[2])*s;
+                    if (std::hypot(kx-centres[0][0],kz-centres[0][1]) > reach &&
+                        std::hypot(kx-centres[1][0],kz-centres[1][1]) > reach) continue;
+                    if (ky > ground(kx,kz)+2.5f) continue;     // an elevated road
+                    const uint32_t seed = mixBits(uint32_t(std::lround(kx*4.f))^mixBits(uint32_t(std::lround(kz*4.f))+911u));
+                    const bool lamp = uint32_t(std::lround(d/spacing))%3u == 0u;
+                    const float offset = lamp ? .8f : 1.8f+.5f*float(seed&255u)/255.f;
+                    const float px = kx+outward[0]*offset, pz = kz+outward[1]*offset;
+                    if (lamp ? occupied(px,pz,0,1) : occupied(px,pz,1,2)) continue;
+                    if (!claim(px,pz)) continue;
+                    if (lamp) {
+                        // The arm reaches out over the road.
+                        out.push_back({kStreetLamp,kFurniturePart,seed,px,ky-.05f,pz,std::atan2(-outward[1],-outward[0]),8.f});
+                    } else {
+                        const float height = 7.5f+4.f*float((seed>>8)&255u)/255.f;
+                        const uint32_t style = (seed>>16)%4u == 0u ? kTreeTall : kTreeRound;
+                        out.push_back({style,kFurniturePart,seed,px,ky-.05f,pz,6.2831853f*float((seed>>20)&1023u)/1024.f,height});
+                    }
+                }
+            }
+        }
+    }
+
+    // Groves fill the open ground between the blocks, as Xinyi's pocket parks and green strips do: on a
+    // jittered 26 m lattice, wherever a patch is clear of roads, buildings and water. A slow noise field
+    // sets their density, so the open ground breaks into parks, scattered trees and bare plazas, and they
+    // thin out towards the edge of the planted area instead of stopping at a line.
+    auto lattice = [](int i, int j) { return float(mixBits(uint32_t(i)*92837111u ^ uint32_t(j)*689287499u ^ 0x2545f491u)&1023u)/1023.f; };
+    auto parkland = [&](float x, float z) {
+        const float u = x/170.f, v = z/170.f;
+        const int i = int(std::floor(u)), j = int(std::floor(v));
+        float fu = u-float(i), fv = v-float(j);
+        fu = fu*fu*(3.f-2.f*fu); fv = fv*fv*(3.f-2.f*fv);
+        const float n = (lattice(i,j)*(1.f-fu)+lattice(i+1,j)*fu)*(1.f-fv)+(lattice(i,j+1)*(1.f-fu)+lattice(i+1,j+1)*fu)*fv;
+        return std::clamp((n-.18f)*1.7f,0.f,1.f);
+    };
+    for (float gz0 = z0+13.f; gz0 < z1-13.f; gz0 += 26.f) {
+        for (float gx0 = x0+13.f; gx0 < x1-13.f; gx0 += 26.f) {
+            const uint32_t seed = mixBits(uint32_t(std::lround(gx0))*73856093u ^ uint32_t(std::lround(gz0))*19349663u);
+            const float px = gx0+12.f*(float((seed>>4)&255u)/255.f-.5f), pz = gz0+12.f*(float((seed>>12)&255u)/255.f-.5f);
+            const float nearest = std::min(std::hypot(px-centres[0][0],pz-centres[0][1]),
+                                           std::hypot(px-centres[1][0],pz-centres[1][1]));
+            if (nearest > reach) continue;
+            const float edgeFade = std::clamp((reach-nearest)/260.f,0.f,1.f);
+            if (float(seed&1023u)/1023.f >= parkland(px,pz)*edgeFade) continue;
+            if (occupied(px,pz,9,6)) continue;
+            const float metres = 20.f+8.f*float((seed>>20)&255u)/255.f;
+            out.push_back({kGroveA+(seed>>28)%3u,kGrovePart,seed,px,ground(px,pz)-.05f,pz,
+                           6.2831853f*float((seed>>8)&1023u)/1024.f,metres});
         }
     }
 }
@@ -1265,6 +1675,12 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
     }
     if(sites.empty()) return;
     for(const auto& [cell,crown]:crowns) sites.push_back(crown);
+    // Rooftop crowns and clutter on the generated towers, then (Taipei) street trees, lamps and planters.
+    std::vector<Site> roofCrowns;
+    std::vector<FreePlacement> extras;
+    addRooftops(sites,kit,roofCrowns,extras);
+    sites.insert(sites.end(),roofCrowns.begin(),roofCrowns.end());
+    if(taipei) plantStreets(authored,sites,extras);
 
     std::map<std::array<uint32_t,2>,std::array<uint32_t,3>> prototypes;
     for(const Site& site:sites) {
@@ -1282,6 +1698,42 @@ void appendCityModules(CityModuleLayout& layout,uint32_t kit,Bmesh& authored) {
         placement.center={p.x,site.bottom+.59f*site.height,p.z};
         placement.radius=std::sqrt(.31f*p.width*p.width+.33f*p.depth*p.depth+.35f*site.height*site.height);
         placement.chunk={int32_t(std::floor((originX+p.x*scale)/44.f)),int32_t(std::floor((originZ+p.z*scale)/44.f))};
+        layout.placements.push_back(placement);
+    }
+    for(const FreePlacement& e:extras) {
+        auto [it,inserted]=prototypes.try_emplace({e.style,0u});
+        if(inserted) for(uint32_t lod=0;lod<3;++lod) {
+            it->second[lod]=static_cast<uint32_t>(layout.modules.size());
+            layout.modules.push_back(isRooftopStyle(e.style) ? makeRooftop(e.style,lod)
+                                     : isGroveStyle(e.style) ? makeGrove(e.style,lod) : makeStreetFurniture(e.style,lod));
+        }
+        CityModulePlacement placement;
+        placement.kit=kit;placement.part=e.part;placement.seed=e.seed;placement.modules=it->second;
+        const float c=std::cos(e.yaw)*e.scale,s=std::sin(e.yaw)*e.scale;
+        placement.rows={c,0,-s,e.x, 0,e.scale,0,e.y, s,0,c,e.z};
+        // The exact bounding sphere of every detail level's box.
+        std::array<float,6> box{1.e20f,1.e20f,1.e20f,-1.e20f,-1.e20f,-1.e20f};
+        for(uint32_t id:placement.modules) for(int a=0;a<3;++a) {
+            box[a]=std::min(box[a],layout.modules[id].bounds[a]);
+            box[a+3]=std::max(box[a+3],layout.modules[id].bounds[a+3]);
+        }
+        auto toKit=[&](float ux,float uy,float uz) {
+            return Point{placement.rows[0]*ux+placement.rows[1]*uy+placement.rows[2]*uz+placement.rows[3],
+                         placement.rows[4]*ux+placement.rows[5]*uy+placement.rows[6]*uz+placement.rows[7],
+                         placement.rows[8]*ux+placement.rows[9]*uy+placement.rows[10]*uz+placement.rows[11]};
+        };
+        placement.center=toKit(.5f*(box[0]+box[3]),.5f*(box[1]+box[4]),.5f*(box[2]+box[5]));
+        float radius2=0.f;
+        for(int corner=0;corner<8;++corner) {
+            const Point q=toKit(box[corner&1 ? 3 : 0],box[corner&2 ? 4 : 1],box[corner&4 ? 5 : 2]);
+            radius2=std::max(radius2,(q[0]-placement.center[0])*(q[0]-placement.center[0])+
+                                     (q[1]-placement.center[1])*(q[1]-placement.center[1])+
+                                     (q[2]-placement.center[2])*(q[2]-placement.center[2]));
+        }
+        // Small objects far from the kit origin: pad for the rounding of their translated corners.
+        placement.radius=std::sqrt(radius2)*1.0001f+2.e-6f*(std::abs(placement.center[0])+
+            std::abs(placement.center[1])+std::abs(placement.center[2])+1.f);
+        placement.chunk={int32_t(std::floor((originX+e.x*scale)/44.f)),int32_t(std::floor((originZ+e.z*scale)/44.f))};
         layout.placements.push_back(placement);
     }
     // Legacy districts extend the scene around an intact authored footprint.

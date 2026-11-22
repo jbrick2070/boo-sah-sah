@@ -2,6 +2,17 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.10.0 — Street life
+
+- Taipei's mapped streets are lined with trees and lamps: about 1,200 street trees (broad crowns and taller narrow ones, every 10 m on the pavement) and 650 lamps whose luminaires glow at night. They are placed by walking every kerb of the surveyed roads, and an occupancy grid keeps them clear of junctions, walls, water and elevated roads.
+- Groves of five to seven trees fill the open ground between the blocks round the terrace and Taipei 101: parks, scattered clumps and clearings, set by a slow noise field and thinning out at the edge.
+- Planters line the Xinyi arcades below the terrace.
+- The generated towers' roofs vary: a crown on some, and on the rest a plant deck (tank, condensers, a mast), a roof garden or a lit blade sign.
+- Lit shopfronts and lobbies glow round the foot of every generated tower at night.
+- Over the open city at night the moon stands lower, so the towers' faces take a raking light. The terrace keeps its high key.
+- A tree or lamp is one instance: the shader tells bark from leaves and pole from lit head by height, in raster and in ray-traced reflections alike. Trees, lamps, groves and rooftop sets are not collision geometry, so bird routes and PhysX bodies are unchanged.
+- Cost on an RTX 5080 Laptop GPU at 1440p (city baseline, 60-frame medians): 0.2 to 1.4 ms on Taipei shots, highest median 13.9 ms.
+
 ## 1.1.9.0 — A new sky
 
 - The sky is computed from how sunlight scatters in the air: Rayleigh, Mie and ozone single scattering at 16 wavelengths plus multiple scattering, baked for ten sun elevations by `tools/gen_sky_table.py` into the city shader. The same sky lights everything outdoors, colours the haze and lights the clouds, whose sunward edges stay lit after the sunset below and redden as the light goes.

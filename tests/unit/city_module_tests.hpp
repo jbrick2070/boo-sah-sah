@@ -101,6 +101,51 @@ bool checkXinyiArcades(const boo::CityModuleLayout& layout) {
     return true;
 }
 
+// Taipei's street trees, lamps, planters (part 63), rooftop sets and crowns (64) and groves (65): each
+// kind is present, a lamp's glow sits above 0.90 of its height (the shader's pole/head split), and no
+// bounding sphere comes near either Taipei camera pass, sampled ten times a second.
+bool checkStreetLife(const boo::CityModuleLayout& layout) {
+    size_t trees = 0, lamps = 0, planters = 0, rooftop = 0, groves = 0;
+    std::vector<const boo::CityModulePlacement*> placed;
+    for (const auto& p : layout.placements) {
+        if (p.part < 63u || p.part > 65u) continue;
+        placed.push_back(&p);
+        const auto& nearMesh = layout.modules[p.modules[0]];
+        if (p.part == 64u) { ++rooftop; continue; }
+        if (p.part == 65u) { ++groves; continue; }
+        bool lamp = false, planter = false;
+        for (const auto& sub : nearMesh.submeshes) {
+            lamp |= sub.material == 16u;
+            planter |= sub.material == 39u;
+        }
+        if (lamp) {
+            ++lamps;
+            // The luminaire is the only part above 0.90; the pole and arm stay below it.
+            bool head = false;
+            for (const auto& v : nearMesh.vertices) head |= v.positionMaterial[1] > .90f;
+            BOO_CHECK(head && nearMesh.bounds[4] <= 1.f);
+        } else if (planter) {
+            ++planters;
+        } else {
+            ++trees;
+        }
+    }
+    BOO_CHECK(trees > 500 && lamps > 200 && planters > 10 && rooftop > 200 && groves > 200);
+    for (auto mode : {boo::ShowVisualMode::FullFilm360s, boo::ShowVisualMode::M2Trilogy180s}) {
+        const int start = mode == boo::ShowVisualMode::FullFilm360s ? 0 : 120;
+        const int end = mode == boo::ShowVisualMode::FullFilm360s ? 45 : 180;
+        for (int t = start*10; t < end*10; ++t) {
+            const auto eye = boo::evaluateShowCamera(mode,int64_t(t)*4800).eye;
+            for (const auto* p : placed) {
+                const float distance = std::hypot(eye[0]-(18.5f+.08f*p->center[0]),
+                    eye[1]-.08f*p->center[1],eye[2]-(60.f+.08f*p->center[2]));
+                BOO_CHECK(distance > .08f*p->radius+.1f);
+            }
+        }
+    }
+    return true;
+}
+
 bool testCityModulesPreserveAuthoredKits() {
     for (uint32_t kit : {1u, 2u}) {
         const auto path = boo::resolveResourcePath(kit == 1 ? "assets/meshes/shenzhen_evtol.bmesh"
@@ -131,7 +176,10 @@ bool testCityModulesPreserveAuthoredKits() {
             BOO_CHECK(first.placements.empty() && first.modules.empty());
             continue;
         }
-        const size_t expected = legacy ? (kit == 1 ? 676u : 666u) : (kit == 1 ? 468u : 490u);
+        if (kit == 2) BOO_CHECK(checkStreetLife(first));
+        // Extended kits: towers, crowns and rooftop sets (both), plus Taipei's street trees, lamps,
+        // planters and groves.
+        const size_t expected = legacy ? (kit == 1 ? 676u : 666u) : (kit == 1 ? 777u : 4207u);
         BOO_CHECK(first.placements.size() == expected);
         if (kit==2) BOO_CHECK(checkXinyiArcades(first));
         if (legacy) {
