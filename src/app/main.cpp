@@ -129,8 +129,8 @@ std::filesystem::path startupMemoryFile() {
 }
 
 // The figures under the loading bar. Numbers and units only, so they need no translation:
-// megabytes read of the total, megabytes whose SHA-256 matched the manifest, and system and GPU
-// memory in use against what the last start reached.
+// megabytes read of the total, megabytes whose SHA-256 matched the manifest, system and GPU
+// memory in use against what the last start reached, and shader code compiled into pipelines.
 std::wstring loadingDetail(const boo::StartupProgressView& v) {
     constexpr double kMb = 1024.0 * 1024.0, kGb = kMb * 1024.0;
     wchar_t text[260]{};
@@ -153,6 +153,11 @@ std::wstring loadingDetail(const boo::StartupProgressView& v) {
         } else {
             at += std::swprintf(text + at, std::size(text) - at, L"     GPU  %.2f GB", v.gpuBytes / kGb);
         }
+    }
+    if (v.shaderBytesTotal > 0) {
+        // Shader code the graphics driver has compiled into pipelines, of the total.
+        at += std::swprintf(text + at, std::size(text) - at, L"     Shaders  %.1f / %.1f MB",
+                            v.shaderBytesCompiled / kMb, v.shaderBytesTotal / kMb);
     }
     return std::wstring(text, static_cast<size_t>(std::max(at, 0)));
 }
@@ -1927,6 +1932,8 @@ int main(int argc, char** argv) {
             window.setLoadingProgress(v.fraction, loadingDetail(v));
         };
         StartupProgress::instance().begin(std::move(progress));
+        // While start-up waits on pipeline compiles, the window keeps answering (it can be moved or closed).
+        StartupProgress::instance().setPump([&window] { (void)window.pumpMessages(); });
         startupCheckpoint();
     }
 
@@ -1941,6 +1948,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     StartupProgress::instance().setGpuProbe([&d3d] { return d3d.queryEstimatedAppVramBytes(); });
+    if (settings.coldShaderCache) {
+        std::string reason;
+        if (d3d.bypassShaderCaches(&reason)) BOO_LOG_INFO("D3D12", "Shader caches bypassed: every pipeline compiles as on a first start.");
+        else BOO_LOG_WARN("D3D12", "--cold-shader-cache unavailable: " + reason);
+    }
     // The PhysX suite's shared runtime. It starts in the background the first time a genre needs it.
     PhysxSuite physxRuntime(d3d.adapterLuidLow(), d3d.adapterLuidHigh());
     std::unique_ptr<PhysxRigidGenre> physxRigid; // exists only while the rigid genre is dialled in
@@ -1948,6 +1960,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<PhysxSoftGenre> physxSoft;   // exists only while the soft-body genre is dialled in
     std::unique_ptr<PhysxFluidGenre> physxFluid; // likewise for fluids
     if (physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart(); // loads beside the scene; see below
+    startupStep("D3D12 device, Streamline and swap chain");
     startupCheckpoint();
 
     (void)window.pumpMessages();
@@ -1957,13 +1970,16 @@ int main(int argc, char** argv) {
     if (!gpuSensors.start(d3d.adapterName(), d3d.adapterLuidLow(), d3d.adapterLuidHigh(), !settings.disableCUDA && !d3d.isWarp())) {
         BOO_LOG_INFO("Sensors", "GPU sensors unavailable: " + gpuSensors.unavailableReason());
     }
+    startupStep("GPU sensors");
 
     // 5. Initialize cue-routed primary + embedded-safe-fallback visual effects
     M1TaipeiSliceEffect* liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, startupSpec, orchestrator);
+    startupStep("show effects created");
 
     startupCheckpoint();
     (void)window.pumpMessages();
     const HardwareResult visualInit = orchestrator.initializeEffects(false);
+    startupStep("show effects initialised");
     startupCheckpoint();
     if (settings.physxRouteTest) physxRuntime.requestStart();
     if (physxGenreInfo(settings.physxGenre).usesPhysxSdk || settings.physxRouteTest) {

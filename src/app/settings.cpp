@@ -371,6 +371,8 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.disableNVENC = true;
         } else if (a == "--force-warp") {
             ioSettings.forceWarp = true;
+        } else if (a == "--cold-shader-cache") {
+            ioSettings.coldShaderCache = true;
         } else if (a == "--inject-mesh-fail") {
             ioSettings.injectMeshFail = true;
         } else if (a == "--inject-shader-fail") {
@@ -521,6 +523,8 @@ std::string buildCliHelpText() {
         "  --disable-nvenc             Disable NVENC codec\n"
         "  --enable-signal-hijack      Opt-in probe for Signal Hijack codec path\n"
         "  --force-warp                Force Microsoft Basic Render Driver (WARP)\n"
+        "  --cold-shader-cache         Start as after an update: the driver ignores its shader caches\n"
+        "                              (needs Windows Developer Mode)\n"
         "  --inject-shader-fail        Force fallback to embedded precompiled safe shader\n"
         "  --inject-audio-fail         Simulate missing audio endpoint\n"
         "  --inject-npu-timeout        Simulate NPU inference stall/timeout -> graceful failover\n"

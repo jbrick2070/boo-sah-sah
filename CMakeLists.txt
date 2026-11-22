@@ -456,6 +456,7 @@ add_library(boo_core STATIC
     src/core/capabilities.cpp
     src/core/gpu_sensors.cpp
     src/core/startup_progress.cpp
+    src/core/pipeline_compiler.cpp
     src/core/baked_physics.cpp
     src/core/health.cpp
     src/inference/scripted_director.cpp

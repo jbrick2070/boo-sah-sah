@@ -64,7 +64,10 @@ struct StartupProgress::State {
     uint32_t verifiedFiles = 0, mismatched = 0;
     uint64_t gpuNow = 0, gpuPeak = 0, gpuExpected = 0;
     uint64_t ramPeak = 0, ramExpected = 0;
+    uint64_t shaderQueuedBytes = 0, shaderDoneBytes = 0, shaderExpected = 0;
     float fraction = 0.0f;
+    std::chrono::steady_clock::time_point lastStep{}, lastIdleLog{};
+    std::function<void()> pump;
 
     // Checksums are checked off the loading thread, so they cost start-up no time.
     struct Job { std::filesystem::path file; std::string key, digest; uint64_t bytes; };
@@ -87,6 +90,8 @@ struct StartupProgress::State {
         v.ramBytesExpected = ramExpected;
         v.gpuBytes = gpuNow;
         v.gpuBytesExpected = gpuExpected;
+        v.shaderBytesCompiled = shaderDoneBytes;
+        v.shaderBytesTotal = std::max(shaderExpected, shaderQueuedBytes);
         return v;
     }
 
@@ -94,16 +99,21 @@ struct StartupProgress::State {
         ramPeak = std::max(ramPeak, peakCommittedBytes());
         const double all = static_cast<double>(std::max(total, loaded));
         const double files = all > 0.0 ? static_cast<double>(loaded) / all : 0.0;
+        // Shader code compiled, of what the last start compiled (or of what is queued, if that is more).
+        // A start that compiles no pipelines through the compiler has no shader gauge.
+        const double shaderAll = static_cast<double>(std::max(shaderExpected, shaderQueuedBytes));
+        const bool hasShaders = shaderAll > 0.0;
+        const double shaders = hasShaders ? std::min(1.0, static_cast<double>(shaderDoneBytes) / shaderAll) : 0.0;
         double f;
         if (ramExpected > 0 && gpuExpected > 0) {
-            // The average of the three gauges.
+            // The average of the gauges.
             const double ram = std::min(1.0, static_cast<double>(ramPeak) / static_cast<double>(ramExpected));
             const double gpu = std::min(1.0, static_cast<double>(gpuPeak) / static_cast<double>(gpuExpected));
-            f = (files + ram + gpu) / 3.0;
+            f = hasShaders ? (files + ram + gpu + shaders) / 4.0 : (files + ram + gpu) / 3.0;
         } else {
-            // First run: how much memory start-up needs is not known yet, so the files alone
-            // never quite fill the bar.
-            f = files * 0.9;
+            // First run: how much memory start-up needs is not known yet, so the files and the
+            // shaders alone never quite fill the bar.
+            f = (hasShaders ? (files + shaders) / 2.0 : files) * 0.9;
         }
         // Never backwards, and never full before the first frame is on screen.
         fraction = std::clamp(static_cast<float>(f), fraction, 0.99f);
@@ -180,8 +190,10 @@ void StartupProgress::begin(Setup setup) {
     s.verifiedFiles = s.mismatched = 0;
     s.gpuNow = s.gpuPeak = s.gpuExpected = 0;
     s.ramPeak = s.ramExpected = 0;
+    s.shaderQueuedBytes = s.shaderDoneBytes = s.shaderExpected = 0;
     s.fraction = 0.0f;
     s.summarise = false;
+    s.lastStep = s.lastIdleLog = std::chrono::steady_clock::now();
 
     // What the last start on this machine loaded, and the GPU memory it reached.
     if (!s.setup.memoryFile.empty()) {
@@ -193,6 +205,8 @@ void StartupProgress::begin(Setup setup) {
                     try { s.gpuExpected = std::stoull(line.substr(4)); } catch (...) { s.gpuExpected = 0; }
                 } else if (line.rfind("ram ", 0) == 0) {
                     try { s.ramExpected = std::stoull(line.substr(4)); } catch (...) { s.ramExpected = 0; }
+                } else if (line.rfind("shaders ", 0) == 0) {
+                    try { s.shaderExpected = std::stoull(line.substr(8)); } catch (...) { s.shaderExpected = 0; }
                 } else if (line.rfind("asset ", 0) == 0) {
                     // asset <bytes> <key>
                     const size_t space = line.find(' ', 6);
@@ -208,6 +222,7 @@ void StartupProgress::begin(Setup setup) {
         // First run (or nothing remembered): every file in the asset folders.
         s.gpuExpected = 0;
         s.ramExpected = 0;
+        s.shaderExpected = 0;
         for (const auto& folder : s.setup.assetFolders) {
             std::error_code ec;
             for (std::filesystem::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
@@ -271,13 +286,103 @@ void StartupProgress::checkpoint() {
     }
     {
         // For anyone following the bar in a debug log: the three gauges at each stage.
-        char line[200]{};
-        std::snprintf(line, sizeof(line), "Loading bar %.0f%%: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB",
+        char line[240]{};
+        std::snprintf(line, sizeof(line), "Loading bar %.0f%%: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB, shaders %.2f/%.2f MB",
                       static_cast<double>(v.fraction) * 100.0, v.assetBytesLoaded / 1048576.0, v.assetBytesTotal / 1048576.0,
-                      v.ramBytes / 1048576.0, v.ramBytesExpected / 1048576.0, v.gpuBytes / 1048576.0, v.gpuBytesExpected / 1048576.0);
+                      v.ramBytes / 1048576.0, v.ramBytesExpected / 1048576.0, v.gpuBytes / 1048576.0, v.gpuBytesExpected / 1048576.0,
+                      v.shaderBytesCompiled / 1048576.0, v.shaderBytesTotal / 1048576.0);
         BOO_LOG_DEBUG("Startup", line);
     }
     if (notify) notify(v);
+}
+
+void StartupProgress::step(const char* stage) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    double ms = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto now = std::chrono::steady_clock::now();
+        ms = std::chrono::duration<double, std::milli>(now - s.lastStep).count();
+        s.lastStep = now;
+    }
+    char line[200]{};
+    std::snprintf(line, sizeof(line), "Stage done in %.0f ms: %s", ms, stage ? stage : "");
+    BOO_LOG_DEBUG("Startup", line);
+}
+
+void StartupProgress::shaderQueued(uint64_t bytes) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed) || bytes == 0) return;
+    std::function<void(const StartupProgressView&)> notify;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed)) return;
+        s.shaderQueuedBytes += bytes;
+        s.recomputeLocked();
+        if (std::this_thread::get_id() == s.owner) { notify = s.setup.onChange; v = s.viewLocked(); }
+    }
+    if (notify) notify(v);
+}
+
+void StartupProgress::shaderCompiled(uint64_t bytes) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed) || bytes == 0) return;
+    std::function<void(const StartupProgressView&)> notify;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed)) return;
+        s.shaderDoneBytes += bytes;
+        s.recomputeLocked();
+        if (std::this_thread::get_id() == s.owner) { notify = s.setup.onChange; v = s.viewLocked(); }
+    }
+    if (notify) notify(v); // from a compile thread, the waiting thread's idle() repaints instead
+}
+
+void StartupProgress::idle() {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::function<uint64_t()> probe;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (std::this_thread::get_id() != s.owner) return;
+        probe = s.gpuProbe;
+    }
+    const uint64_t gpu = probe ? probe() : 0u;
+    std::function<void(const StartupProgressView&)> notify;
+    std::function<void()> pump;
+    StartupProgressView v;
+    bool log = false;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed)) return;
+        s.gpuNow = gpu;
+        s.gpuPeak = std::max(s.gpuPeak, gpu);
+        s.recomputeLocked();
+        notify = s.setup.onChange;
+        pump = s.pump;
+        v = s.viewLocked();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - s.lastIdleLog >= std::chrono::seconds(2)) { s.lastIdleLog = now; log = true; }
+    }
+    if (log) {
+        // For anyone following the bar in a debug log while pipelines compile.
+        char line[240]{};
+        std::snprintf(line, sizeof(line), "Loading bar %.0f%% while compiling: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB, shaders %.2f/%.2f MB",
+                      static_cast<double>(v.fraction) * 100.0, v.assetBytesLoaded / 1048576.0, v.assetBytesTotal / 1048576.0,
+                      v.ramBytes / 1048576.0, v.ramBytesExpected / 1048576.0, v.gpuBytes / 1048576.0, v.gpuBytesExpected / 1048576.0,
+                      v.shaderBytesCompiled / 1048576.0, v.shaderBytesTotal / 1048576.0);
+        BOO_LOG_DEBUG("Startup", line);
+    }
+    if (notify) notify(v);
+    if (pump) pump();
+}
+
+void StartupProgress::setPump(std::function<void()> pump) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->pump = std::move(pump);
 }
 
 void StartupProgress::finish() {
@@ -305,7 +410,8 @@ void StartupProgress::finish() {
             std::filesystem::create_directories(s.setup.memoryFile.parent_path(), ec);
             std::ofstream file(s.setup.memoryFile, std::ios::out | std::ios::trunc);
             if (file) {
-                file << "boo-startup-memory 1\n" << "gpu " << s.gpuPeak << '\n' << "ram " << s.ramPeak << '\n';
+                file << "boo-startup-memory 1\n" << "gpu " << s.gpuPeak << '\n' << "ram " << s.ramPeak << '\n'
+                     << "shaders " << s.shaderDoneBytes << '\n';
                 for (const auto& [key, bytes] : s.loadedFiles) file << "asset " << bytes << ' ' << key << '\n';
             }
         }
@@ -322,6 +428,7 @@ void StartupProgress::finish() {
         if (std::this_thread::get_id() == s.owner) notify = s.setup.onChange;
         v = s.viewLocked();
         s.setup.onChange = nullptr; // whatever it captured may not outlive start-up
+        s.pump = nullptr;
     }
     if (notify) notify(v);
 }
@@ -334,5 +441,10 @@ bool StartupProgress::waitForChecksums(uint32_t timeoutMs) {
 
 void startupAssetLoaded(const std::filesystem::path& file) { StartupProgress::instance().assetLoaded(file); }
 void startupCheckpoint() { StartupProgress::instance().checkpoint(); }
+
+void startupStep(const char* stage) {
+    auto& progress = StartupProgress::instance();
+    progress.step(stage);
+}
 
 } // namespace boo

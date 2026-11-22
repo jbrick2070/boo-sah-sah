@@ -107,13 +107,16 @@ Full screen is a borderless window that exactly covers the display, presented th
 
 ### Loading bar
 
-While the app starts, a bar under **Loading** shows how far it has got. It counts bytes, not seconds. It is the average of three gauges, each read from the machine, and the line under the bar gives their figures:
+While the app starts, a bar under **Loading** shows how far it has got. It counts bytes, not seconds. It is the average of four gauges, each read from the machine, and the line under the bar gives their figures:
 
 - **Files.** Megabytes of meshes, textures, shaders and network weights read into memory, out of the total (`268 / 268 MB`). Every file the asset manifest lists is also checked against its SHA-256 as it loads, on a second thread so it costs no start-up time; `SHA-256 verified 264 MB` is how much has matched. A file that does not match is counted as `mismatched` and named in the log.
 - **RAM.** System memory the app has committed, against what the last start reached.
 - **GPU.** GPU memory the app has in use, as Windows reports it, against what the last start reached.
+- **Shaders.** Megabytes of shader code the graphics driver has compiled into pipelines, against what the last start compiled.
 
-The bar moves only when something has actually loaded, never runs backwards, and fills when the first frame is on screen. The totals are this machine's own: the app keeps a small file, `%LOCALAPPDATA%\BOO SAH SAH\startup-memory.txt`, listing what the last start loaded and how much memory it reached, and nothing else. On a first start there is nothing to compare with yet, so the bar follows the files alone and stops short of full until the first frame. The log records the totals of every start, and `--log-level debug` records the three gauges at each stage.
+The bar moves only when something has actually loaded, never runs backwards, and fills when the first frame is on screen. The totals are this machine's own: the app keeps a small file, `%LOCALAPPDATA%\BOO SAH SAH\startup-memory.txt`, listing what the last start loaded, how much memory it reached and how much shader code it compiled, and nothing else. On a first start there is nothing to compare with yet, so the bar follows the files and shaders alone and stops short of full until the first frame. The log records the totals of every start, and `--log-level debug` records the gauges at each stage and how long each stage took.
+
+The first start after an app or driver update takes longer than the others, because the driver's shader cache starts empty and it has to compile the app's shaders again. The two shaders that draw the dashboard over the film are large, and the driver can spend most of a minute on each; they and the ray-traced city shaders compile side by side while everything else loads, and the window keeps answering while start-up waits for them. Later starts take their pipelines from the cache in a fraction of a second. `--cold-shader-cache` starts as after an update (it needs Windows Developer Mode).
 
 ### Interactive NVIDIA-RTX Explore & Lighting Studio Controls (Optional)
 

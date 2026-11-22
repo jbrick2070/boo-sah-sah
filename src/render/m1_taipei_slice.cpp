@@ -1,5 +1,6 @@
 #include "boo/render.hpp"
 #include "boo/startup_progress.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/dlss_bridge.hpp"
 #include "boo/city_modules.hpp"
 #include "boo/cues.hpp"
@@ -1316,7 +1317,10 @@ struct M1TaipeiSliceEffect::Impl {
         uint64_t softVramLimitBytes);
 
     bool buildDxrResourcesAndWarmUp(D3D12Context& d3d, uint64_t softVramLimitBytes);
-    bool ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT swapchainFmt);
+    // The present pass's pipelines: plain, and with frame-generation inputs. Their shader is the whole HUD and
+    // dashboard, so a driver with an empty shader cache spends most of a minute on each. Given a compiler, the
+    // two compile side by side on its threads and are ready once its waitAll() returns.
+    bool ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT swapchainFmt, PipelineCompiler* compiler = nullptr);
     void updateLiveRtStatus(bool disableRT, bool presetAllowsDxr) noexcept;
     void updateLiveAuxiliaryStatuses(
         bool isWarp,
@@ -1419,7 +1423,7 @@ M1TaipeiSliceEffect::~M1TaipeiSliceEffect() {
     shutdown();
 }
 
-bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT swapchainFmt) {
+bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT swapchainFmt, PipelineCompiler* compiler) {
     if (psoPresentHud && presentPsoFormat == swapchainFmt) {
         return true;
     }
@@ -1437,19 +1441,34 @@ bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT 
     pd.RTVFormats[0] = swapchainFmt;
     pd.SampleDesc.Count = 1;
 
-    ComPtr<ID3D12PipelineState> built;
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&built))) || !built) {
-        return false;
-    }
-    psoPresentHud = std::move(built);
+    psoPresentHud.Reset();
     psoPresentWithMotionInputs.Reset();
+    presentPsoFormat = swapchainFmt;
+    // Each compile writes only its own pipeline; nothing reads either one before they are done.
+    auto plain = [this, dev, pd] {
+        ComPtr<ID3D12PipelineState> built;
+        if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&built))) || !built) return false;
+        psoPresentHud = std::move(built);
+        return true;
+    };
+    const uint64_t plainBytes = vsFullscreenBytes.size() + psPresentHudBytes.size();
+    if (compiler) compiler->start("M1 present and HUD", plainBytes, plain);
+    else if (!plain()) return false;
+
     if (psFrameGenerationBytes.empty()) readShaderCso("assets/shaders/m1_present_frame_generation.cso",psFrameGenerationBytes);
     if (!psFrameGenerationBytes.empty()) {
-        pd.PS={psFrameGenerationBytes.data(),psFrameGenerationBytes.size()};pd.NumRenderTargets=3;
-        pd.RTVFormats[1]=swapchainFmt;pd.RTVFormats[2]=DXGI_FORMAT_R8_UNORM;
-        dev->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&psoPresentWithMotionInputs));
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC fg = pd;
+        fg.PS={psFrameGenerationBytes.data(),psFrameGenerationBytes.size()};fg.NumRenderTargets=3;
+        fg.RTVFormats[1]=swapchainFmt;fg.RTVFormats[2]=DXGI_FORMAT_R8_UNORM;
+        // Optional: without it, frames present without frame-generation inputs.
+        auto withMotionInputs = [this, dev, fg] {
+            dev->CreateGraphicsPipelineState(&fg,IID_PPV_ARGS(&psoPresentWithMotionInputs));
+            return true;
+        };
+        const uint64_t fgBytes = vsFullscreenBytes.size() + psFrameGenerationBytes.size();
+        if (compiler) compiler->start("M1 present with frame-generation inputs", fgBytes, withMotionInputs);
+        else withMotionInputs();
     }
-    presentPsoFormat = swapchainFmt;
     return true;
 }
 
@@ -1822,6 +1841,7 @@ bool M1TaipeiSliceEffect::Impl::buildDxrResourcesAndWarmUp(D3D12Context& d3d, ui
     if (FAILED(dev->CreateComputePipelineState(&cpso, IID_PPV_ARGS(&psoDxrScene))) || !psoDxrScene) {
         return false;
     }
+    startupStep("M1 DXR compute pipeline");
 
     std::vector<GpuM1Vertex> allVerts;
     std::vector<uint32_t> allIndices;
@@ -2345,6 +2365,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         res.humanReadableReason = "One or more compiled M1 .cso shader binaries could not be loaded.";
         return res;
     }
+    startupStep("M1 shader files read");
 
     D3D12_STATIC_SAMPLER_DESC linClampPs{};
     linClampPs.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -2516,6 +2537,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             return res;
         }
     }
+    startupStep("M1 root signatures");
 
     auto makeGfxPso = [&](ID3D12RootSignature* rs,
                           const std::vector<uint8_t>& vsBytes,
@@ -2559,6 +2581,9 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         return SUCCEEDED(dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&outPso))) && outPso;
     };
 
+    // The present pipelines take longest by far on a cold shader cache: they compile on threads of their own
+    // through the rest of start-up, and are waited for at the end of it.
+    PipelineCompiler presentCompiler;
     if (!makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psRasterSceneBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT, false, impl_->psoRasterScene) ||
         !makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomDownBytes,
@@ -2572,13 +2597,14 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csParticlesSubBytes, impl_->psoParticlesSubCs) ||
         !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csTensorSubBytes, impl_->psoTensorSubCs) ||
         !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csNv12PackBytes, impl_->psoNv12PackCs) ||
-        !impl_->ensurePresentPso(dev, static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()))) {
+        !impl_->ensurePresentPso(dev, static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()), &presentCompiler)) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
         res.diagnosticCode = "M1_GFX_PSO_FAILED";
         res.humanReadableReason = "Failed to create M1 graphics or compute pipeline states.";
         return res;
     }
+    startupStep("M1 graphics and compute pipelines (7; the 2 present pipelines carry on compiling)");
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHd{};
     rtvHd.NumDescriptors = 7;
@@ -2634,6 +2660,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             return res;
         }
     }
+    startupStep("M1 heaps, pillar resources and canvas");
 
     // Deterministically initialize default-heap Tensor field, Particle buffer, and Codec texture before any warm-up/render
     d3d_.executeSingleCommandListAndWait([&](void* rawCmd) {
@@ -2670,12 +2697,14 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         cmd->Dispatch(128u, 1u, 1u);
         transitionResource(cmd, impl_->particleGpuBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     });
+    startupStep("M1 first GPU work");
 
     impl_->ensureLiveAccelerators(
         d3d_,
         !disableCUDA_ && activeSpec_.allowCuda,
         !disableTensor_ && activeSpec_.allowTensor,
         !disableCodec_ && (codecHijackActive_ || abCompareEngine_ == AbCompareEngine::Codec));
+    startupStep("CUDA, tensor and codec runtimes loaded");
 
     // Warm up live CUDA & Tensor once at t=48s if enabled so initial queryLiveEngineStatus reflects verified live hardware
     impl_->activeSpecForParticles = activeSpec_;
@@ -2687,11 +2716,13 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             impl_->resolveCudaSimParams(0, 48000, activeSpec_, warmCount, warmMode);
             impl_->liveAccel.simulateCudaParticles(48LL * 48000LL, 48000, 0xB005A5A4u, Edition::Family, 1.0f, cudaTel, warmCount, warmMode);
             impl_->livePillars[1] = cudaTel;
+            startupStep("CUDA warm-up");
         }
         if (!disableTensor_ && activeSpec_.allowTensor && impl_->liveAccel.tensorHardwareAvailable()) {
             LivePillarTelemetry tensorTel{};
             impl_->liveAccel.evaluateTensorCausticField(48LL * 48000LL, 48000, 0xB005A5A4u, Edition::Family, 1.0f, tensorTel);
             impl_->livePillars[2] = tensorTel;
+            startupStep("tensor warm-up");
         }
     }
 
@@ -2700,6 +2731,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         if (!activeSpec_.allowDxr) {
             impl_->dxrVerified = false;
         }
+        startupStep("M1 DXR scene and warm-up");
     }
 
     if (impl_->trilogy && !impl_->trilogyMesh) {
@@ -2708,6 +2740,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
+    startupStep("trilogy renderer resize");
     startupCheckpoint();
     if (impl_->trilogyMesh && !disableRT_ && activeSpec_.allowDxr && !d3d_.isWarp()) {
         FrameContext warmCtx{};
@@ -2728,12 +2761,14 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             cmd->SetDescriptorHeaps(1, heaps);
         });
         impl_->trilogyMesh->retire(kHeadlessSlot);
+        startupStep("trilogy warm-up frame");
     }
     if (!impl_->neural) {
         // Unavailable is shown on the dashboard with its reason; it never stops the film.
         impl_->neural = std::make_unique<NeuralRenderingSuite>(d3d_);
         std::string neuralError;
         impl_->neural->initialize(&neuralError);
+        startupStep("neural rendering suite");
         startupCheckpoint();
     }
     if (!impl_->smoke) {
@@ -2741,7 +2776,16 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         impl_->smoke = std::make_unique<FlowSmoke>(d3d_);
         std::string smokeError;
         impl_->smoke->initialize(&smokeError);
+        startupStep("PhysX smoke");
     }
+    if (!presentCompiler.waitAll() || !impl_->psoPresentHud) {
+        res.status = BackendStatus::Faulted;
+        res.health = HealthState::Faulted;
+        res.diagnosticCode = "M1_GFX_PSO_FAILED";
+        res.humanReadableReason = "Failed to create the M1 present pipeline.";
+        return res;
+    }
+    startupStep("M1 present pipelines");
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
     impl_->updateLiveAuxiliaryStatuses(
         d3d_.isWarp(),

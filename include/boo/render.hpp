@@ -145,6 +145,11 @@ public:
 
     void shutdown() noexcept;
 
+    // Diagnostics: the driver ignores its shader caches for the rest of this run, so start-up compiles
+    // every pipeline as it does on the first start after an update (the install folder changes with
+    // each version). Windows allows it only in Developer Mode; returns false with the reason otherwise.
+    bool bypassShaderCaches(std::string* reason = nullptr);
+
     bool resize(uint32_t width, uint32_t height);
     bool beginFrame();
     void beginSimulation(FrameGenerationMode mode,ReflexMode reflex);

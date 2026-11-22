@@ -100,6 +100,26 @@ D3D12Context::~D3D12Context() {
     shutdown();
 }
 
+bool D3D12Context::bypassShaderCaches(std::string* reason) {
+    if (!impl_ || !impl_->device) {
+        if (reason) *reason = "no device";
+        return false;
+    }
+    ComPtr<ID3D12Device9> device9;
+    if (FAILED(impl_->device.As(&device9))) {
+        if (reason) *reason = "ID3D12Device9 is not available";
+        return false;
+    }
+    const HRESULT hr = device9->ShaderCacheControl(
+        D3D12_SHADER_CACHE_KIND_FLAG_IMPLICIT_DRIVER_MANAGED | D3D12_SHADER_CACHE_KIND_FLAG_IMPLICIT_D3D_CACHE_FOR_DRIVER,
+        D3D12_SHADER_CACHE_CONTROL_FLAG_DISABLE);
+    if (FAILED(hr)) {
+        if (reason) *reason = "ShaderCacheControl refused (" + hrHex(hr) + "); it needs Windows Developer Mode";
+        return false;
+    }
+    return true;
+}
+
 bool D3D12Context::initialize(
     HWND hwnd,
     uint32_t width,

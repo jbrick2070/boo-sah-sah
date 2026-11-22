@@ -1,15 +1,20 @@
 #pragma once
 
 // The loading bar (include/boo/startup_progress.hpp) counts real bytes: files read, files whose
-// SHA-256 matches the manifest, memory filled. It must never run backwards or fill early.
+// SHA-256 matches the manifest, memory filled, shader code compiled. It must never run backwards
+// or fill early.
 
 #include "boo/cues.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/startup_progress.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -92,6 +97,64 @@ bool testStartupProgress() {
     progress.finish();
     BOO_CHECK(progress.waitForChecksums());
     BOO_CHECK(progress.view().fraction == 1.f);
+
+    // The shader gauge: pipelines compile side by side on the compiler's threads, and the thread that
+    // waits for them keeps repainting the bar and answering the window.
+    seen.clear();
+    int pumped = 0;
+    StartupProgress::Setup third;
+    third.memoryFile = root / "memory.txt";
+    third.assetFolders = {root / "assets"};
+    third.onChange = [&](const StartupProgressView& view) { seen.push_back(view.fraction); };
+    progress.begin(third);
+    progress.setPump([&] { ++pumped; });
+    progress.setGpuProbe([] { return uint64_t(64) << 20; });
+    BOO_CHECK(progress.view().shaderBytesTotal == 0u); // the last start compiled nothing
+    progress.assetLoaded(a);
+    {
+        PipelineCompiler compiler;
+        std::atomic<int> started{0};
+        std::atomic<bool> overlapped{false};
+        auto job = [&](bool result) {
+            return [&started, &overlapped, result] {
+                ++started;
+                // Both run at once: each sees the other start (or gives up after two seconds).
+                for (int i = 0; i < 200 && started.load() < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (started.load() == 2) overlapped = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(150)); // the waiter repaints meanwhile
+                return result;
+            };
+        };
+        compiler.start("test pipeline A", 3000u, job(true));
+        compiler.start("test pipeline B", 1000u, job(false));
+        v = progress.view();
+        BOO_CHECK(v.shaderBytesTotal == 4000u && v.shaderBytesCompiled == 0u);
+        BOO_CHECK(!compiler.waitAll()); // B failed
+        BOO_CHECK(overlapped.load());
+        BOO_CHECK(progress.view().shaderBytesCompiled == 4000u); // a failed compile is done all the same
+        BOO_CHECK(pumped > 0);
+        compiler.start("test pipeline C", 500u, [] { return true; });
+        BOO_CHECK(compiler.waitAll()); // the next batch starts clean
+        BOO_CHECK(progress.view().shaderBytesCompiled == 4500u);
+    }
+    BOO_CHECK(std::is_sorted(seen.begin(), seen.end()));
+    BOO_CHECK(progress.view().fraction < 1.f);
+    progress.finish();
+    BOO_CHECK(progress.waitForChecksums());
+
+    // The next start expects the shader code that one compiled.
+    StartupProgress::Setup fourth;
+    fourth.memoryFile = root / "memory.txt";
+    fourth.assetFolders = {root / "assets"};
+    progress.begin(fourth);
+    BOO_CHECK(progress.view().shaderBytesTotal == 4500u);
+    progress.shaderQueued(4500u);
+    const float before = progress.view().fraction;
+    progress.shaderCompiled(4500u);
+    v = progress.view();
+    BOO_CHECK(v.shaderBytesCompiled == 4500u && v.fraction > before + 0.2f); // one of four gauges, now full
+    progress.finish();
+    BOO_CHECK(progress.waitForChecksums());
 
     fs::remove_all(root, ec);
     return true;

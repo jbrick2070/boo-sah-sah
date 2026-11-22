@@ -82,6 +82,7 @@ struct AppSettings {
     bool disableNPU = false;
     bool disableNVENC = false;
     bool forceWarp = false;
+    bool coldShaderCache = false; // diagnostics: the driver ignores its shader caches, as on a first start after an update
     bool injectMeshFail = false;
     bool injectShaderFail = false;
     bool injectAudioFail = false;

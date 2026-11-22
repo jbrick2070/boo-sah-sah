@@ -1,5 +1,6 @@
 #include "boo/trilogy_renderer.hpp"
 #include "boo/startup_progress.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
 #include "boo/city_modules.hpp"
@@ -1458,6 +1459,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         }
         s.buildChunks();
         startupCheckpoint(); // meshes are in memory
+        startupStep("trilogy meshes");
         s.moduleParts.resize(s.city.modules.size());
         s.selectedModules.resize(s.city.modules.size());
         for (size_t m=0; m<s.city.modules.size(); ++m) {
@@ -1589,6 +1591,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         s.ormtTex   = uploadBtexArray(d, s.context, bOrm, error);
         s.envIblTex = uploadBtexArray(d, s.context, bEnv, error);
         startupCheckpoint(); // textures are on the GPU
+        startupStep("trilogy textures");
 
         auto* tensorRes = static_cast<ID3D12Resource*>(tensorTexture);
         if (!tensorRes) {
@@ -1687,6 +1690,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         dp.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;dp.NumRenderTargets=0;dp.DSVFormat=DXGI_FORMAT_D32_FLOAT;dp.SampleDesc.Count=1;
         check(d->CreateGraphicsPipelineState(&dp,IID_PPV_ARGS(&s.depthOpaque)));
         dp.PS={psDepthCut.data(),psDepthCut.size()};check(d->CreateGraphicsPipelineState(&dp,IID_PPV_ARGS(&s.depthCutout)));
+        startupStep("trilogy depth pipelines (2)");
 
         // Piggyback motion on the normal Z prepass only when DLSS consumes it.
         try {
@@ -1706,6 +1710,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         } catch (const std::exception& e) {
             BOO_LOG_WARN("DLSS",std::string("Motion shaders unavailable: ")+e.what());
         }
+        startupStep("trilogy motion pipelines (3)");
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};pd.pRootSignature=s.root.Get();pd.VS={vs.data(),vs.size()};pd.PS={ps.data(),ps.size()};
         pd.BlendState.IndependentBlendEnable=FALSE;
@@ -1731,8 +1736,18 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         check(d->CreateGraphicsPipelineState(&pane,IID_PPV_ARGS(&s.rasterLiftGlazing)));
         s.liftGlazing.reserve(4);
         pd.PS={psCut.data(),psCut.size()};check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.rasterCutout)));
+        startupStep("trilogy raster pipelines (3)");
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};ComPtr<ID3D12Device5> d5;
         s.rtReady=!s.context.isWarp()&&SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,&options,sizeof(options)))&&options.RaytracingTier>=D3D12_RAYTRACING_TIER_1_1&&SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&d5)));
+        // The ray-traced pipelines carry the whole city shader with its ray queries. On a cold shader cache
+        // the driver spends many seconds on each, so they compile side by side on threads of their own while
+        // the rest of the renderer is built, and are waited for at the end. Each ray reconstruction variant
+        // differs only in one target format and follows its base pipeline on the same thread, where the
+        // driver reuses the shader it has just compiled.
+        // Declared before the compiler: on an early return its destructor waits for the compiles, which use these.
+        std::vector<uint8_t> rps,rpsCut,skyRtPs;
+        std::atomic<bool> rrSkyOk{false},rrOpaqueOk{false};
+        PipelineCompiler rtCompiler;
         if(s.rtReady) {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pdRt=pd;
             pdRt.NumRenderTargets=7;
@@ -1743,28 +1758,36 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             pdRt.RTVFormats[4]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             pdRt.RTVFormats[5]=DXGI_FORMAT_R32G32B32A32_UINT;
             pdRt.RTVFormats[6]=DXGI_FORMAT_R16G16B16A16_FLOAT;
-            auto rps=shader("m2_mesh_rt_ps.cso");pdRt.PS={rps.data(),rps.size()};check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rt)));
-            auto rpsCut=shader("m2_mesh_rt_cutout_ps.cso");pdRt.PS={rpsCut.data(),rpsCut.size()};check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rtCutout)));
-            auto skyRtPs=shader("m2_sky_rt_ps.cso");pdRt.VS={skyvs.data(),skyvs.size()};pdRt.PS={skyRtPs.data(),skyRtPs.size()};
-            pdRt.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pdRt.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
-            check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.skyRt)));
-            // Keep the ordinary DXR pipeline usable if optional RR setup fails.
+            rps=shader("m2_mesh_rt_ps.cso");rpsCut=shader("m2_mesh_rt_cutout_ps.cso");skyRtPs=shader("m2_sky_rt_ps.cso");
+            // Keep the ordinary DXR pipelines usable if optional RR setup fails.
             // MRT 2..4 carry material guides; MRT 6 carries scalar reflection distance.
-            pdRt.RTVFormats[6]=DXGI_FORMAT_R16_FLOAT;
-            if (SUCCEEDED(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rrSky)))) {
-                pdRt.VS={vs.data(),vs.size()};pdRt.PS={rps.data(),rps.size()};
-                pdRt.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_EQUAL;
-                if (SUCCEEDED(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rrOpaque)))) {
-                    pdRt.PS={rpsCut.data(),rpsCut.size()};
-                    d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.rrCutout));
-                }
-            }
+            auto rrFormats=[](D3D12_GRAPHICS_PIPELINE_STATE_DESC desc){desc.RTVFormats[6]=DXGI_FORMAT_R16_FLOAT;return desc;};
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC opaque=pdRt;opaque.PS={rps.data(),rps.size()};
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC cutout=pdRt;cutout.PS={rpsCut.data(),rpsCut.size()};
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC skyDesc=pdRt;skyDesc.VS={skyvs.data(),skyvs.size()};skyDesc.PS={skyRtPs.data(),skyRtPs.size()};
+            skyDesc.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;skyDesc.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            rtCompiler.start("M2 ray-traced city",vs.size()+rps.size(),[&s,d,opaque,rr=rrFormats(opaque),&rrOpaqueOk] {
+                if(FAILED(d->CreateGraphicsPipelineState(&opaque,IID_PPV_ARGS(&s.rt))))return false;
+                rrOpaqueOk=SUCCEEDED(d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrOpaque)));
+                return true;
+            });
+            rtCompiler.start("M2 ray-traced city, alpha cutout",vs.size()+rpsCut.size(),[&s,d,cutout,rr=rrFormats(cutout)] {
+                if(FAILED(d->CreateGraphicsPipelineState(&cutout,IID_PPV_ARGS(&s.rtCutout))))return false;
+                d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrCutout));
+                return true;
+            });
+            rtCompiler.start("M2 ray-traced sky",skyvs.size()+skyRtPs.size(),[&s,d,skyDesc,rr=rrFormats(skyDesc),&rrSkyOk] {
+                if(FAILED(d->CreateGraphicsPipelineState(&skyDesc,IID_PPV_ARGS(&s.skyRt))))return false;
+                rrSkyOk=SUCCEEDED(d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrSky)));
+                return true;
+            });
         }
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.sky)));
         auto orbital=pd;
         orbital.DepthStencilState.DepthEnable=FALSE;
         orbital.DSVFormat=DXGI_FORMAT_UNKNOWN;
         check(d->CreateGraphicsPipelineState(&orbital,IID_PPV_ARGS(&s.orbitalSky)));
+        startupStep("trilogy sky pipelines (2)");
         const auto avs=shader("m2_accum_vs.cso");
         {
             // Accumulation root signature: one SRV table (t0, space1), pixel-only
@@ -1814,6 +1837,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             D3D12_COMPUTE_PIPELINE_STATE_DESC cpd{};cpd.pRootSignature=s.nrdPackRoot.Get();cpd.CS={packCs.data(),packCs.size()};
             check(d->CreateComputePipelineState(&cpd,IID_PPV_ARGS(&s.nrdPackCs)));
         }
+        startupStep("trilogy accumulation and denoise pipelines (5)");
         D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=10;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
@@ -1889,6 +1913,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             },error))return false;
             for (auto* part : geometriesById) part->blas.Reset();
             startupCheckpoint(); // acceleration structures built and compacted
+            startupStep("trilogy acceleration structures");
             const auto poolDesc=s.compactBlasPool->GetDesc();
             s.blasBytes=d->GetResourceAllocationInfo(0,1,&poolDesc).SizeInBytes;
         }
@@ -1948,7 +1973,14 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                 for (size_t k=0;k<c.partIndices.size();++k) s.parts[c.partIndices[k]].compactBlas=c.blases[k][0]->GetGPUVirtualAddress();
             }
         }
+        startupStep("trilogy cloth acceleration structures");
         s.nrd.initialize(nullptr);
+        startupStep("NRD");
+        if(!rtCompiler.waitAll())throw std::runtime_error("M2 ray-traced pipelines could not be created");
+        // As before: ray reconstruction needs all three of its pipelines, built in order sky, opaque, cutout.
+        if(!rrSkyOk){s.rrSky.Reset();s.rrOpaque.Reset();s.rrCutout.Reset();}
+        else if(!rrOpaqueOk){s.rrOpaque.Reset();s.rrCutout.Reset();}
+        startupStep("trilogy ray-traced pipelines (3, with 3 ray reconstruction variants)");
         startupCheckpoint();
         if (impl_->vb && !s.context.waitForGpu()) throw std::runtime_error("Could not retire previous scene resources");
         impl_.swap(next);

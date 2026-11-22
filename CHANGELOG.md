@@ -2,6 +2,13 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.11.0 — A faster first start
+
+- The first start after an update takes 58 s instead of 2½ minutes on an RTX 5080 Laptop GPU. After every app or driver update the graphics driver's shader cache is empty, and timing each stage showed where the time went: 44 s for each of the two shaders that draw the dashboard over the film (plain, and with frame-generation inputs), about 16 s for each of the two ray-traced city shaders, and under half a second for everything else. The CUDA, tensor and codec runtimes load in under 0.1 s. Those big pipelines now compile side by side on threads of their own while the rest of start-up carries on (`PipelineCompiler`).
+- The loading bar has a fourth gauge, shader code compiled into pipelines (`Shaders 2.2 / 4.3 MB` under the bar), against what the last start compiled. While start-up waits for those compiles it keeps repainting the bar and answering the window, which can be moved or closed.
+- The bar still holds for about 20 s near the end of a first start after an update, while the dashboard shaders finish. Later starts are unchanged: 7 s to the film, pipelines from the cache.
+- `--cold-shader-cache` starts as after an update: the driver ignores its shader caches (needs Windows Developer Mode). `--log-level debug` logs how long each start-up stage and each of those pipelines took.
+
 ## 1.1.10.0 — Street life
 
 - Taipei's mapped streets are lined with trees and lamps: about 1,200 street trees (broad crowns and taller narrow ones, every 10 m on the pavement) and 650 lamps whose luminaires glow at night. They are placed by walking every kerb of the surveyed roads, and an occupancy grid keeps them clear of junctions, walls, water and elevated roads.
