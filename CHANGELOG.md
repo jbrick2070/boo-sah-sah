@@ -2,6 +2,14 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.9.0 — A new sky
+
+- The sky is computed from how sunlight scatters in the air: Rayleigh, Mie and ozone single scattering at 16 wavelengths plus multiple scattering, baked for ten sun elevations by `tools/gen_sky_table.py` into the city shader. The same sky lights everything outdoors, colours the haze and lights the clouds, whose sunward edges stay lit after the sunset below and redden as the light goes.
+- Nights are no longer black. The sky holds the blue hour (the sun 6.5 degrees below the horizon where it set), with an afterglow on that bearing, so the skyline and its lit windows read clearly. The low air at night is dark and blue, and the sky's fill is eased, so far windows still show through the haze.
+- "Last Light" keeps a truthful golden hour: a warm white balance while the sun is low, and a warmer glow round the sun, which the reflecting pool mirrors.
+- Lit windows and signs glow softly (bloom from brightness 0.8 instead of 1.35, spread wider), and the final grade adds a gentle print saturation.
+- `boo_integration_tests --film-captures --film-capture-seconds 4,18,30` captures chosen moments of the full film for a quick look.
+
 ## 1.1.8.0 — "Last Light"
 
 - A new 45-second opening at dusk: the sunset in the reflecting pool, a silk banner streaming in the terrace wind (baked PhysX GPU cloth), a kettle of 32 black kites leaning with the same wind beside Taipei 101, the sun setting and the city's lights coming on, then the orchid. Written by Claude Fable, reviewed by Codex and Antigravity.

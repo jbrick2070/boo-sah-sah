@@ -348,7 +348,12 @@ From the repository root, these optional checks save their results without activ
 
 # 224 stress iterations; receipt saved to diagnostics/film-stress/stress.json
 ./build/x64-release/boo_integration_tests.exe --film-stress --no-activate --capture-dir diagnostics/film-stress
+
+# A quick look at chosen moments of the full film (family edition only, about a minute)
+./build/x64-release/boo_integration_tests.exe --film-captures --film-capture-seconds 4,18,30,318 --no-activate --capture-dir diagnostics/look
 ```
+
+The sky is a scattering table baked into `assets/shaders/m2_mesh.hlsl` by `tools/gen_sky_table.py`. After changing the atmosphere or exposure in that tool, run it (add `--preview <folder>` for panoramas of every sun elevation), then `python tools/refresh_asset_hashes.py`.
 
 Open `manifest.json` beside the captures for per-frame results. Add `--require-debug-layer` to either command for strict D3D12 warning validation; this fails if Windows Graphics Tools is missing. Without that component, a successful run records warning validation as unavailable. All automated application and integration-test launches must include `--no-activate`.
 

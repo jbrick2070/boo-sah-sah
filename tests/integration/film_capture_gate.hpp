@@ -2,6 +2,8 @@
 // executable or image-library dependency: PNG uses inbox Windows Imaging Component.
 std::filesystem::path gFilmCaptureDirectory = "build/film_captures";
 std::optional<uint32_t> gHeroCaptureStartSeconds;
+// --film-capture-seconds: a quick look pass. Only the full film, family edition, at these seconds.
+std::vector<int> gFilmCaptureSeconds;
 bool gRequireDebugLayer = false;
 
 struct CaptureComScope {
@@ -180,7 +182,13 @@ bool testFullFilmCaptureGate() {
         {"solo_tensor", "solo_tensor", {24}}, {"solo_npu", "solo_npu", {25}}
     };
     CaptureContactSheet narrativeSheet, soloSheet;
-    for (const auto& selection : cues) {
+    const bool lookPass = !gFilmCaptureSeconds.empty();
+    for (const auto& baseSelection : cues) {
+        auto selection = baseSelection;
+        if (lookPass) {
+            if (std::string(selection.label) != "film") continue;
+            selection.seconds = gFilmCaptureSeconds;
+        }
         CueSheet cue; ValidationReport validation;
         const auto cuePath = std::string("assets/cues/") + selection.file + ".json";
         BOO_CHECK(loadCueSheetFromFile(resolveResourcePath(cuePath), cue, validation) && validation.valid);
@@ -189,6 +197,7 @@ bool testFullFilmCaptureGate() {
         M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, mode);
         BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
         for (const auto edition : {Edition::Family, Edition::Midnight}) {
+            if (lookPass && edition != Edition::Family) continue;
             CaptureContactSheet filmSheet;
             const std::string editionName = edition == Edition::Family ? "family" : "midnight";
             for (const auto seconds : selection.seconds) {
@@ -277,8 +286,10 @@ bool testFullFilmCaptureGate() {
         }
         fx.shutdown();
     }
-    BOO_CHECK(soloSheet.save(gFilmCaptureDirectory / "solos_montage.png"));
-    BOO_CHECK(narrativeSheet.save(gFilmCaptureDirectory / "narrative_montage.png"));
+    if (!lookPass) {
+        BOO_CHECK(soloSheet.save(gFilmCaptureDirectory / "solos_montage.png"));
+        BOO_CHECK(narrativeSheet.save(gFilmCaptureDirectory / "narrative_montage.png"));
+    }
     d3d.waitForGpu();
     BOO_CHECK(d3d.debugErrorCount() == 0);
     BOO_CHECK(d3d.debugWarningCount() == 0);

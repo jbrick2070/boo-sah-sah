@@ -1794,6 +1794,9 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
 
         float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.012 + halation) * gPreExposure * vignette;
         sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
+        // A gentle print saturation, as a film grade adds: colour holds up through the haze.
+        float lumGrade = dot(sdr, float3(0.2126, 0.7152, 0.0722));
+        sdr = saturate(lerp(lumGrade.xxx, sdr, 1.12));
 
         // Luminance-weighted film grain (strongest in the mid-tones, absent in pure black and white).
         float lumS = dot(sdr, float3(0.2126, 0.7152, 0.0722));

@@ -3193,7 +3193,9 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         GpuM1PostConstants pc{};
         pc.invSize[0] = 1.0f / static_cast<float>(srcW);
         pc.invSize[1] = 1.0f / static_cast<float>(srcH);
-        pc.bloomThreshold = 1.35f;
+        // Low enough that a lit window (about 0.3 to 0.8) glows a little, as light does in a real lens;
+        // the soft knee keeps unlit facades out.
+        pc.bloomThreshold = 0.80f;
         pc.scaleOrVignette = 1.0f;
         pc.isFirstDownsample = (m == 0) ? 1u : 0u;
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
@@ -3219,8 +3221,9 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         GpuM1PostConstants pc{};
         pc.invSize[0] = 1.0f / static_cast<float>(bloomW[srcIdx]);
         pc.invSize[1] = 1.0f / static_cast<float>(bloomH[srcIdx]);
-        pc.scaleOrVignette = 1.12f;
-        pc.bloomIntensity = 0.62f;
+        // The coarser levels carry more of the glow, so it spreads into a soft halo, not a tight rim.
+        pc.scaleOrVignette = 1.25f;
+        pc.bloomIntensity = 0.85f;
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
         cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(4u + srcIdx)); // [6]=mip2, [5]=mip1
         cmd->DrawInstanced(3, 1, 0, 0);

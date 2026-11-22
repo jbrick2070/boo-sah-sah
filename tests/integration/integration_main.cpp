@@ -2650,6 +2650,21 @@ int main(int argc, char** argv) {
             }
             gHeroCaptureStartSeconds = seconds;
         }
+        else if (option == "--film-capture-seconds" && arg + 1 < argc) {
+            // Comma-separated whole seconds inside the six-minute film, e.g. 0,8,18,24,30.
+            const std::string list = argv[++arg];
+            size_t start = 0;
+            while (start <= list.size()) {
+                const size_t end = std::min(list.find(',', start), list.size());
+                int seconds = -1;
+                const auto result = std::from_chars(list.data() + start, list.data() + end, seconds);
+                if (result.ec != std::errc{} || result.ptr != list.data() + end || seconds < 0 || seconds > 359) {
+                    std::cerr << "--film-capture-seconds takes whole seconds in [0, 359], comma-separated.\n"; return 2;
+                }
+                gFilmCaptureSeconds.push_back(seconds);
+                start = end + 1;
+            }
+        }
         else if (option == "--stress-iterations" && arg + 1 < argc) {
             const std::string value = argv[++arg];
             const auto result = std::from_chars(value.data(), value.data() + value.size(), gFilmStressIterations);
@@ -2661,6 +2676,7 @@ int main(int argc, char** argv) {
     }
     if (gBaseline4K && !cityBaseline) { std::cerr << "--baseline-4k requires a baseline capture suite.\n"; return 2; }
     if (gHeroCaptureStartSeconds && !heroVideoCapture) { std::cerr << "--capture-start-seconds requires --hero-video-capture.\n"; return 2; }
+    if (!gFilmCaptureSeconds.empty() && !filmCaptures) { std::cerr << "--film-capture-seconds requires --film-captures.\n"; return 2; }
     if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(effectsCaptures) + int(directorCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
     if ((trilogyCaptures || filmCaptures || heroVideoCapture || interactiveCaptures || validationCaptures || effectsCaptures || directorCaptures || filmStress || lifecycleTests || cityBaseline) && !noActivate) {
         std::cerr << "Automated integration gates require --no-activate.\n";

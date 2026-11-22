@@ -23,7 +23,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "54f473b9b9fa71e0e2f5a6f1c7d17d065c9291b80f14a40c8a64755f67149c7f"
+      "sha256": "c312e1b3b5caf7e629d33c1282d37028059b3e5c47345f9f1105de2f7ad11919"
     },
     {
       "id": "shader_flow_smoke",
@@ -67,7 +67,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "d697109c2ab0e935a55592dfecb69a6801628d0118e74d5556500cfd7ec8fba4"
+      "sha256": "613774648d3e162efa6c04ca35c9e74585030a722f04c209cb680370d85a6a60"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -158,7 +158,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "ff257c5a476c253ecc1cbb2f5e37753d17cb92aa62788e8f697011f86befe58b"
+      "sha256": "fb335969d68d06fd47d9ca4ddf6ef1c88885f648b66a1cb183bfa679637e8530"
     },
     {
       "id": "model_madame_n_director_xml",
@@ -684,7 +684,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "4b96ea471e375916e75d69fac3db51f4c648a0cd04b9f1c9c69a0674e2e1a9a5"
+      "sha256": "42ae965010bb5e6d09f19b25345da09292630520e18465cbfa1b9566847d23d8"
     },
     {
       "id": "tool_render_cycles_reference",
@@ -761,7 +761,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "768713fbe8638cfac267ce32cb8f765175d377c1e4ee733ffc16f113db440fe2"
+      "sha256": "2b2b7559b19980ac63d1365646f37525d6b8966aa49446e4248d997ec5eb9ec5"
     },
     {
       "id": "tool_fetch_neural_sdk",
@@ -783,7 +783,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "dcf675073033809b8e28a3a2af0046f2eff089160c06bb16636a87e9c7f3bba3"
+      "sha256": "0e54d44e8e80dc5dfe0dfffdd6dd8799b01b68cbc9f8a89b66484d5dfe3abc7a"
     },
     {
       "id": "tool_physx_bake",
@@ -794,7 +794,18 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "05825e4ab86a8e3685431f914c3f52c25e78f912e14da05cde9f792fd7a5e53f"
+      "sha256": "308aa5ad981bb520771b5f64404e21fc57dc4ca9cc74cbdeff198e90e5811e50"
+    },
+    {
+      "id": "tool_gen_sky_table",
+      "path": "tools/gen_sky_table.py",
+      "kind": "tool",
+      "provenance": "First-party offline bake of the scattering sky table embedded in m2_mesh.hlsl",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "cdfc9e1c1601d4b2be19ed91ed8d27c3f47fccad2abc64f2bc5b10ffedb28103"
     }
   ],
   "source_audio": [
