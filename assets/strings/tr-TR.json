@@ -72,6 +72,7 @@
     "hud.music": "MÜZİK",
     "hud.reset": "RESET",
     "hud.next_scene": "SONRAKİ SAHNE",
+    "hud.play_again": "TEKRAR OYNAT",
     "hud.solo": "SOLO:",
     "hud.all": "[TÜMÜ]",
     "hud.act": "PERDE {n}",

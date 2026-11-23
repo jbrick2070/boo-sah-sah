@@ -72,6 +72,7 @@
     "hud.music": "МУЗЫКА",
     "hud.reset": "СБРОС",
     "hud.next_scene": "СЛЕД. СЦЕНА",
+    "hud.play_again": "ПОВТОРИТЬ",
     "hud.solo": "СОЛО:",
     "hud.all": "[ВСЕ]",
     "hud.act": "АКТ {n}",

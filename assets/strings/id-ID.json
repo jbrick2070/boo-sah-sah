@@ -72,6 +72,7 @@
     "hud.music": "MUSIK",
     "hud.reset": "RESET",
     "hud.next_scene": "ADEGAN LANJUT",
+    "hud.play_again": "PUTAR LAGI",
     "hud.solo": "SOLO:",
     "hud.all": "[SEMUA]",
     "hud.act": "BABAK {n}",

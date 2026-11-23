@@ -74,6 +74,7 @@ struct HudTelemetrySnapshot {
     bool muted = false;
     bool paused = false;
     bool loopEnabled = false;
+    bool filmEnded = false;   // the film has played to its end: the transport offers PLAY AGAIN
     QualityPresetId preset = QualityPresetId::Balanced;
     Edition edition = Edition::Family;
     PlaybackMode playbackMode = PlaybackMode::FullFilm;

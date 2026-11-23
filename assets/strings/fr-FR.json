@@ -72,6 +72,7 @@
     "hud.music": "MUSIQ.",
     "hud.reset": "RAZ",
     "hud.next_scene": "SCÈNE SUIV.",
+    "hud.play_again": "REVOIR",
     "hud.solo": "SOLO :",
     "hud.all": "[TOUS]",
     "hud.act": "ACTE {n}",

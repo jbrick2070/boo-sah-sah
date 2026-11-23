@@ -1895,7 +1895,7 @@ static const uint UI_LBL_STATE_SCRIPT = 51u, UI_LBL_STATE_WARMING = 52u, UI_LBL_
 static const uint UI_LBL_PATH_TRACING = 54u, UI_LBL_UNAVAILABLE = 55u, UI_LBL_FEATURE_LEVEL = 56u;
 static const uint UI_LBL_GRAPHICS = 62u, UI_LBL_AUTO = 63u, UI_LBL_ENABLED = 64u, UI_LBL_BOOST = 65u;
 static const uint UI_LBL_RR = 66u, UI_LBL_FG = 67u, UI_LBL_RENDER_FPS = 68u, UI_LBL_DISPLAY_FPS = 69u;
-static const uint UI_LBL_DLSS_UPSCALING = 70u;
+static const uint UI_LBL_DLSS_UPSCALING = 70u, UI_LBL_PLAY_AGAIN = 71u;
 static const float UI_CAPTION_TOP = 1080.0;
 
 // A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
@@ -3048,6 +3048,28 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                             sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u)));
                     sdr = hudOver(uiAlpha, sdr, colEnamel, tPrv);
 
+                    // The film is over: one wide [PLAY AGAIN] button where [PLAY] and [NXT >] were.
+                    if ((gHudFlags & (1u << 21u)) != 0u)
+                    {
+                        float2 agnMin = float2(rightBase - 214.0 * uiScale, pTop);
+                        float2 agnMax = float2(rightBase - 92.0 * uiScale, pBot);
+                        if (px.x >= agnMin.x && px.x <= agnMax.x && px.y >= pTop && px.y <= pBot)
+                        {
+                            sdr = hudOver(uiAlpha, sdr, colJade * 0.28, 0.88);
+                            if ((px.x - agnMin.x < 1.5) || (agnMax.x - px.x < 1.5) || (px.y - pTop < 1.5) || (pBot - px.y < 1.5))
+                                sdr = hudInk(uiAlpha, colJade);
+                        }
+                        // Ten 5-unit cells, centred in the 122-unit button.
+                        float agnScale = 1.55 * uiScale;
+                        float2 agnAt = agnMin + float2(22.6 * uiScale, 6.0 * uiScale);
+                        float tAgn = max(
+                            sampleWord8(px, agnAt, agnScale, 80u, 76u, 65u, 89u, 32u, 65u, 71u, 65u),
+                            sampleWord4(px, agnAt + float2(40.0 * agnScale, 0.0), agnScale, 73u, 78u, 32u, 32u));
+                        tAgn = uiLabel(px, agnAt, agnScale, 9.9, UI_LBL_PLAY_AGAIN, tAgn, 1.35);
+                        sdr = hudOver(uiAlpha, sdr, colEnamel, tAgn);
+                    }
+                    else
+                    {
                     // [PLAY] / [PAUS]
                     bool isPaused = (gHudFlags & 8u) != 0u;
                     float3 plyCol = isPaused ? colJade : colAmber;
@@ -3079,6 +3101,7 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                             sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u)),
                         textGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
                     sdr = hudOver(uiAlpha, sdr, colEnamel, tNxt);
+                    }
                 }
 
                 // Clickable Interactive Explore Mode Pill ("F:FILM" / "F:FREE")
@@ -4311,10 +4334,23 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                 if ((px.x - bNxtScnMin.x < 1.2) || (bNxtScnMax.x - px.x < 1.2) || (px.y - bNxtScnMin.y < 1.2) || (bNxtScnMax.y - px.y < 1.2))
                     sdr = hudInk(uiAlpha, colJade);
             }
-            float tNxtScn = max(
-                uiLabel(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 9.9, UI_LBL_NEXT_SCENE,
-                    sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u)),
-                textGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
+            float tNxtScn = 0.0;
+            if ((gHudFlags & (1u << 21u)) != 0u)
+            {
+                // The film is over: [PLAY AGAIN], centred in the 88-unit button.
+                float2 agnAt = bNxtScnMin + float2(10.7 * u, 4.8 * u);
+                tNxtScn = max(
+                    sampleWord8(px, agnAt, 1.35 * u, 80u, 76u, 65u, 89u, 32u, 65u, 71u, 65u),
+                    sampleWord4(px, agnAt + float2(40.0 * 1.35 * u, 0.0), 1.35 * u, 73u, 78u, 32u, 32u));
+                tNxtScn = uiLabel(px, agnAt, 1.35 * u, 9.9, UI_LBL_PLAY_AGAIN, tNxtScn);
+            }
+            else
+            {
+                tNxtScn = max(
+                    uiLabel(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 9.9, UI_LBL_NEXT_SCENE,
+                        sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u)),
+                    textGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
+            }
             sdr = hudOver(uiAlpha, sdr, colEnamel, tNxtScn);
         }
 

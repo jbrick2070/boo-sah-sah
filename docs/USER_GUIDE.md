@@ -93,6 +93,8 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Ctrl+L` | Open a Demo-Verse world address from Film or Explore |
 | `Esc` | Leave full screen. From a window, clean shutdown |
 
+When the full film reaches its end, the music fades out over its last 8 seconds, and the transport bar's PLAY and NEXT buttons become one **PLAY AGAIN** button (the studio dock's NEXT SCN button reads the same). Click either, or press `Space` or `R`, to start again from the beginning. With looping on (`L`) the film runs straight on instead.
+
 ### Watch, roam and visit another world
 
 The film follows its authored camera. Press `F` to explore with your own camera and press `F` again to return to the film. From either view, press `Ctrl+L` to visit another creator’s demo. Enter the public address supplied by its host, in the form `https://host.example/worlds/<uuid>`. Check the destination, then choose the registered Demo-Verse visitor or open the landing page in your browser. Cancel keeps you in the film. The destination host controls entry to its world.

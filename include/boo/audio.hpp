@@ -147,6 +147,8 @@ public:
     void setMuted(bool muted) noexcept;
     bool isMuted() const noexcept { return muted_.load(std::memory_order_relaxed); }
     void setMasterVolume(float volume01) noexcept;
+    // The end of the film: the music fades with its last seconds (1 = full, 0 = silent). Set every frame.
+    void setEndFade(float gain01) noexcept;
     void resetPhase(uint64_t seedSample) noexcept;
 
     // Built-in 4-track original soundtrack (0=Procedural Synth, 1..4=Bundled OST Tracks 1..4, 5=External MP3)
@@ -214,6 +216,7 @@ private:
     std::atomic<bool> usesHwClock_{false};
     std::atomic<bool> migrationPending_{false};
     std::atomic<float> masterVolume_{0.75f};
+    std::atomic<float> endFade_{1.0f};
 
     bool hasBundledSoundtrack_ = false;
     std::atomic<uint32_t> selectedTrackSlot_{0}; // 0=Procedural Synth, 1..4=OST 1..4, 5=External MP3

@@ -65,6 +65,8 @@ constexpr UiLabelSpec kLabelSpecs[static_cast<size_t>(UiLabel::Count)] = {
     {"hud.ray_reconstruction", 18.0f, 1.30f, false, 0}, {"hud.frame_generation", 18.0f, 1.30f, false, 0},
     {"hud.render_fps", 12.0f, 1.20f, false, 0}, {"hud.display_fps", 12.0f, 1.20f, false, 0},
     {"hud.dlss_upscaling", 15.0f, 1.30f, false, 0},
+    // The studio dock draws it at this size; the transport bar samples the same cell at 1.55.
+    {"hud.play_again", 9.9f, 1.35f, true, 0},
 };
 
 std::wstring utf8ToWide(std::string_view utf8) {

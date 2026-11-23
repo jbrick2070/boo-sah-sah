@@ -72,6 +72,7 @@
     "hud.music": "音乐",
     "hud.reset": "重置",
     "hud.next_scene": "下一场景",
+    "hud.play_again": "再看一遍",
     "hud.solo": "独奏:",
     "hud.all": "[全部]",
     "hud.act": "第{n}幕",

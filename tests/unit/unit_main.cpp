@@ -1625,8 +1625,9 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 95);
+    BOO_CHECK(keys.size() == 96);
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
+    BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.play_again") != keys.end());
 
     UiTextLayer layer;
     size_t problems = 0;

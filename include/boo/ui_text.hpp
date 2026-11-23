@@ -28,6 +28,7 @@ enum class UiLabel : uint32_t {
     LiveCamera, OstSynth, OstCustom, StateScript, StateWarming, StateIdle,
     PathTracing, Unavailable, Low, Medium, High, Quality, Balanced, Performance,
     RealTimeGraphics, Automatic, Enabled, Boost, RayReconstruction, FrameGeneration, RenderFps, DisplayFps, DlssUpscaling,
+    PlayAgain,
     Count
 };
 
@@ -51,6 +52,8 @@ struct UiTextAtlasLayout {
     static constexpr uint32_t kCaptionTop = kLabelRows * kLabelCellH * kMaxUiScale;
     static constexpr uint32_t kCaptionMaxH = 224;
     static constexpr uint32_t kHeight = kCaptionTop + kCaptionMaxH;
+    static_assert(static_cast<uint32_t>(UiLabel::Count) <= kLabelCols * kLabelRows,
+                  "every label needs a cell in the atlas: add a row (and move the shader's UI_CAPTION_TOP)");
     // Label text box relative to the glyph origin the shader uses: starts 2.5 units above it, 11 units tall.
     static constexpr float kBoxTopUnits = 2.5f;
     static constexpr float kBoxHeightUnits = 11.0f;

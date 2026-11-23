@@ -72,6 +72,7 @@
     "hud.music": "MUS.",
     "hud.reset": "NOLL.",
     "hud.next_scene": "SEUR. KOHTAUS",
+    "hud.play_again": "TOISTA ALUSTA",
     "hud.solo": "SOOLO:",
     "hud.all": "[KAIKKI]",
     "hud.act": "NÄYTÖS {n}",

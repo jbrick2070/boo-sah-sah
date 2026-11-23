@@ -72,6 +72,7 @@
     "hud.music": "HUDBA",
     "hud.reset": "RESET",
     "hud.next_scene": "DALŠÍ SCÉNA",
+    "hud.play_again": "PŘEHRÁT ZNOVU",
     "hud.solo": "SÓLO:",
     "hud.all": "[VŠE]",
     "hud.act": "DĚJSTVÍ {n}",

@@ -72,6 +72,7 @@
     "hud.music": "NHẠC",
     "hud.reset": "RESET",
     "hud.next_scene": "CẢNH TIẾP",
+    "hud.play_again": "PHÁT LẠI",
     "hud.solo": "SOLO:",
     "hud.all": "[TẤT CẢ]",
     "hud.act": "HỒI {n}",

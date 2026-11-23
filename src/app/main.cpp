@@ -933,6 +933,7 @@ struct InteractiveExploreController {
         std::array<bool, 5> graphicsAvailable,
         bool volumeVisible,
         bool benchmarkVisible,
+        bool filmEnded,          // the HUD shows PLAY AGAIN in place of PLAY/NEXT and the dock's NEXT SCN
         BooXInputGamepad& outPad,
         bool& outHasPad) {
         outHasPad = xinput.poll(outPad);
@@ -1165,6 +1166,9 @@ struct InteractiveExploreController {
                         if (snap.mouseX >= rightBase - 272.0f * u && snap.mouseX <= rightBase - 220.0f * u) {
                             window.pushCommandFromWndProc(boo::TransportCommand::PrevAct);
                             consumed = true;
+                        } else if (filmEnded && snap.mouseX >= rightBase - 214.0f * u && snap.mouseX <= rightBase - 92.0f * u) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::Restart); // [PLAY AGAIN]
+                            consumed = true;
                         } else if (snap.mouseX >= rightBase - 214.0f * u && snap.mouseX <= rightBase - 162.0f * u) {
                             window.pushCommandFromWndProc(boo::TransportCommand::TogglePlayPause);
                             consumed = true;
@@ -1236,7 +1240,8 @@ struct InteractiveExploreController {
                         } else if (rx >= 400.0f && rx <= 438.0f) {
                             window.pushCommandFromWndProc(boo::TransportCommand::ResetInteractiveLighting);
                         } else if (rx >= 442.0f && rx <= 530.0f) {
-                            window.pushCommandFromWndProc(boo::TransportCommand::NextAct);
+                            window.pushCommandFromWndProc(filmEnded ? boo::TransportCommand::Restart  // [PLAY AGAIN]
+                                                                    : boo::TransportCommand::NextAct);
                         }
                     }
                 }
@@ -2395,6 +2400,7 @@ int main(int argc, char** argv) {
              presentation.state != RendererFeatureState::Unavailable, presentation.reflexState != RendererFeatureState::Unavailable},
             std::chrono::steady_clock::now() < volumeVisibleUntil,
             benchRunning.load(std::memory_order_relaxed) || benchCompleted.load(std::memory_order_relaxed),
+            clock.state() == TransportState::Ended,
             padState, hasGamepad);
 
         // Drag-and-drop custom MP3/WAV/FLAC/M4A soundtrack (or MP4 Signal Hijack video) directly onto window!
@@ -3190,6 +3196,19 @@ int main(int argc, char** argv) {
                 audio.resetPhase(static_cast<uint64_t>(std::max<int64_t>(0, tick.samplePosition)));
             }
             audio.setPaused(tick.state == TransportState::Paused || tick.state == TransportState::Ended);
+            // The music fades out over the film's last seconds and is silent as the picture ends, instead
+            // of stopping dead on the last frame. Not when the film loops, and not in the free camera,
+            // where the music plays on as ambience.
+            constexpr double kEndFadeSeconds = 8.0;
+            float endFade = 1.0f;
+            int64_t loopStart = 0, loopEnd = 0;
+            if (settings.playbackMode == PlaybackMode::FullFilm && !clock.loopEnabled() &&
+                !clock.getLoopRange(loopStart, loopEnd) && !interactiveCtrl.exploreActive) {
+                const double remaining = static_cast<double>(clock.durationSamples() - tick.samplePosition) /
+                                         static_cast<double>(std::max<int32_t>(1, cueSheet.sampleRate));
+                endFade = static_cast<float>(std::clamp(remaining / kEndFadeSeconds, 0.0, 1.0));
+            }
+            audio.setEndFade(endFade);
         }
         if (tick.unclampedDtSeconds > 0.0001) {
             const double instFps = 1.0 / tick.unclampedDtSeconds;
@@ -3439,6 +3458,7 @@ int main(int argc, char** argv) {
             hud.muted = audio.isMuted();
             hud.paused = fctx.paused;
             hud.loopEnabled = clock.loopEnabled();
+            hud.filmEnded = (tick.state == TransportState::Ended);
             hud.preset = qualityLadder.currentPreset();
             hud.edition = settings.edition;
             hud.playbackMode = settings.playbackMode;

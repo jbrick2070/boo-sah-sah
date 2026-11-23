@@ -3981,6 +3981,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     if (externalNv12Active && externalTexUploaded) flags |= (1u << 15u);
     if (cueCodec && !codecHijackActive && ctx.showOverlay && ctx.hudMode < 2u)
         flags |= (1u << 18u);
+    if (hud.filmEnded)                    flags |= (1u << 21u); // PLAY AGAIN in place of PLAY and NEXT
 #if defined(BOO_HAS_DLSS)
     flags |= (1u << 20u);
 #endif

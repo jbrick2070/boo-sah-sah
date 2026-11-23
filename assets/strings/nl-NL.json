@@ -72,6 +72,7 @@
     "hud.music": "MUZIEK",
     "hud.reset": "RESET",
     "hud.next_scene": "VOLG. SCÈNE",
+    "hud.play_again": "NOG EEN KEER",
     "hud.solo": "SOLO:",
     "hud.all": "[ALLE]",
     "hud.act": "AKTE {n}",

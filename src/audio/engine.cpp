@@ -1517,6 +1517,10 @@ void AudioEngine::setMuted(bool muted) noexcept {
     muted_.store(muted, std::memory_order_relaxed);
 }
 
+void AudioEngine::setEndFade(float gain01) noexcept {
+    endFade_.store((std::isfinite(gain01) ? std::clamp(gain01, 0.0f, 1.0f) : 1.0f), std::memory_order_relaxed);
+}
+
 void AudioEngine::setMasterVolume(float volume01) noexcept {
     masterVolume_.store((std::isfinite(volume01) ? std::clamp(volume01, 0.0f, 1.0f) : 0.0f), std::memory_order_relaxed);
 }
@@ -1939,7 +1943,8 @@ void AudioEngine::audioThreadMain() noexcept {
         const bool awaitingOpeningTrack = waitingForPreload && playedWriteCursor == 0;
         const bool transportHeld = isPaused || awaitingOpeningTrack;
         const bool isMuted = muted_.load(std::memory_order_relaxed) || waitingForPreload;
-        const float masterVol = masterVolume_.load(std::memory_order_relaxed);
+        // The synthesizer ramps its gain smoothly to each new target, so the frame-by-frame end fade is clickless.
+        const float masterVol = masterVolume_.load(std::memory_order_relaxed) * endFade_.load(std::memory_order_relaxed);
         const bool ambientPlay = isPaused && exploreAmbient_.load(std::memory_order_relaxed);
 
         AudioBandSnapshot bands{};

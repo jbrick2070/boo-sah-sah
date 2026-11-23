@@ -72,6 +72,7 @@
     "hud.music": "음악",
     "hud.reset": "초기화",
     "hud.next_scene": "다음 장면",
+    "hud.play_again": "다시 보기",
     "hud.solo": "솔로:",
     "hud.all": "[전체]",
     "hud.act": "제{n}막",

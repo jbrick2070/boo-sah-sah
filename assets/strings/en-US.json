@@ -74,6 +74,7 @@
     "hud.music":       { "text": "MUSC",      "note": "Button state: music is playing. Abbreviate 'music'.", "max": 6, "maxWide": 4 },
     "hud.reset":       { "text": "RST",       "note": "Button: reset the lighting controls. Abbreviate 'reset'.", "max": 5, "maxWide": 3 },
     "hud.next_scene":  { "text": "NEXT SCN",  "note": "Button: go to the next scene. An arrow is drawn beside it.", "max": 13, "maxWide": 7 },
+    "hud.play_again":  { "text": "PLAY AGAIN", "note": "Button shown when the film has ended, in place of the play and next buttons: watch the film again from the start.", "max": 13, "maxWide": 7 },
     "hud.solo":        { "text": "SOLO:",     "note": "Label before the name of the one engine being shown alone, as in a music 'solo'. Keep the colon.", "max": 8, "maxWide": 4 },
     "hud.all":         { "text": "[ALL]",     "note": "Button: return to all engines together. Keep the square brackets.", "max": 10, "maxWide": 6 },
     "hud.act":         { "text": "ACT {n}",   "note": "Current act of the film, as in a play. {n} becomes a number 1 to 7; keep {n}.", "max": 12, "maxWide": 7 },
