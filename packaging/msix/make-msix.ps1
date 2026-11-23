@@ -55,7 +55,8 @@ function Assert-StorePackage([string]$path) {
       'LICENSE', 'LICENSE-ASSETS.md', 'LICENSES.md',
       'config/quality_presets.json', 'assets/cues/film_360s.json', 'assets/models/madame_n_director.xml',
       'assets/models/madame_n_director.bin', 'assets/meshes/shenzhen_evtol.bmesh', 'assets/meshes/taipei_basin_relief.bmesh',
-      'assets/shaders/m1_present_hud.cso', 'assets/shaders/m1_composite.cso', 'assets/shaders/m1_particles_vs.cso',
+      'assets/shaders/m1_present_hud.cso', 'assets/shaders/m1_present_clean.cso', 'assets/shaders/m1_composite.cso',
+      'assets/shaders/m1_particles_vs.cso',
       'assets/shaders/m1_particles_ps.cso', 'assets/shaders/m2_mesh_vs.cso', 'assets/shaders/m2_mesh_ps.cso',
       'assets/shaders/m2_mesh_rt_ps.cso', 'assets/shaders/m1_nv12_pack_cs.cso'
     )
@@ -69,7 +70,8 @@ function Assert-StorePackage([string]$path) {
                      'streamline/sl.reflex.dll', 'streamline/sl.pcl.dll', 'streamline/nvngx_dlssg.dll',
                      'streamline/license.txt', 'streamline/3rd-party-licenses.md', 'streamline/nvngx_dlss.license.txt',
                      'streamline/reflex.license.txt', 'assets/shaders/dlss_resolve.cso',
-                     'assets/shaders/m1_present_frame_generation.cso', 'assets/shaders/m2_motion_vs.cso',
+                     'assets/shaders/m1_present_frame_generation.cso', 'assets/shaders/m1_present_clean_frame_generation.cso',
+                     'assets/shaders/m2_motion_vs.cso',
                      'assets/shaders/m2_motion_ps.cso', 'assets/shaders/m2_motion_cutout_ps.cso',
                      'assets/shaders/m2_sky_motion_ps.cso',
                      'openvino/LICENSE-OpenVINO-Apache-2.0.txt', 'nrd/LICENSE-NVIDIA-NRD.txt',

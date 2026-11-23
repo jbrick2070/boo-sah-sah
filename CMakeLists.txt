@@ -80,6 +80,7 @@ set(M1_BLOOM_DOWN_CSO      "${BOO_OUT_SHADER_DIR}/m1_bloom_down.cso")
 set(M1_BLOOM_UP_CSO        "${BOO_OUT_SHADER_DIR}/m1_bloom_up.cso")
 set(M1_COMPOSITE_CSO       "${BOO_OUT_SHADER_DIR}/m1_composite.cso")
 set(M1_PRESENT_HUD_CSO     "${BOO_OUT_SHADER_DIR}/m1_present_hud.cso")
+set(M1_PRESENT_CLEAN_CSO   "${BOO_OUT_SHADER_DIR}/m1_present_clean.cso")
 set(M1_PARTICLES_SUB_CSO   "${BOO_OUT_SHADER_DIR}/m1_particles_sub_cs.cso")
 set(M1_PARTICLES_VS_CSO    "${BOO_OUT_SHADER_DIR}/m1_particles_vs.cso")
 set(M1_PARTICLES_PS_CSO    "${BOO_OUT_SHADER_DIR}/m1_particles_ps.cso")
@@ -214,6 +215,16 @@ add_custom_command(
     VERBATIM
 )
 
+# The same pass for frames without the overlay or with hudMode 3: the overlay-only HUD layers left out.
+add_custom_command(
+    OUTPUT "${M1_PRESENT_CLEAN_CSO}"
+    COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_PRESENT_CLEAN -Ges -WX -O3
+            "${M1_SLICE_HLSL}" -Fo "${M1_PRESENT_CLEAN_CSO}"
+    DEPENDS "${M1_SLICE_HLSL}"
+    COMMENT "Compiling M1 Present Shader for frames without the overlay"
+    VERBATIM
+)
+
 add_custom_command(
     OUTPUT "${M1_PARTICLES_SUB_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSLiveParticlesSub -DBOO_M1_PARTICLES_SUB_CS -Ges -WX -O3
@@ -330,6 +341,7 @@ boo_dlss_shader(m2_motion_ps m2_mesh ps_6_0 PSSceneMotion)
 boo_dlss_shader(m2_motion_cutout_ps m2_mesh ps_6_0 PSSceneMotion -DBOO_ALPHA_CUTOUT=1)
 boo_dlss_shader(m2_sky_motion_ps m2_mesh ps_6_0 PSSkyMotion)
 boo_dlss_shader(m1_present_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
+boo_dlss_shader(m1_present_clean_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS -DBOO_PRESENT_CLEAN)
 # Neural rendering suite (src/render/neural_rendering.cpp)
 boo_dlss_shader(neural_clear_cs neural_rendering cs_6_0 CSClearStats)
 boo_dlss_shader(neural_ntc_decode_cs neural_rendering cs_6_0 CSNtcDecode)
@@ -423,6 +435,7 @@ add_custom_target(boo_shaders DEPENDS ${BOO_DLSS_SHADER_OUTPUTS}
     "${M1_BLOOM_UP_CSO}"
     "${M1_COMPOSITE_CSO}"
     "${M1_PRESENT_HUD_CSO}"
+    "${M1_PRESENT_CLEAN_CSO}"
     "${M1_PARTICLES_SUB_CSO}"
     "${M1_PARTICLES_VS_CSO}"
     "${M1_PARTICLES_PS_CSO}"

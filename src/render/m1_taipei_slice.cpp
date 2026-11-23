@@ -1152,6 +1152,8 @@ struct M1TaipeiSliceEffect::Impl {
     std::vector<uint8_t> psCompositeBytes;
     std::vector<uint8_t> psPresentHudBytes;
     std::vector<uint8_t> psFrameGenerationBytes;
+    std::vector<uint8_t> psPresentCleanBytes;          // without the overlay-only HUD layers
+    std::vector<uint8_t> psCleanFrameGenerationBytes;
     std::vector<uint8_t> csParticlesSubBytes;
     std::vector<uint8_t> vsParticlesBytes;
     std::vector<uint8_t> psParticlesBytes;
@@ -1177,6 +1179,9 @@ struct M1TaipeiSliceEffect::Impl {
     ComPtr<ID3D12PipelineState> psoCompositeCanvas;
     ComPtr<ID3D12PipelineState> psoPresentHud;
     ComPtr<ID3D12PipelineState> psoPresentWithMotionInputs;
+    // For frames without the overlay or in hudMode 3 (optional: the two above draw them the same, slower).
+    ComPtr<ID3D12PipelineState> psoPresentClean;
+    ComPtr<ID3D12PipelineState> psoPresentCleanWithMotionInputs;
     DXGI_FORMAT presentPsoFormat = DXGI_FORMAT_UNKNOWN;
 
     // Owned descriptor heaps:
@@ -1443,8 +1448,10 @@ bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT 
 
     psoPresentHud.Reset();
     psoPresentWithMotionInputs.Reset();
+    psoPresentClean.Reset();
+    psoPresentCleanWithMotionInputs.Reset();
     presentPsoFormat = swapchainFmt;
-    // Each compile writes only its own pipeline; nothing reads either one before they are done.
+    // Each compile writes only its own pipeline; nothing reads one before they are all done.
     auto plain = [this, dev, pd] {
         ComPtr<ID3D12PipelineState> built;
         if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&built))) || !built) return false;
@@ -1454,6 +1461,21 @@ bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT 
     const uint64_t plainBytes = vsFullscreenBytes.size() + psPresentHudBytes.size();
     if (compiler) compiler->start("M1 present and HUD", plainBytes, plain);
     else if (!plain()) return false;
+
+    // The clean pipelines leave out the overlay-only HUD layers; they draw frames without the overlay or
+    // in hudMode 3 faster. Optional: the full pipelines draw those frames the same.
+    if (psPresentCleanBytes.empty()) readShaderCso("assets/shaders/m1_present_clean.cso", psPresentCleanBytes);
+    if (!psPresentCleanBytes.empty()) {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC clean = pd;
+        clean.PS = {psPresentCleanBytes.data(), psPresentCleanBytes.size()};
+        auto cleanPlain = [this, dev, clean] {
+            dev->CreateGraphicsPipelineState(&clean, IID_PPV_ARGS(&psoPresentClean));
+            return true;
+        };
+        const uint64_t cleanBytes = vsFullscreenBytes.size() + psPresentCleanBytes.size();
+        if (compiler) compiler->start("M1 present without the overlay", cleanBytes, cleanPlain);
+        else cleanPlain();
+    }
 
     if (psFrameGenerationBytes.empty()) readShaderCso("assets/shaders/m1_present_frame_generation.cso",psFrameGenerationBytes);
     if (!psFrameGenerationBytes.empty()) {
@@ -1468,6 +1490,20 @@ bool M1TaipeiSliceEffect::Impl::ensurePresentPso(ID3D12Device* dev, DXGI_FORMAT 
         const uint64_t fgBytes = vsFullscreenBytes.size() + psFrameGenerationBytes.size();
         if (compiler) compiler->start("M1 present with frame-generation inputs", fgBytes, withMotionInputs);
         else withMotionInputs();
+
+        if (psCleanFrameGenerationBytes.empty())
+            readShaderCso("assets/shaders/m1_present_clean_frame_generation.cso", psCleanFrameGenerationBytes);
+        if (!psCleanFrameGenerationBytes.empty()) {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC cleanFg = fg;
+            cleanFg.PS = {psCleanFrameGenerationBytes.data(), psCleanFrameGenerationBytes.size()};
+            auto cleanWithMotionInputs = [this, dev, cleanFg] {
+                dev->CreateGraphicsPipelineState(&cleanFg, IID_PPV_ARGS(&psoPresentCleanWithMotionInputs));
+                return true;
+            };
+            const uint64_t cleanFgBytes = vsFullscreenBytes.size() + psCleanFrameGenerationBytes.size();
+            if (compiler) compiler->start("M1 present without the overlay, frame-generation inputs", cleanFgBytes, cleanWithMotionInputs);
+            else cleanWithMotionInputs();
+        }
     }
     return true;
 }
@@ -2581,8 +2617,8 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         return SUCCEEDED(dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&outPso))) && outPso;
     };
 
-    // The present pipelines take longest by far on a cold shader cache: they compile on threads of their own
-    // through the rest of start-up, and are waited for at the end of it.
+    // The present pipelines compile on threads of their own through the rest of start-up, and are waited for
+    // at the end of it. (Until 1.1.12.0 they took 44 s each on a cold shader cache; text runs made that ~2 s.)
     PipelineCompiler presentCompiler;
     if (!makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psRasterSceneBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT, false, impl_->psoRasterScene) ||
@@ -2604,7 +2640,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         res.humanReadableReason = "Failed to create M1 graphics or compute pipeline states.";
         return res;
     }
-    startupStep("M1 graphics and compute pipelines (7; the 2 present pipelines carry on compiling)");
+    startupStep("M1 graphics and compute pipelines (7; the 4 present pipelines carry on compiling)");
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHd{};
     rtvHd.NumDescriptors = 7;
@@ -4163,7 +4199,12 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &scis);
     cmd->SetGraphicsRootSignature(presentRootSig.Get());
-    cmd->SetPipelineState(writeFrameInputs ? psoPresentWithMotionInputs.Get() : psoPresentHud.Get());
+    // The shader reads the overlay flag and hudMode from bits 0 and 8..9 of the flags above.
+    const bool clean = !ctx.showOverlay || (ctx.hudMode & 3u) == 3u;
+    ID3D12PipelineState* pso = writeFrameInputs
+        ? (clean && psoPresentCleanWithMotionInputs ? psoPresentCleanWithMotionInputs.Get() : psoPresentWithMotionInputs.Get())
+        : (clean && psoPresentClean ? psoPresentClean.Get() : psoPresentHud.Get());
+    cmd->SetPipelineState(pso);
     cmd->SetGraphicsRootConstantBufferView(0, presentCbUpload->GetGPUVirtualAddress() + cbOffset);
     cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(14u)); // t0=canvasClean, t1=canvasAbCompare, t2=codecDecodedTex, t3=uiTextTex
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

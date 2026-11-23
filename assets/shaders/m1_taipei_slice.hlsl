@@ -6,7 +6,8 @@
 //   - PSBloomDownsample      (ps_6_0, -DBOO_M1_BLOOM_DOWN_PS)
 //   - PSBloomUpsample        (ps_6_0, -DBOO_M1_BLOOM_UP_PS)
 //   - PSCompositeCanvas      (ps_6_0, -DBOO_M1_COMPOSITE_PS)
-//   - PSPresentLetterboxHud  (ps_6_0, -DBOO_M1_PRESENT_PS)
+//   - PSPresentLetterboxHud  (ps_6_0, -DBOO_M1_PRESENT_PS; plus -DBOO_FRAME_GENERATION_OUTPUTS, and
+//                             -DBOO_PRESENT_CLEAN for frames without the overlay or with hudMode 3)
 
 struct VSOut
 {
@@ -2362,122 +2363,131 @@ float sampleGlyph(float2 px,float2 origin,float scale,uint ch) {
 }
 // END FIRST-PARTY VECTOR TYPE
 
-float sampleFixedNumber6(float2 px, float2 origin, float scale, float val)
+// HUD text as runs. Every text call in the present pass is a run: a row of up to eight glyphs, a number
+// or the caption line. A pixel draws the HUD in passes. Each pass draws with the coverage of the runs
+// resolved so far (zero for the rest) and notes the first unresolved run whose box holds the pixel;
+// after the pass, the single glyph evaluator below rasterises that run. The last pass has every run
+// with ink on the pixel resolved and gives the picture that drawing each text call directly gave.
+// Inlining the glyph code at every call site made this shader 1.1 MB of DXIL, and a driver took 44 s
+// to compile it on a cold shader cache (the first start after an update). Measured over 720 HUD
+// states: 97% of pixels need one pass, none more than six, and no pixel has ink from more than three runs.
+static const uint TXT_GLYPHS = 0u, TXT_FIXED6 = 1u, TXT_MS6 = 2u, TXT_UINT4 = 3u, TXT_UINT6 = 4u;
+static const uint TXT_TIMECODE = 5u, TXT_CAPTION = 6u;
+static const uint TXT_MONITOR = 1u << 12u; // measured from the codec monitor's corner, not the screen's
+static const uint TXT_MAX_PASSES = 16u;    // runs whose box holds one pixel, plus one
+static const uint TXT_NONE = 0xFFFFFFFFu;
+
+// Kept small on purpose: all of it is live through the whole HUD, and registers set how many pixels
+// the GPU keeps in flight while it waits on the film's texture reads.
+static uint   gTxtSite;      // text calls made so far in this pass
+static uint   gTxtNext;      // first call not resolved yet
+static uint   gTxtPendCall;  // first unresolved call whose box holds this pixel: call << 16 | kind, or TXT_NONE
+static float3 gTxtPendGeom;  // its origin and scale
+static uint2  gTxtPendData;  // its eight 8-bit glyph codes, or its number
+static uint4  gTxtInkCall;   // up to four resolved calls with ink on this pixel (TXT_NONE in unused slots)
+static float4 gTxtInkCov;    // and their coverage
+
+void textBeginPixel()
 {
-    float stepX = 5.0 * scale;
-    float a = 0.0;
-    if (val >= 10000.0)
-    {
-        // Auto-format large throughput scores (e.g. 73,635 MSteps/s -> "73.6K") without clamping to 9999.9!
-        float kVal = clamp(val * 0.001, 10.0, 999.9);
-        uint tenthsK = (uint)(kVal * 10.0 + 0.5);
-        uint fracK = tenthsK % 10u;
-        uint wholeK = tenthsK / 10u;
-        uint k2 = (wholeK / 100u) % 10u;
-        uint k1 = (wholeK / 10u)  % 10u;
-        uint k0 = wholeK % 10u;
-        if (wholeK >= 100u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + k2));
-        if (wholeK >= 10u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + k1));
-        a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + k0));
-        a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 46u));
-        a = max(a, sampleGlyph(px, origin + float2(4.0 * stepX, 0.0), scale, 48u + fracK));
-        a = max(a, sampleGlyph(px, origin + float2(5.0 * stepX, 0.0), scale, 75u)); // 'K'
-        return a;
+    gTxtNext = 0u;
+    gTxtInkCall = TXT_NONE;
+    gTxtInkCov = 0.0;
+}
+
+void textBeginPass()
+{
+    gTxtSite = 0u;
+    gTxtPendCall = TXT_NONE;
+}
+
+// One text call. `cells` is how many 5-unit glyph cells it can fill and `ext` one glyph's size in
+// units; the box is what sampleGlyph can touch, a little larger.
+float textRun(float2 px, float2 origin, float scale, uint kind, uint2 data, float cells, float2 ext)
+{
+    const uint site = gTxtSite;
+    gTxtSite = site + 1u;
+    const float2 p = (px - origin) / max(scale, 0.01);
+    bool hit = all(p >= -0.7) && p.x <= 5.0 * cells - 5.0 + ext.x + 0.7 && p.y <= ext.y + 0.7;
+    if ((kind & 0xFFu) == TXT_CAPTION) {
+        // The caption is clipped to its line and to its characters.
+        const float2 rel = px - origin;
+        hit = rel.x >= 0.0 && rel.y >= 0.0 && rel.y < 6.0 * scale &&
+              (uint)(rel.x / (5.0 * scale)) < min(data.x, 64u);
     }
-
-    val = clamp(val, 0.0, 9999.9);
-    uint tenthsTotal = (uint)(val * 10.0 + 0.5);
-    uint fracDig = tenthsTotal % 10u;
-    uint whole = tenthsTotal / 10u;
-
-    uint d3 = (whole / 1000u) % 10u;
-    uint d2 = (whole / 100u)  % 10u;
-    uint d1 = (whole / 10u)   % 10u;
-    uint d0 = whole % 10u;
-
-    if (whole >= 1000u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + d3));
-    if (whole >= 100u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + d2));
-    if (whole >= 10u)   a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + d1));
-    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 48u + d0));
-    a = max(a, sampleGlyph(px, origin + float2(4.0 * stepX, 0.0), scale, 46u));
-    a = max(a, sampleGlyph(px, origin + float2(5.0 * stepX, 0.0), scale, 48u + fracDig));
-    return a;
-}
-
-float sampleFixedMs6(float2 px, float2 origin, float scale, float val)
-{
-    val = clamp(val, 0.0, 999.99);
-    uint hundTotal = (uint)(val * 100.0 + 0.5);
-    uint f1 = (hundTotal / 10u) % 10u;
-    uint f0 = hundTotal % 10u;
-    uint whole = hundTotal / 100u;
-
-    uint d2 = (whole / 100u) % 10u;
-    uint d1 = (whole / 10u)  % 10u;
-    uint d0 = whole % 10u;
-
-    float stepX = 5.0 * scale;
-    float a = 0.0;
-    if (whole >= 100u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + d2));
-    if (whole >= 10u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + d1));
-    a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + d0));
-    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 46u));
-    a = max(a, sampleGlyph(px, origin + float2(4.0 * stepX, 0.0), scale, 48u + f1));
-    a = max(a, sampleGlyph(px, origin + float2(5.0 * stepX, 0.0), scale, 48u + f0));
-    return a;
-}
-
-float sampleUint4(float2 px, float2 origin, float scale, uint val)
-{
-    val = min(val, 9999u);
-    float stepX = 5.0 * scale;
-    float a = 0.0;
-    uint d3 = (val / 1000u) % 10u;
-    uint d2 = (val / 100u)  % 10u;
-    uint d1 = (val / 10u)   % 10u;
-    uint d0 = val % 10u;
-    if (val >= 1000u) a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + d3));
-    if (val >= 100u)  a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + d2));
-    if (val >= 10u)   a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 48u + d1));
-    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 48u + d0));
-    return a;
-}
-
-// Whole number up to 999,999, right-aligned in six places.
-float sampleUint6(float2 px, float2 origin, float scale, uint val)
-{
-    val = min(val, 999999u);
-    float stepX = 5.0 * scale;
-    float a = 0.0;
-    uint place = 100000u;
-    [unroll] for (uint i = 0u; i < 6u; ++i)
-    {
-        if (val >= place || i == 5u)
-            a = max(a, sampleGlyph(px, origin + float2(float(i) * stepX, 0.0), scale, 48u + (val / place) % 10u));
-        place /= 10u;
+    if (hit && gTxtPendCall == TXT_NONE && site >= gTxtNext) {
+        gTxtPendCall = (site << 16u) | kind;
+        gTxtPendGeom = float3(origin, scale);
+        gTxtPendData = data;
     }
-    return a;
+    return dot(float4(gTxtInkCall == site), gTxtInkCov);
+}
+
+// Glyph codes are 8-bit: ASCII, and 0x80.. for the nine CJK glyphs (the Taipei motif and the act numerals).
+static const uint kTextCjk[9] = {19968u, 20108u, 19977u, 22235u, 20116u, 20845u, 19971u, 21488u, 21271u};
+uint textCode(uint c)
+{
+    if (c < 0x80u) return c;
+    uint code = 0u; // no glyph, as sampleGlyph draws for a code it does not know
+    [unroll] for (uint k = 0u; k < 9u; ++k) code = kTextCjk[k] == c ? (0x80u | k) : code;
+    return code;
+}
+
+uint2 textPack8(uint c0, uint c1, uint c2, uint c3, uint c4, uint c5, uint c6, uint c7)
+{
+    return uint2(textCode(c0) | (textCode(c1) << 8u) | (textCode(c2) << 16u) | (textCode(c3) << 24u),
+                 textCode(c4) | (textCode(c5) << 8u) | (textCode(c6) << 16u) | (textCode(c7) << 24u));
+}
+
+float2 textGlyphExtent(uint2 packed)
+{
+    // The CJK glyphs are 10 x 10 units.
+    return any((packed & 0x80808080u) != 0u) ? float2(10.0, 10.0) : float2(4.0, 6.0);
+}
+
+float textGlyph(float2 px, float2 origin, float scale, uint ch)
+{
+    const uint2 d = uint2(textCode(ch), 0u);
+    return textRun(px, origin, scale, TXT_GLYPHS | (1u << 8u), d, 1.0, textGlyphExtent(d));
 }
 
 float sampleWord4(float2 px, float2 origin, float scale, uint c0, uint c1, uint c2, uint c3)
 {
-    float stepX = 5.0 * scale;
-    float a = 0.0;
-    a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, c0));
-    a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, c1));
-    a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, c2));
-    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, c3));
-    return a;
+    const uint2 d = textPack8(c0, c1, c2, c3, 0u, 0u, 0u, 0u);
+    return textRun(px, origin, scale, TXT_GLYPHS | (4u << 8u), d, 4.0, textGlyphExtent(d));
 }
 
 float sampleWord8(
     float2 px, float2 origin, float scale,
     uint c0, uint c1, uint c2, uint c3, uint c4, uint c5, uint c6, uint c7)
 {
-    float stepX = 5.0 * scale;
-    return max(
-        sampleWord4(px, origin, scale, c0, c1, c2, c3),
-        sampleWord4(px, origin + float2(4.0 * stepX, 0.0), scale, c4, c5, c6, c7));
+    const uint2 d = textPack8(c0, c1, c2, c3, c4, c5, c6, c7);
+    return textRun(px, origin, scale, TXT_GLYPHS | (8u << 8u), d, 8.0, textGlyphExtent(d));
+}
+
+float sampleFixedNumber6(float2 px, float2 origin, float scale, float val)
+{
+    return textRun(px, origin, scale, TXT_FIXED6, uint2(asuint(val), 0u), 6.0, float2(4.0, 6.0));
+}
+
+float sampleFixedMs6(float2 px, float2 origin, float scale, float val)
+{
+    return textRun(px, origin, scale, TXT_MS6, uint2(asuint(val), 0u), 6.0, float2(4.0, 6.0));
+}
+
+float sampleUint4(float2 px, float2 origin, float scale, uint val)
+{
+    return textRun(px, origin, scale, TXT_UINT4, uint2(val, 0u), 4.0, float2(4.0, 6.0));
+}
+
+// Whole number up to 999,999, right-aligned in six places.
+float sampleUint6(float2 px, float2 origin, float scale, uint val)
+{
+    return textRun(px, origin, scale, TXT_UINT6, uint2(val, 0u), 6.0, float2(4.0, 6.0));
+}
+
+float sampleTimecodeMMSS(float2 px, float2 origin, float scale, float seconds)
+{
+    return textRun(px, origin, scale, TXT_TIMECODE, uint2(asuint(seconds), 0u), 5.0, float2(4.0, 6.0));
 }
 
 uint fetchPackedCaptionByte(uint idx)
@@ -2497,32 +2507,134 @@ uint fetchPackedCaptionByte(uint idx)
 
 float samplePackedCaption(float2 px, float2 origin, float scale, uint charCount)
 {
-    float stepX = 5.0 * scale;
-    float2 rel = px - origin;
-    if (rel.x < 0.0 || rel.y < 0.0 || rel.y >= 6.0 * scale)
-        return 0.0;
-    uint idx = (uint)(rel.x / stepX);
-    if (idx >= charCount || idx >= 64u)
-        return 0.0;
-    uint ch = fetchPackedCaptionByte(idx);
-    if (ch <= 32u)
-        return 0.0;
-    return sampleGlyph(px, origin + float2((float)idx * stepX, 0.0), scale, ch);
+    return textRun(px, origin, scale, TXT_CAPTION, uint2(charCount, 0u), 64.0, float2(4.0, 6.0));
 }
 
-float sampleTimecodeMMSS(float2 px, float2 origin, float scale, float seconds)
+// The codec monitor inset's top-left corner on screen (its picture is drawn in presentFilm).
+float2 codecMonitorMin()
 {
-    uint totalSec = (uint)max(0.0, seconds);
-    uint mm = (totalSec / 60u) % 100u;
-    uint ss = totalSec % 60u;
-    float stepX = 5.0 * scale;
+    const float2 lbMin = gLetterboxRect.xy;
+    const float2 lbSize = max(gLetterboxRect.zw, float2(1.0, 1.0));
+    const float2 monitorSize = lbSize * 0.19;
+    return lbMin + float2(lbSize.x - monitorSize.x - lbSize.y * 0.026, lbSize.y * 0.026);
+}
+
+// The characters a number run draws, in its six places (0 = nothing drawn there).
+void textNumberChars(uint kind, uint raw, out uint4 lo, out uint4 hi)
+{
+    lo = 0u;
+    hi = 0u;
+    if (kind == TXT_FIXED6) {
+        float val = asfloat(raw);
+        if (val >= 10000.0) {
+            // Large throughput scores read 73.6K, not a clamped 9999.9.
+            float kVal = clamp(val * 0.001, 10.0, 999.9);
+            uint tenthsK = (uint)(kVal * 10.0 + 0.5);
+            uint fracK = tenthsK % 10u;
+            uint wholeK = tenthsK / 10u;
+            lo = uint4(wholeK >= 100u ? 48u + (wholeK / 100u) % 10u : 0u,
+                       wholeK >= 10u ? 48u + (wholeK / 10u) % 10u : 0u,
+                       48u + wholeK % 10u, 46u);
+            hi = uint4(48u + fracK, 75u, 0u, 0u);
+            return;
+        }
+        val = clamp(val, 0.0, 9999.9);
+        uint tenthsTotal = (uint)(val * 10.0 + 0.5);
+        uint fracDig = tenthsTotal % 10u;
+        uint whole = tenthsTotal / 10u;
+        lo = uint4(whole >= 1000u ? 48u + (whole / 1000u) % 10u : 0u,
+                   whole >= 100u ? 48u + (whole / 100u) % 10u : 0u,
+                   whole >= 10u ? 48u + (whole / 10u) % 10u : 0u,
+                   48u + whole % 10u);
+        hi = uint4(46u, 48u + fracDig, 0u, 0u);
+    } else if (kind == TXT_MS6) {
+        float val = clamp(asfloat(raw), 0.0, 999.99);
+        uint hundTotal = (uint)(val * 100.0 + 0.5);
+        uint whole = hundTotal / 100u;
+        lo = uint4(whole >= 100u ? 48u + (whole / 100u) % 10u : 0u,
+                   whole >= 10u ? 48u + (whole / 10u) % 10u : 0u,
+                   48u + whole % 10u, 46u);
+        hi = uint4(48u + (hundTotal / 10u) % 10u, 48u + hundTotal % 10u, 0u, 0u);
+    } else if (kind == TXT_UINT4) {
+        uint val = min(raw, 9999u);
+        lo = uint4(val >= 1000u ? 48u + (val / 1000u) % 10u : 0u,
+                   val >= 100u ? 48u + (val / 100u) % 10u : 0u,
+                   val >= 10u ? 48u + (val / 10u) % 10u : 0u,
+                   48u + val % 10u);
+    } else if (kind == TXT_UINT6) {
+        uint val = min(raw, 999999u);
+        lo = uint4(val >= 100000u ? 48u + (val / 100000u) % 10u : 0u,
+                   val >= 10000u ? 48u + (val / 10000u) % 10u : 0u,
+                   val >= 1000u ? 48u + (val / 1000u) % 10u : 0u,
+                   val >= 100u ? 48u + (val / 100u) % 10u : 0u);
+        hi = uint4(val >= 10u ? 48u + (val / 10u) % 10u : 0u, 48u + val % 10u, 0u, 0u);
+    } else if (kind == TXT_TIMECODE) {
+        uint totalSec = (uint)max(0.0, asfloat(raw));
+        uint mm = (totalSec / 60u) % 100u;
+        uint ss = totalSec % 60u;
+        lo = uint4(48u + mm / 10u, 48u + mm % 10u, 58u, 48u + ss / 10u);
+        hi = uint4(48u + ss % 10u, 0u, 0u, 0u);
+    }
+}
+
+// Rasterises the run noted in this pass: the only place glyph strokes are evaluated.
+float textCoverage(float2 screenPx)
+{
+    const uint kindWord = gTxtPendCall & 0xFFFFu;
+    const uint kind = kindWord & 0xFFu;
+    const float2 px = (kindWord & TXT_MONITOR) != 0u ? screenPx - codecMonitorMin() : screenPx;
+    const float2 origin = gTxtPendGeom.xy;
+    const float scale = gTxtPendGeom.z;
+    const float stepX = 5.0 * scale;
+    if (kind == TXT_CAPTION) {
+        uint idx = (uint)((px.x - origin.x) / stepX);
+        uint ch = fetchPackedCaptionByte(idx);
+        if (ch <= 32u) return 0.0;
+        return sampleGlyph(px, origin + float2((float)idx * stepX, 0.0), scale, ch);
+    }
+    uint4 lo, hi;
+    bool secondWord = false;
+    if (kind == TXT_GLYPHS) {
+        const uint2 d = gTxtPendData;
+        lo = uint4(d.x & 0xFFu, (d.x >> 8u) & 0xFFu, (d.x >> 16u) & 0xFFu, d.x >> 24u);
+        hi = uint4(d.y & 0xFFu, (d.y >> 8u) & 0xFFu, (d.y >> 16u) & 0xFFu, d.y >> 24u);
+        // sampleWord8 placed its second four glyphs from origin + four cells.
+        secondWord = ((kindWord >> 8u) & 0xFu) == 8u;
+    } else {
+        textNumberChars(kind, gTxtPendData.x, lo, hi);
+    }
     float a = 0.0;
-    a = max(a, sampleGlyph(px, origin + float2(0.0 * stepX, 0.0), scale, 48u + (mm / 10u)));
-    a = max(a, sampleGlyph(px, origin + float2(1.0 * stepX, 0.0), scale, 48u + (mm % 10u)));
-    a = max(a, sampleGlyph(px, origin + float2(2.0 * stepX, 0.0), scale, 58u));
-    a = max(a, sampleGlyph(px, origin + float2(3.0 * stepX, 0.0), scale, 48u + (ss / 10u)));
-    a = max(a, sampleGlyph(px, origin + float2(4.0 * stepX, 0.0), scale, 48u + (ss % 10u)));
+    [loop] for (uint j = 0u; j < 8u; ++j) {
+        const uint4 q = j < 4u ? lo : hi;
+        const uint k = j & 3u;
+        uint ch = k == 0u ? q.x : (k == 1u ? q.y : (k == 2u ? q.z : q.w));
+        if (ch == 0u) continue;
+        if (ch >= 0x80u) ch = kTextCjk[ch & 0x0Fu];
+        const float2 at = (secondWord && j >= 4u)
+            ? (origin + float2(4.0 * stepX, 0.0)) + float2((float)k * stepX, 0.0)
+            : origin + float2((float)j * stepX, 0.0);
+        a = max(a, sampleGlyph(px, at, scale, ch));
+    }
     return a;
+}
+
+// After a pass: rasterises the run it noted. False when none is left (that pass was the last).
+bool textResolvePending(float2 screenPx)
+{
+    if (gTxtPendCall == TXT_NONE) return false;
+    const uint site = gTxtPendCall >> 16u;
+    gTxtNext = site + 1u;
+    const float cov = textCoverage(screenPx);
+    // No ink here: the call reads as zero already and needs no slot.
+    if (cov <= 0.0) return true;
+    const uint4 free = uint4(gTxtInkCall == TXT_NONE);
+    if (!any(free)) return false;
+    // Fill the first free slot.
+    const uint4 before = uint4(0u, free.x, free.x | free.y, free.x | free.y | free.z);
+    const bool4 take = (free & (1u - before)) != 0u;
+    gTxtInkCall = select(take, site.xxxx, gTxtInkCall);
+    gTxtInkCov = select(take, cov.xxxx, gTxtInkCov);
+    return true;
 }
 
 float3 badgeStatusColor(uint code)
@@ -2565,14 +2677,14 @@ float gpuSensorLine(float2 px, float2 at, float sc, bool showLimit, out float3 w
     }
     const float u = sc / 1.2;
     t = max(t, sampleUint4(px, at + float2(22.0 * u, 0), sc, (uint)round(gGpuSensorA.x)));
-    t = max(t, sampleGlyph(px, at + float2(46.0 * u, 0), sc, 67u));                                          // C
+    t = max(t, textGlyph(px, at + float2(46.0 * u, 0), sc, 67u));                                          // C
     t = max(t, sampleUint4(px, at + float2(58.0 * u, 0), sc, (uint)round(gGpuSensorA.y)));
-    t = max(t, sampleGlyph(px, at + float2(82.0 * u, 0), sc, 87u));                                          // W
+    t = max(t, textGlyph(px, at + float2(82.0 * u, 0), sc, 87u));                                          // W
     float x = 94.0;
     if (showLimit && gGpuSensorA.z > 0.0) {
-        t = max(t, sampleGlyph(px, at + float2(88.0 * u, 0), sc, 47u));                                      // /
+        t = max(t, textGlyph(px, at + float2(88.0 * u, 0), sc, 47u));                                      // /
         t = max(t, sampleUint4(px, at + float2(88.0 * u, 0), sc, (uint)round(min(gGpuSensorA.z, 999.0))));
-        t = max(t, sampleGlyph(px, at + float2(112.0 * u, 0), sc, 87u));                                     // W
+        t = max(t, textGlyph(px, at + float2(112.0 * u, 0), sc, 87u));                                     // W
         x = 126.0;
     }
     t = max(t, sampleUint4(px, at + float2(x * u, 0), sc, (uint)round(gGpuSensorA.w)));
@@ -2596,10 +2708,10 @@ float cpuLine(float2 px, float2 at, float sc)
     float t = sampleWord4(px, at, sc, 67u, 80u, 85u, 32u);                                                   // CPU
     if (gCpuWorkout.x < 0.0) return max(t, sampleWord4(px, at + float2(22.0 * u, 0), sc, 78u, 47u, 65u, 32u)); // N/A
     t = max(t, sampleUint4(px, at + float2(22.0 * u, 0), sc, (uint)round(gCpuWorkout.x)));
-    t = max(t, sampleGlyph(px, at + float2(47.0 * u, 0), sc, 37u));                                          // %
+    t = max(t, textGlyph(px, at + float2(47.0 * u, 0), sc, 37u));                                          // %
     t = max(t, sampleWord4(px, at + float2(64.0 * u, 0), sc, 65u, 80u, 80u, 32u));                           // APP
     t = max(t, sampleUint4(px, at + float2(82.0 * u, 0), sc, (uint)round(gCpuWorkout.y)));
-    t = max(t, sampleGlyph(px, at + float2(107.0 * u, 0), sc, 37u));                                         // %
+    t = max(t, textGlyph(px, at + float2(107.0 * u, 0), sc, 37u));                                         // %
     return t;
 }
 
@@ -2674,12 +2786,8 @@ float3 hudOver(inout float alpha, float3 under, float3 ink, float coverage) {
     return lerp(under, ink, coverage);
 }
 float3 hudInk(inout float alpha, float3 ink) { alpha = 1.0; return ink; }
-#ifdef BOO_FRAME_GENERATION_OUTPUTS
-struct PresentOutputs { float4 color : SV_Target0; float4 scene : SV_Target1; float alpha : SV_Target2; };
-PresentOutputs PSPresentLetterboxHud(VSOut pin)
-#else
-float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
-#endif
+// The film for one pixel: letterbox, A/B splits, codec views and the codec monitor inset. Drawn once.
+void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudless)
 {
     const float2 res = max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
     const float2 canvasRes = max(gSwapchainAndCanvas.zw, float2(1.0, 1.0));
@@ -2696,9 +2804,9 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     const bool externalMediaValid = (gHudFlags & (1u << 15u)) != 0u;
     const bool cueCodecInset      = (gHudFlags & (1u << 18u)) != 0u;
 
-    float3 sdr = 0.0.xxx;
-    float uiAlpha = 0.0;
-    float3 hudless = 0.0.xxx;
+    sdr = 0.0.xxx;
+    uiAlpha = 0.0;
+    hudless = 0.0.xxx;
     float2 lbMin = gLetterboxRect.xy;
     float2 lbSize = max(gLetterboxRect.zw, float2(1.0, 1.0));
     if (px.x >= lbMin.x && px.x < (lbMin.x + lbSize.x) &&
@@ -2743,8 +2851,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (cueCodecInset && lbSize.x >= 640.0 && (hudMode != 0u || (gHudFlags & 0xC0u) == 0u))
             {
                 float2 monitorSize = lbSize * 0.19;
-                float2 monitorMin = lbMin + float2(lbSize.x - monitorSize.x - lbSize.y * 0.026, lbSize.y * 0.026);
-                float2 local = px - monitorMin;
+                float2 local = px - codecMonitorMin();
                 if (all(local >= 0.0) && all(local < monitorSize))
                 {
                     uiAlpha = 1.0;
@@ -2752,20 +2859,57 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float border = min(min(local.x, local.y), min(monitorSize.x - local.x, monitorSize.y - local.y));
                     float3 rim = codecHwTexValid ? float3(0.12, 0.67, 0.56) : float3(0.19, 0.51, 0.66);
                     if (border < max(1.0, lbSize.y / 750.0)) sdr = rim;
-                    float textScale = max(1.0, floor(lbSize.y / 650.0));
-                    if (all(local >= 3.0 * textScale) && all(local < float2(31.0, 13.0) * textScale))
-                    {
-                        float label = codecHwTexValid
-                            ? sampleWord8(local, 5.0 * textScale, textScale, 72u,46u,50u,54u,52u,32u,32u,32u)
-                            : sampleWord4(local, 5.0 * textScale, textScale, 72u,76u,83u,76u);
-                        sdr = lerp(float3(0.025,0.045,0.06), 0.90.xxx, label);
-                    }
+                    // Its label is text: presentHud draws it.
                 }
             }
         }
     }
 
     if (uiAlpha == 0.0) hudless = sdr;
+}
+
+// Every HUD layer over the film, in order. It runs once per text pass (see textRun); everything but
+// text coverage comes out the same in every pass.
+void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
+{
+    const float2 res = max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
+    const float2 canvasRes = max(gSwapchainAndCanvas.zw, float2(1.0, 1.0));
+    const float2 px = pin.uv * res;
+
+    const bool showOverlay        = (gHudFlags & 1u) != 0u;
+    const uint hudMode            = (gHudFlags >> 8u) & 3u;
+    // Bits 10..11 retain the four original engines; bit 19 selects the director comparison.
+    const bool directorCompare    = (gHudFlags & (1u << 19u)) != 0u;
+    const uint abEngine           = directorCompare ? 4u : ((gHudFlags >> 10u) & 3u);
+    const bool codecViewActive    = (gHudFlags & (1u << 12u)) != 0u;
+    const bool codecHwTexValid    = (gHudFlags & (1u << 13u)) != 0u;
+    const bool abLeftHwVerified   = (gHudFlags & (1u << 14u)) != 0u;
+    const bool externalMediaValid = (gHudFlags & (1u << 15u)) != 0u;
+    const bool cueCodecInset      = (gHudFlags & (1u << 18u)) != 0u;
+
+    float2 lbMin = gLetterboxRect.xy;
+    float2 lbSize = max(gLetterboxRect.zw, float2(1.0, 1.0));
+    // The codec monitor's label (presentFilm draws the monitor). Its run is measured from the
+    // monitor's corner, and says so, so that the evaluator measures the same way.
+    if (px.x >= lbMin.x && px.x < (lbMin.x + lbSize.x) && px.y >= lbMin.y && px.y < (lbMin.y + lbSize.y) &&
+        !(showOverlay && hudMode == 2u) && !codecViewActive &&
+        cueCodecInset && lbSize.x >= 640.0 && (hudMode != 0u || (gHudFlags & 0xC0u) == 0u))
+    {
+        // The same conditions as the monitor in presentFilm.
+        float2 monitorSize = lbSize * 0.19;
+        float2 local = px - codecMonitorMin();
+        float textScale = max(1.0, floor(lbSize.y / 650.0));
+        if (all(local >= 0.0) && all(local < monitorSize) &&
+            all(local >= 3.0 * textScale) && all(local < float2(31.0, 13.0) * textScale))
+        {
+            float label = codecHwTexValid
+                ? textRun(local, 5.0 * textScale, textScale, TXT_GLYPHS | (8u << 8u) | TXT_MONITOR,
+                          textPack8(72u,46u,50u,54u,52u,32u,32u,32u), 8.0, float2(4.0, 6.0))   // H.264
+                : textRun(local, 5.0 * textScale, textScale, TXT_GLYPHS | (4u << 8u) | TXT_MONITOR,
+                          textPack8(72u,76u,83u,76u,0u,0u,0u,0u), 4.0, float2(4.0, 6.0));      // HLSL
+            sdr = lerp(float3(0.025,0.045,0.06), 0.90.xxx, label);
+        }
+    }
     const float3 colJade   = float3(0.04, 0.88, 0.74);
     const float3 colOrchid = float3(0.88, 0.24, 0.90);
     const float3 colAmber  = float3(1.00, 0.68, 0.16);
@@ -2779,6 +2923,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     const bool studioPinned = (gInteractiveMeta.x & (1u << 27u)) != 0u;
     const bool studioActive = studioPinned || ((gInteractiveMeta.x & 7u) != 0u) || (curAovMode != 0u) || (curMarbleCnt != 0u) || (curSolo != 0u);
 
+    // BOO_PRESENT_CLEAN builds the pipeline for frames without the overlay or with hudMode 3. It leaves
+    // out the layers that need the overlay in hudMode 0, 1 or 2 (bottom bar, dashboard, compact strip,
+    // A/B banners, studio dock, solo banner), which also keeps its registers few: the clean film
+    // then draws faster than with the whole HUD compiled in.
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && (hudMode == 0u || hudMode == 2u) && res.x >= 480.0 && res.y >= 300.0)
     {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
@@ -2894,7 +3043,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                             sdr = hudInk(uiAlpha, colCyan);
                     }
                     float tPrv = max(
-                        sampleGlyph(px, prvMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 60u),
+                        textGlyph(px, prvMin + float2(5.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 60u),
                         uiLabel(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 4.0, UI_LBL_PREV,
                             sampleWord4(px, prvMin + float2(15.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 80u, 82u, 86u, 32u)));
                     sdr = hudOver(uiAlpha, sdr, colEnamel, tPrv);
@@ -2928,7 +3077,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     float tNxt = max(
                         uiLabel(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 5.0, UI_LBL_NEXT,
                             sampleWord4(px, nxtMin + float2(7.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 78u, 69u, 88u, 84u)),
-                        sampleGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
+                        textGlyph(px, nxtMin + float2(48.0 * uiScale, 6.0 * uiScale), 1.55 * uiScale, 62u));
                     sdr = hudOver(uiAlpha, sdr, colEnamel, tNxt);
                 }
 
@@ -2957,6 +3106,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             }
         }
     }
+#endif
 
     // Full-screen pill in the top-right corner: FULL SCREEN in a window, EXIT FULL SCREEN [ESC] when
     // full screen. main.cpp sets its opacity (bits 8..15 of gNeuralMeta.w; bit 0 is full screen) and
@@ -3006,6 +3156,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         }
     }
 
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode < 2u && res.x >= 480.0 && res.y >= 300.0)
     {
         const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
@@ -3046,7 +3197,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             if (bdr) sdr = hudInk(uiAlpha, lerp(colJade, colCyan, 0.35));
             if (panelMode == 2u) {
                 float t = max(sampleWord4(px, liveMin + float2(7.0, 5.0) * uiScale, sc, 72u, 85u, 68u, 32u),      // HUD
-                              sampleGlyph(px, liveMin + float2(30.0, 5.0) * uiScale, sc, 43u));                  // +
+                              textGlyph(px, liveMin + float2(30.0, 5.0) * uiScale, sc, 43u));                  // +
                 sdr = hudOver(uiAlpha, sdr, colJade, t);
             } else {
                 // Row 1: engine states, then graphics feature states, then [+] expand and [x] hide.
@@ -3123,7 +3274,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                         if (q.x - bx < 0.8 || bx + 14.0 - q.x < 0.8 || q.y - 3.0 < 0.8 || 17.0 - q.y < 0.8)
                             sdr = hudInk(uiAlpha, colJade * 0.8);
                     }
-                    sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 4.5, 6.0) * uiScale, sc, b == 0u ? 43u : 88u));
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, textGlyph(px, liveMin + float2(bx + 4.5, 6.0) * uiScale, sc, b == 0u ? 43u : 88u));
                 }
             }
         }
@@ -3162,7 +3313,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if (headerPos.x - bx < 0.8 || bx + 14.0 - headerPos.x < 0.8 || headerPos.y - 3.0 < 0.8 || 17.0 - headerPos.y < 0.8)
                         sdr = hudInk(uiAlpha, colJade * 0.8);
                 }
-                sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 4.5, 7.0) * uiScale, 1.25 * uiScale, 45u));
+                sdr = hudOver(uiAlpha, sdr, colEnamel, textGlyph(px, liveMin + float2(bx + 4.5, 7.0) * uiScale, 1.25 * uiScale, 45u));
             }
 
             [unroll]
@@ -3216,7 +3367,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                             bool millions = total >= 1000000u;
                             count = sampleFixedNumber6(px, countAt - float2(7.0 * uiScale, 0), 1.2 * uiScale,
                                                        float(total) / (millions ? 1000000.0 : 1000.0));
-                            count = max(count, sampleGlyph(px, countAt + float2(31.0 * uiScale, 0), 1.2 * uiScale, millions ? 77u : 75u));
+                            count = max(count, textGlyph(px, countAt + float2(31.0 * uiScale, 0), 1.2 * uiScale, millions ? 77u : 75u));
                         }
                         float ms = sampleFixedMs6(px, float2(liveMin.x + 168.0 * uiScale, rowY), 1.5 * uiScale, gVolumeAndPadding.y);
                         sdr = hudOver(uiAlpha, sdr, colEnamel, count);
@@ -3292,7 +3443,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if (!compactTable) {
                     float2 keyAt = liveMin + float2(244.0, neuralTop + 4.0) * uiScale;
                     float key = sampleWord8(px,keyAt,sc*0.85,91u,83u,72u,73u,70u,84u,43u,78u);                 // [SHIFT+N
-                    key = max(key, sampleGlyph(px, keyAt + float2(34.0 * sc, 0), sc * 0.85, 93u));             // ]
+                    key = max(key, textGlyph(px, keyAt + float2(34.0 * sc, 0), sc * 0.85, 93u));             // ]
                     sdr = hudOver(uiAlpha, sdr, colAmber, key);
                 }
             }
@@ -3318,7 +3469,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                         float2 f = nameAt + float2(36.0, 0) * uiScale;
                         float t = sampleWord8(px, f, ts, 67u, 76u, 79u, 84u, 72u, 32u, 32u, 32u);                       // CLOTH
                         t = max(t, sampleFixedMs6(px, f + float2(30.0, 0) * uiScale, ts, gPhysx.y));
-                        t = max(t, sampleGlyph(px, f + float2(30.0 + 34.0, 0) * uiScale, ts, 77u));                     // M
+                        t = max(t, textGlyph(px, f + float2(30.0 + 34.0, 0) * uiScale, ts, 77u));                     // M
                         t = max(t, sampleUint6(px, f + float2(74.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
                         t = max(t, sampleWord8(px, f + float2(108.0, 0) * uiScale, ts, 78u, 79u, 68u, 69u, 83u, 32u, 32u, 32u)); // NODES
                         sdr = hudOver(uiAlpha, sdr, colEnamel, t);
@@ -3373,7 +3524,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                         t = max(t, sampleFixedMs6(px, f + float2(70.0, 0) * uiScale, ts, gPhysx.z));
                         t = max(t, sampleUint4(px, f + float2(106.0, 0) * uiScale, ts, (uint)round(gPhysx.w)));
                         t = max(t, sampleWord4(px, f + float2(128.0, 0) * uiScale, ts, 75u, 32u, 86u, 79u));        // K VO
-                        t = max(t, sampleGlyph(px, f + float2(128.0 + 20.0 * 0.85 * 1.25, 0) * uiScale, ts, 88u));  // X
+                        t = max(t, textGlyph(px, f + float2(128.0 + 20.0 * 0.85 * 1.25, 0) * uiScale, ts, 88u));  // X
                         sdr = hudOver(uiAlpha, sdr, colEnamel, t);
                     }
                 }
@@ -3457,7 +3608,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                         tag = max(tag, sampleUint4(px, tagAt + float2(22.0, 0) * uiScale, ts, floorFps));
                     } else {
                         tag = sampleWord8(px, tagAt, ts, 82u, 69u, 76u, 69u, 65u, 83u, 73u, 78u);                            // RELEASIN
-                        tag = max(tag, sampleGlyph(px, tagAt + float2(8.0 * 5.0 * ts, 0), ts, 71u));                         // G
+                        tag = max(tag, textGlyph(px, tagAt + float2(8.0 * 5.0 * ts, 0), ts, 71u));                         // G
                     }
                     sdr = hudOver(uiAlpha, sdr, flockState == 2u ? hot : colCyan * 0.85, tag);
                 }
@@ -3468,7 +3619,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                         sdr = hudOver(uiAlpha, sdr, hot * 0.22, 0.85);
                         if (q.x < 0.8 || q.x > 15.2 || q.y < 0.8 || q.y > 14.2) sdr = hudInk(uiAlpha, hot * 0.8);
                     }
-                    sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, liveMin + float2(bx + 5.5, workoutTop + 7.0) * uiScale, sc, b == 0u ? 45u : 43u));
+                    sdr = hudOver(uiAlpha, sdr, colEnamel, textGlyph(px, liveMin + float2(bx + 5.5, workoutTop + 7.0) * uiScale, sc, b == 0u ? 45u : 43u));
                 }
             }
             if (tablePoint.y >= sensorTop && tablePoint.y < cpuTop) {
@@ -3609,7 +3760,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 } else {
                     mode = uiLabel(px,modeAt,scale,10.0,UI_LBL_ENABLED,sampleWord4(px,modeAt,scale,79u,78u,32u,32u));
                 }
-                if (state == 0u) mode = sampleGlyph(px, modeAt, scale, 45u);
+                if (state == 0u) mode = textGlyph(px, modeAt, scale, 45u);
                 float badge = state == 0u ? uiLabel(px, stateAt, scale, 6.5, UI_LBL_UNAVAILABLE,
                     sampleWord4(px, stateAt, scale, 78u,47u,65u,32u))
                     : liveStateLabel(px, stateAt, scale, state == 1u ? 2u : (state == 2u ? 0u : 4u));
@@ -3690,7 +3841,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 sampleWord8(
                     px, cardMin + float2(10.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale,
                     66u, 69u, 78u, 67u, 72u, 32u, 91u, 66u),
-                sampleGlyph(px, cardMin + float2(70.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 93u));
+                textGlyph(px, cardMin + float2(70.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 93u));
             bTitle = uiLabel(px, cardMin + float2(10.0 * uiScale, 6.0 * uiScale), 1.5 * uiScale, 11.0, UI_LBL_BENCH, bTitle);
             sdr = hudOver(uiAlpha, sdr, colAmber, bTitle);
 
@@ -3736,8 +3887,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             }
         }
     }
+#endif
 
 
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode == 1u && px.x < 330.0 && px.y > res.y - 42.0) {
         sdr = hudOver(uiAlpha, sdr, float3(0.015, 0.025, 0.04), 0.85);
         sdr = hudOver(uiAlpha, sdr, colEnamel, sampleTimecodeMMSS(px, float2(12, res.y - 30), 2.0, gFilmTime));
@@ -3747,6 +3900,8 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         }
         sdr = hudOver(uiAlpha, sdr, colAmber, sampleFixedNumber6(px, float2(190, res.y - 30), 2.0, gGpuMs));
     }
+#endif
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode == 1u) {
         [unroll] for (uint i = 0u; i < 16u; ++i) {
             float ms = gRecentGpuMs[i / 4u][i % 4u];
@@ -3754,11 +3909,13 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             sdr = hudOver(uiAlpha, sdr, ms > 16.667 ? colAmber : colJade, bar);
         }
     }
+#endif
     if (showOverlay && gVolumeAndPadding.x >= 0.0 && px.y < 38.0 && px.x < 190.0) {
         sdr = hudOver(uiAlpha, sdr, 0.0.xxx, 0.75);
         sdr = hudOver(uiAlpha, sdr, colEnamel, sampleWord4(px, float2(12, 12), 2, 86u, 79u, 76u, 58u));
         sdr = hudOver(uiAlpha, sdr, colJade, sampleFixedNumber6(px, float2(62, 12), 2, gVolumeAndPadding.x));
     }
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode == 2u) {
         const float uiScale = clamp(min(floor(res.y / 540.0), floor(lbSize.x / 480.0)), 1.0, 3.0);
         const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
@@ -3877,9 +4034,11 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             }
         }
     }
+#endif
 
     // Persistent Bottom Interactive NVIDIA RTX Studio Dock (Pass 4 only; anchored right above Bottom Bar even during WIPE!)
     const bool studioDockShown = showOverlay && (hudMode != 3u) && studioActive && (res.x >= 640.0) && (res.y >= 300.0);
+#ifndef BOO_PRESENT_CLEAN
     if (studioDockShown)
     {
         const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
@@ -4018,7 +4177,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bScnPrvMin.x < 1.1) || (bScnPrvMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
                     sdr = hudInk(uiAlpha, colCyan);
             }
-            sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, bScnPrvMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 60u));
+            sdr = hudOver(uiAlpha, sdr, colEnamel, textGlyph(px, bScnPrvMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 60u));
 
             [unroll]
             for (uint k = 0u; k < 6u; ++k)
@@ -4033,7 +4192,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                     if ((px.x - cMin.x < 1.1) || (cMax.x - px.x < 1.1) || (px.y - cMin.y < 1.1) || (cMax.y - px.y < 1.1))
                         sdr = hudInk(uiAlpha, cCol);
                 }
-                float dMask = sampleGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
+                float dMask = textGlyph(px, cMin + float2(3.4 * u, 4.8 * u), 1.45 * u, 49u + k);
                 sdr = hudOver(uiAlpha, sdr, sel ? colEnamel : cCol, dMask);
             }
 
@@ -4045,7 +4204,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
                 if ((px.x - bScnNxtMin.x < 1.1) || (bScnNxtMax.x - px.x < 1.1) || (px.y - r1MinY < 1.1) || (r1MaxY - px.y < 1.1))
                     sdr = hudInk(uiAlpha, colJade);
             }
-            sdr = hudOver(uiAlpha, sdr, colEnamel, sampleGlyph(px, bScnNxtMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 62u));
+            sdr = hudOver(uiAlpha, sdr, colEnamel, textGlyph(px, bScnNxtMin + float2(6.0 * u, 4.8 * u), 1.45 * u, 62u));
 
             // Active Scene Name Readout ("BATHRM", "FAUCET", "LEAVES", "ORCHID", "ENAMEL", "SANCTU", or "ACT 1..7")
             uint sn0=65u, sn1=67u, sn2=84u, sn3=32u, sn4=49u, sn5=32u;
@@ -4155,7 +4314,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float tNxtScn = max(
                 uiLabel(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 9.9, UI_LBL_NEXT_SCENE,
                     sampleWord8(px, bNxtScnMin + float2(6.0 * u, 4.8 * u), 1.35 * u, 78u, 69u, 88u, 84u, 32u, 83u, 67u, 78u)),
-                sampleGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
+                textGlyph(px, bNxtScnMin + float2(75.0 * u, 4.8 * u), 1.35 * u, 62u));
             sdr = hudOver(uiAlpha, sdr, colEnamel, tNxtScn);
         }
 
@@ -4238,8 +4397,10 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             }
         }
     }
+#endif
 
     // Live Hardware Engine Isolation / SOLO Banner (clickable "[ALL]" return to Full Orchestra!)
+#ifndef BOO_PRESENT_CLEAN
     if (showOverlay && (hudMode != 3u) && (curSolo != 0u) && res.x >= 480.0 && res.y >= 300.0)
     {
         const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
@@ -4280,6 +4441,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             sdr = hudOver(uiAlpha, sdr, colEnamel, tAll);
         }
     }
+#endif
 
     // Authored vector title and Traditional Chinese place motif (台北, Taipei).
     // Pass 4 only: neither title nor caption enters the canonical clean texture.
@@ -4309,15 +4471,15 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
         title=max(title,sampleWord4(px,titleOrigin+float2(40*titleScale,0),titleScale,83,65,72,32));
         float2 motifOrigin=titleOrigin-float2(0,22*titleScale);
         float motifScale=titleScale*.52;
-        float motif=max(sampleGlyph(px,motifOrigin,motifScale,21488u),
-                        sampleGlyph(px,motifOrigin+float2(12*motifScale,0),motifScale,21271u));
+        float motif=max(textGlyph(px,motifOrigin,motifScale,21488u),
+                        textGlyph(px,motifOrigin+float2(12*motifScale,0),motifScale,21271u));
         float roman=sampleWord8(px,motifOrigin+float2(0,13*motifScale),titleScale*.28,84,65,73,80,69,73,32,32);
         float subScale=titleScale*.32;
         float2 subOrigin=titleOrigin+float2(0,10*titleScale);
         float subtitle=sampleWord8(px,subOrigin,subScale,84,72,69,32,71,76,65,83);
         subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(40*subScale,0),subScale,83,32,79,82,67,72,73,68));
         subtitle=max(subtitle,sampleWord8(px,subOrigin+float2(80*subScale,0),subScale,32,80,82,79,84,79,67,79));
-        subtitle=max(subtitle,sampleGlyph(px,subOrigin+float2(120*subScale,0),subScale,76));
+        subtitle=max(subtitle,textGlyph(px,subOrigin+float2(120*subScale,0),subScale,76));
         sdr = hudOver(uiAlpha, sdr,float3(.93,.88,.75),title*titleAlpha);
         sdr = hudOver(uiAlpha, sdr,float3(.72,.82,.74),max(subtitle,roman)*titleAlpha);
         sdr = hudOver(uiAlpha, sdr,colAmber,motif*titleAlpha*.85);
@@ -4336,7 +4498,7 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             float uiScale=clamp(floor(res.y/540.0),1.0,3.0);
             at=float2(lbMin.x+lbSize.x*.94-60.0*sc,max(lbMin.y+lbSize.y*.35,148.0*uiScale));
         }
-        float glyph = sampleGlyph(px,at,sc*1.4,numeral[act]);
+        float glyph = textGlyph(px,at,sc*1.4,numeral[act]);
         float2 romanAt = at + float2(21*sc,3*sc);
         float roman = sampleWord4(px,romanAt,sc,65u,67u,84u,32u);
         uint first = (act >= 4u) ? 86u : 73u;
@@ -4452,6 +4614,32 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
             camTxt = uiLabel(px, tOrg, tScale, 13.4, UI_LBL_LIVE_CAMERA, camTxt);
             sdr = hudOver(uiAlpha, sdr, colEnamel, camTxt);
         }
+    }
+
+}
+
+#ifdef BOO_FRAME_GENERATION_OUTPUTS
+struct PresentOutputs { float4 color : SV_Target0; float4 scene : SV_Target1; float alpha : SV_Target2; };
+PresentOutputs PSPresentLetterboxHud(VSOut pin)
+#else
+float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
+#endif
+{
+    const float2 px = pin.uv * max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
+    float3 film, hudless;
+    float filmAlpha;
+    presentFilm(pin, film, filmAlpha, hudless);
+    float3 sdr = film;
+    float uiAlpha = filmAlpha;
+    textBeginPixel();
+    [loop] for (uint textPass = 0u; textPass < TXT_MAX_PASSES; ++textPass)
+    {
+        sdr = film;
+        uiAlpha = filmAlpha;
+        textBeginPass();
+        presentHud(pin, sdr, uiAlpha);
+        if (!textResolvePending(px))
+            break;
     }
 
     float maxQuant = (gSwapchainBits >= 10u) ? 1023.0 : 255.0;

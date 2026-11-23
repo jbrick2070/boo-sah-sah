@@ -2,8 +2,14 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
-## Unreleased
+## 1.1.12.0 — No wait on the first start
 
+- The first start after an update no longer holds on the loading bar, and reaches the film in 27 s instead of 58 s on an RTX 5080 Laptop GPU (`--cold-shader-cache`). The two shaders that draw the HUD over the film took the driver 44 s each to compile (53 s alongside the rest): every text call (`sampleWord4/8`, the number and timecode helpers, the stroke font) was inlined at its call site, about 1,500 copies of the glyph code in 1.1 MB of DXIL. Now each text call is a *run*, and a pixel draws the HUD in passes: each pass draws with the coverage of the runs resolved so far and notes the first unresolved run whose box holds the pixel, and a single glyph evaluator rasterises it between passes. 97% of pixels need one pass, none needed more than six over 3,600 HUD states. The shaders are 191 KB and 199 KB (with frame-generation outputs) and compile cold in 1.5 s; DXC builds them in 2 s instead of 37.
+- Frames without the overlay or in hudMode 3 use their own pipelines (`-DBOO_PRESENT_CLEAN`, 45 KB, 0.16 s to compile) that leave out the overlay-only layers, so their registers stay few.
+- The neural rendering suite's eight pipelines compile side by side (2.3 s instead of 8 s one after another, with the bar frozen at 78%). The longest wait left on a cold start is the two ray-traced city pipelines, about 15 s, while the bar creeps on the memory gauge.
+- The HUD takes about half the GPU time. The present pass at 3840x2160: full dashboard 1.10 to 0.56 ms, A/B 0.66 to 0.41 ms, compact 0.56 to 0.51 ms, studio dock 0.67 to 0.59 ms, overlay hidden 0.18 to 0.15 ms (with frame-generation outputs alike). In the app at the default settings, GPU frame time p50 10.0 to 9.6 ms.
+- The HUD looks the same. Of the 102 stable golden captures, 92 are byte for byte identical; the 10 that show the HUD differ in 62 pixels, by one level of 255, on the edges of glyphs (the stroke maths is no longer constant-folded per call). Comparing old and new shaders directly over 3,600 HUD states (every hudMode, panel, A/B engine, codec view and inset, captions, end card, LIVE CAMERA, the full-screen pill, translated labels, frame-generation outputs) gives at most one 10-bit level on about 3 pixels in a million; the hudless scene output is identical.
+- With far less shader work left to the driver, the process now leaves Task Manager about 6 s after closing a first start instead of 43 s.
 - The app looks and sounds closed the moment you close it. After a start that compiled shaders (the first after an update), releasing the D3D12 device waits while the graphics driver finishes its own background shader work: 43 s after a cold start, under 0.1 s once the cache is warm. Until now the music played on and, when closed with Esc, the window sat frozen on screen through that wait. The sound now stops and the window leaves the screen and taskbar first; the driver then finishes out of sight, so its cache is still complete for the next start. `--log-level debug` logs each shutdown step's time.
 
 ## 1.1.11.0 — A faster first start

@@ -1,4 +1,5 @@
 #include "boo/neural_rendering.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/startup_progress.hpp"
 
 #include "boo/logging.hpp"
@@ -263,16 +264,32 @@ bool NeuralRenderingSuite::Impl::initialize(std::string* error) {
     if (FAILED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, nullptr)) ||
         FAILED(device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&root))))
         return fail("Root signature creation failed", error);
+    // On a cold shader cache (the first start after an update) these take about 8 s one after another,
+    // the last wait before the film; side by side they take as long as the slowest, and the loading
+    // bar keeps moving while they compile.
+    std::vector<std::vector<char>> code(kPsoCount);
     for (uint32_t i = 0; i < kPsoCount; ++i) {
         std::ifstream cso(resolveResourcePath(kEntryFiles[i]), std::ios::binary);
-        const std::vector<char> code((std::istreambuf_iterator<char>(cso)), {});
+        code[i].assign(std::istreambuf_iterator<char>(cso), {});
         startupAssetLoaded(resolveResourcePath(kEntryFiles[i]));
-        if (code.empty()) return fail(std::string("Missing shader ") + kEntryFiles[i], error);
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = root.Get();
-        d.CS = {code.data(), code.size()};
-        if (FAILED(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso[i]))))
-            return fail(std::string("Pipeline creation failed for ") + kEntryFiles[i], error);
+        if (code[i].empty()) return fail(std::string("Missing shader ") + kEntryFiles[i], error);
+    }
+    {
+        PipelineCompiler compiler;
+        for (uint32_t i = 0; i < kPsoCount; ++i) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
+            d.pRootSignature = root.Get();
+            d.CS = {code[i].data(), code[i].size()};
+            ID3D12Device* dev = device.Get();
+            ComPtr<ID3D12PipelineState>* out = &pso[i];
+            compiler.start(std::string("neural ") + kEntryFiles[i], code[i].size(), [dev, d, out] {
+                return SUCCEEDED(dev->CreateComputePipelineState(&d, IID_PPV_ARGS(out->ReleaseAndGetAddressOf()))) && *out;
+            });
+        }
+        if (!compiler.waitAll()) {
+            for (uint32_t i = 0; i < kPsoCount; ++i)
+                if (!pso[i]) return fail(std::string("Pipeline creation failed for ") + kEntryFiles[i], error);
+        }
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
