@@ -3,6 +3,7 @@
 #include "boo/logging.hpp"
 #include "boo/startup_progress.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -12,6 +13,17 @@
 #include <vector>
 
 namespace boo {
+
+namespace {
+std::atomic<int> gSlowDriverMs{0};
+void slowDriverCompilePause() {
+    const int ms = gSlowDriverMs.load(std::memory_order_relaxed);
+    if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+} // namespace
+
+void setSimulatedSlowDriverMs(int ms) { gSlowDriverMs.store(ms > 0 ? ms : 0, std::memory_order_relaxed); }
+int simulatedSlowDriverMs() { return gSlowDriverMs.load(std::memory_order_relaxed); }
 
 struct PipelineCompiler::State {
     std::mutex mutex;
@@ -46,6 +58,7 @@ void PipelineCompiler::start(std::string name, uint64_t shaderBytes, std::functi
         const auto t0 = std::chrono::steady_clock::now();
         bool ok = false;
         try {
+            slowDriverCompilePause();
             ok = create();
         } catch (const std::exception& e) {
             BOO_LOG_WARN("Startup", "Pipeline '" + name + "' failed: " + e.what());
@@ -86,7 +99,10 @@ bool PipelineCompiler::waitAll() {
 
 long compileWhilePainting(std::string name, uint64_t shaderBytes, const std::function<long()>& create) {
     auto& progress = StartupProgress::instance();
-    if (!progress.onLoadingThread()) return create();
+    if (!progress.onLoadingThread()) {
+        slowDriverCompilePause();
+        return create();
+    }
     progress.stageDone(); // the list now shows this compile, not the stage before it
     long result = static_cast<long>(0x80004005L); // E_FAIL, if create throws
     PipelineCompiler one;

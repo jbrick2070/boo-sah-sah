@@ -1,4 +1,5 @@
 #include "boo/api.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/audio.hpp"
 #include "boo/audio_reactive.hpp"
 #include "boo/benchmark.hpp"
@@ -349,7 +350,8 @@ boo::M1TaipeiSliceEffect* createAndRegisterShowEffects(
     auto fallbackVisual = std::make_unique<boo::M0TestVisualEffect>(d3d, true, false);
     // The film's full HUD and mesh shaders require a hardware adapter. WARP uses
     // the timeline-driven procedural visual for both explicit and automatic fallback.
-    if (!d3d.isWarp() && !settings.legacyM0Visual && showMode != boo::ShowVisualMode::LegacyM0) {
+    // --warp-full-path (test only) loads the real film on WARP anyway, as a worst-case slow start-up.
+    if ((!d3d.isWarp() || settings.warpFullPath) && !settings.legacyM0Visual && showMode != boo::ShowVisualMode::LegacyM0) {
         auto primaryM1 = std::make_unique<boo::M1TaipeiSliceEffect>(
             d3d,
             initialSpec,
@@ -1707,6 +1709,7 @@ int main(int argc, char** argv) {
         std::cerr << "CLI Error: " << cliErr << "\n\n" << buildCliHelpText();
         return 2;
     }
+    boo::setSimulatedSlowDriverMs(settings.slowDriverMs); // test only; zero unless --slow-driver-ms
     if (settings.showHelp) {
         std::cout << buildCliHelpText();
         return 0;

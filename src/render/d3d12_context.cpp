@@ -1,5 +1,6 @@
 #include "boo/render.hpp"
 #include "boo/startup_progress.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/dlss_bridge.hpp"
 #include "boo/logging.hpp"
 
@@ -496,6 +497,7 @@ bool D3D12Context::waitForGpu() noexcept {
         impl_->synchronizationFailed = true;
         return false;
     }
+    if (const int slowMs = simulatedSlowDriverMs(); slowMs > 0) Sleep(static_cast<DWORD>(slowMs / 4)); // test only
     if (impl_->fence->GetCompletedValue() < value) {
         if (FAILED(impl_->fence->SetEventOnCompletion(value, impl_->fenceEvent))) {
             impl_->synchronizationFailed = true;

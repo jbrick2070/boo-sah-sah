@@ -83,6 +83,8 @@ struct AppSettings {
     bool disableNVENC = false;
     bool forceWarp = false;
     bool lowPowerGpu = false; // diagnostics: run on the integrated (power-saving) adapter
+    bool warpFullPath = false; // test only: with --force-warp, load the real film instead of the WARP diagnostic scene
+    int slowDriverMs = 0;      // test only: pretend every pipeline compile takes this long (GPU waits a quarter of it)
     bool presetFromCommandLine = false; // --preset was given: integrated graphics keep it too
     bool coldShaderCache = false; // diagnostics: the driver ignores its shader caches, as on a first start after an update
     bool injectMeshFail = false;

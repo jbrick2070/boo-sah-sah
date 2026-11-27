@@ -40,4 +40,10 @@ private:
 // Returns what `create` returned (an HRESULT).
 long compileWhilePainting(std::string name, uint64_t shaderBytes, const std::function<long()>& create);
 
+// Test only (--slow-driver-ms): every pipeline compile first sleeps this long on whatever thread does
+// it, and every GPU wait a quarter of it, to imitate a slow integrated-GPU driver. Zero (the default)
+// changes nothing.
+void setSimulatedSlowDriverMs(int ms);
+int simulatedSlowDriverMs();
+
 } // namespace boo

@@ -374,6 +374,11 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.forceWarp = true;
         } else if (a == "--low-power-gpu") {
             ioSettings.lowPowerGpu = true;
+        } else if (a == "--warp-full-path") {
+            ioSettings.warpFullPath = true;
+        } else if (a == "--slow-driver-ms") {
+            const auto* v = requireNext(i, a); if (!v) return false;
+            ioSettings.slowDriverMs = std::clamp(std::atoi(v->c_str()), 0, 60000);
         } else if (a == "--cold-shader-cache") {
             ioSettings.coldShaderCache = true;
         } else if (a == "--inject-mesh-fail") {
@@ -527,6 +532,9 @@ std::string buildCliHelpText() {
         "  --enable-signal-hijack      Opt-in probe for Signal Hijack codec path\n"
         "  --force-warp                Force Microsoft Basic Render Driver (WARP)\n"
         "  --low-power-gpu             Use the integrated (power-saving) graphics adapter\n"
+        "  --warp-full-path            Test only: with --force-warp, load the real film, not the diagnostic scene\n"
+        "  --slow-driver-ms <ms>       Test only: imitate a slow driver (each pipeline compile waits <ms>,\n"
+        "                              each GPU wait <ms>/4)\n"
         "  --cold-shader-cache         Start as after an update: the driver ignores its shader caches\n"
         "                              (needs Windows Developer Mode)\n"
         "  --inject-shader-fail        Force fallback to embedded precompiled safe shader\n"
