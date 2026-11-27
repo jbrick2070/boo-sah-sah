@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 #include "boo/api.hpp"
 
@@ -206,7 +207,7 @@ private:
     std::deque<std::wstring> droppedFiles_;
     std::wstring graphicsFailureText_;
     bool loading_ = false;
-    bool closeRequested_ = false;
+    std::atomic<bool> closeRequested_{false}; // also read by the recovery thread
     bool busy_ = false;
     float loadingFraction_ = -1.0f; // below zero: no bar yet
     std::wstring loadingDetail_;

@@ -2149,7 +2149,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> latestMediaNv12;
     if (window.closeRequested()) {
         // Closed while loading: open no camera or file for a film nobody will see.
-    } else if (settings.enableCameraInput && (!liveM1Ptr || orchestrator.isUsingFallbackEffect())) {
+    } else if (settings.enableCameraInput && (!liveM1Ptr || orchestrator.isUsingFallbackEffect() || settings.physxRouteTest)) {
         settings.enableCameraInput = false;
         BOO_LOG_WARN("Media", "Camera left off: its LIVE CAMERA label cannot be shown here.");
     } else if (settings.enableCameraInput) {
@@ -2433,7 +2433,11 @@ int main(int argc, char** argv) {
     };
 
     // A camera runs only while its red LIVE CAMERA label can be drawn: by the film renderer.
-    const auto cameraLabelAvailable = [&] { return liveM1Ptr && !orchestrator.isUsingFallbackEffect(); };
+    // It is drawn only on a visible window of at least 320 x 200 pixels.
+    const auto cameraLabelAvailable = [&] {
+        return liveM1Ptr && !orchestrator.isUsingFallbackEffect() && !graphicsUnavailable && !window.isMinimized() &&
+               window.clientWidth() >= 320u && window.clientHeight() >= 200u && !settings.physxRouteTest;
+    };
     const auto stopCamera = [&](const char* why) {
         if (!mediaIngest.isLiveCameraActive()) return;
         mediaIngest.shutdown();
@@ -2466,7 +2470,7 @@ int main(int argc, char** argv) {
         bool rebuilt = false;
         // Releasing a lost device and building a new one can take many seconds: another thread does it while
         // this one keeps answering the window.
-        runKeepingWindowAlive(window, [&] {
+        const auto rebuild = [&] {
         // Retire resources before release on non-removal failures as well.
         d3d.retireGpuForShutdown();
         // Whatever the card, come back without ray tracing: it is the heaviest work and the likeliest cause.
@@ -2475,7 +2479,7 @@ int main(int argc, char** argv) {
         liveM1Ptr = nullptr;
         orchestrator.shutdown();
         d3d.shutdown();
-        if (mayRecover) {
+        if (mayRecover && recoveryWindow && !window.closeRequested()) {
             BOO_LOG_WARN("D3D12", "Attempting single D3D12 device recovery with bounded fence waits...");
             const auto spec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
             if (d3d.initialize(recoveryWindow, recoveryW, recoveryH,
@@ -2505,7 +2509,21 @@ int main(int argc, char** argv) {
         liveM1Ptr = nullptr;
         orchestrator.shutdown();
         d3d.shutdown();
-        });
+        };
+        try {
+            runKeepingWindowAlive(window, rebuild);
+        } catch (const std::exception& e) {
+            recoveryError = e.what();
+            rebuilt = false;
+            liveM1Ptr = nullptr;
+            orchestrator.shutdown();
+            d3d.shutdown();
+        }
+        if (window.closeRequested()) { // closed while recovering: nothing more to draw or explain
+            graphicsUnavailable = graphicsUnavailable || !rebuilt;
+            running = false;
+            return;
+        }
         if (rebuilt) return;
         graphicsUnavailable = true;
         runtimeExitCode = 1;
@@ -3642,6 +3660,7 @@ int main(int argc, char** argv) {
                     BOO_LOG_WARN("Capture", captureError + " | " + fallbackError);
             }
         }
+        if (!cameraLabelAvailable()) stopCamera("its label can no longer be shown.");
         if (!window.isMinimized() && !graphicsUnavailable) {
             HudTelemetrySnapshot hud{};
             hud.filmTimeSeconds = tick.filmTimeSeconds;
@@ -3697,7 +3716,6 @@ int main(int argc, char** argv) {
             hud.workoutState = workoutGovernor.atFloor() ? 2u
                 : (workoutGovernor.releasing() || workoutGovernor.released() < workoutBirdCount(settings.gpuWorkout)) ? 1u : 0u;
             uint64_t mediaFrameSeq = 0;
-            if (!cameraLabelAvailable()) stopCamera("its label can no longer be shown.");
             if (mediaIngest.isActive() && mediaIngest.copyLatestNv12Frame(latestMediaNv12, mediaFrameSeq)) {
                 if (liveM1Ptr) {
                     liveM1Ptr->setExternalNv12Frame(latestMediaNv12.data(), latestMediaNv12.size(), mediaFrameSeq);
@@ -3734,6 +3752,7 @@ int main(int argc, char** argv) {
             d3d.endSimulation();
             if (d3d.beginFrame()) {
                 orchestrator.renderFrame(fctx, false);
+                if (!cameraLabelAvailable()) stopCamera("its label can no longer be shown.");
                 if (spoutSender.isActive() && liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
                     spoutSender.recordCleanPublish(
                         d3d,
@@ -3749,7 +3768,7 @@ int main(int argc, char** argv) {
                     window.hideLoading();
                     StartupProgress::instance().finish(); // does nothing after the first frame
                 }
-                if (presented && !fallbackReported && orchestrator.isUsingFallbackEffect()) {
+                if (presented && !fallbackReported && !window.closeRequested() && orchestrator.isUsingFallbackEffect()) {
                     // The emergency test picture explains itself instead of just pulsing.
                     fallbackReported = true;
                     if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
