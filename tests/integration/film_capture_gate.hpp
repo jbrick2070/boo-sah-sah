@@ -316,11 +316,11 @@ bool writeFastCapturePng(const std::filesystem::path& path, const std::vector<ui
     return true;
 }
 
-bool testHeroVideoCaptureGate() {
+bool captureTenSecondVideo(bool taipeiSlice) {
     using namespace boo;
     CaptureComScope com;
     BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
-    const auto framesDir = gFilmCaptureDirectory / "hero_10s_frames";
+    const auto framesDir = gFilmCaptureDirectory / (taipeiSlice ? "trilogy_taipei_168s_178s" : "hero_10s_frames");
     std::error_code ec;
     std::filesystem::create_directories(framesDir, ec);
     BOO_CHECK(!ec);
@@ -334,25 +334,57 @@ bool testHeroVideoCaptureGate() {
 
     CueSheet cue;
     ValidationReport validation;
-    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath("assets/cues/film_360s.json"), cue, validation) && validation.valid);
+    const std::string cuePath = taipeiSlice ? "assets/cues/m2_trilogy_180s.json" : "assets/cues/film_360s.json";
+    BOO_CHECK(loadCueSheetFromFile(resolveResourcePath(cuePath), cue, validation) && validation.valid);
     const auto mode = resolveShowVisualMode(cue);
     M1TaipeiSliceEffect fx(d3d, spec, false, false, false, false, false, false, false, false, mode);
     BOO_CHECK(fx.probeAndInitialize().status != BackendStatus::Faulted);
     fx.setDisableRt(false);
 
-    // 300 native 2560x1440 frames @ 30 fps (1600 samples/frame @ 48 kHz) across [342.000s .. 352.000s)
-    constexpr uint32_t kTotalFrames = 300;
-    constexpr int64_t kStartSample = 342LL * 48000LL;
-    constexpr int64_t kStepSamples = 1600LL;
-    fx.resetTo(342.0);
+    constexpr uint32_t kTotalFrames = 300, kFps = 30;
+    BOO_CHECK(cue.sampleRate == 48000);
+    const int64_t startSample = (taipeiSlice ? 168LL : 342LL) * cue.sampleRate;
+    const int64_t stepSamples = cue.sampleRate / kFps;
+    const int64_t endSample = startSample + kTotalFrames * stepSamples;
+    BOO_CHECK(endSample <= cue.durationSamples);
+    const auto& scene = cue.scenes.at(findSceneIndexAtSample(cue, startSample));
+    if (taipeiSlice) {
+        BOO_CHECK(mode == ShowVisualMode::M2Trilogy180s && scene.sceneId == "taipei_sanctuary" && endSample <= scene.endSample);
+    }
+    fx.resetTo(double(startSample) / cue.sampleRate);
 
+    const auto rawPath = framesDir / "canvas.x2bgr10le";
+    const auto pending = framesDir / "canvas.x2bgr10le.partial";
+    std::ofstream raw;
+    JsonValue capture(JsonValue::Object{});
+    const auto manifest = framesDir / "capture.json";
+    if (taipeiSlice) {
+        capture["complete"] = false;
+        capture["adapter"] = d3d.adapterName();
+        capture["cue"] = cuePath;
+        capture["scene"] = scene.sceneId;
+        capture["width"] = 2560;
+        capture["height"] = 1440;
+        capture["fps"] = uint64_t(kFps);
+        capture["frames"] = uint64_t(kTotalFrames);
+        capture["sample_rate"] = cue.sampleRate;
+        capture["start_sample"] = startSample;
+        capture["last_frame_sample"] = endSample - stepSamples;
+        capture["end_sample_exclusive"] = endSample;
+        capture["format"] = "D3D12 R10G10B10A2_UNORM little-endian; FFmpeg x2bgr10le";
+        capture["checkpoints"] = JsonValue::Array{};
+        BOO_CHECK(writeFilmGateJson(manifest, capture));
+        raw.open(pending, std::ios::binary | std::ios::trunc);
+        BOO_CHECK(raw.good());
+    }
     std::vector<uint8_t> rgba;
+    std::vector<uint32_t> rgb10;
     uint32_t width = 0, height = 0;
     for (uint32_t f = 0; f < kTotalFrames; ++f) {
-        const int64_t sample = kStartSample + int64_t(f) * kStepSamples;
+        const int64_t sample = startSample + int64_t(f) * stepSamples;
         auto ctx = makeFilmGateContext(cue, sample, Edition::Family);
         ctx.presentationFrame = f;
-        BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, width, height, &error, nullptr));
+        BOO_CHECK(fx.renderHeadlessCanvasForTest(ctx, rgba, width, height, &error, taipeiSlice ? &rgb10 : nullptr));
         BOO_CHECK(width == 2560 && height == 1440);
         if ((f % 60u) == 0u || f + 1u == kTotalFrames) {
             uint64_t nonFinite = 0;
@@ -360,12 +392,29 @@ bool testHeroVideoCaptureGate() {
             HardwareResult rt;
             BOO_CHECK(fx.queryLiveEngineStatus(EngineKind::RT, rt));
             BOO_CHECK(rt.status == BackendStatus::Accelerated && rt.successfullyExecutedTestWork);
+            if (taipeiSlice) {
+                const auto stats = fx.lastCityDrawStats();
+                BOO_CHECK(stats.visibleCityPlacements > 0 && stats.rayInstances > 0);
+                JsonValue check(JsonValue::Object{});
+                check["frame"] = uint64_t(f);
+                check["sample"] = sample;
+                check["rgb10_fnv1a64"] = capturePixelHash(rgb10);
+                check["visible_lod_placements"] = JsonValue::Array{};
+                for (auto count : stats.lodPlacements) check["visible_lod_placements"].asArrayMut().emplace_back(uint64_t(count));
+                capture["checkpoints"].asArrayMut().push_back(check);
+            }
         }
-        std::ostringstream fname;
-        fname << "frame_" << std::setfill('0') << std::setw(4) << f << ".png";
-        BOO_CHECK(writeFastCapturePng(framesDir / fname.str(), rgba, width, height));
+        if (taipeiSlice) {
+            BOO_CHECK(rgb10.size() == size_t(width) * height);
+            raw.write(reinterpret_cast<const char*>(rgb10.data()), std::streamsize(rgb10.size() * sizeof(uint32_t)));
+            BOO_CHECK(raw.good());
+        } else {
+            std::ostringstream fname;
+            fname << "frame_" << std::setfill('0') << std::setw(4) << f << ".png";
+            BOO_CHECK(writeFastCapturePng(framesDir / fname.str(), rgba, width, height));
+        }
         if ((f % 60u) == 0u || f + 1u == kTotalFrames) {
-            std::cout << "Captured hero 10s frame " << (f + 1u) << "/" << kTotalFrames
+            std::cout << (taipeiSlice ? "Captured Taipei trilogy frame " : "Captured hero 10s frame ") << (f + 1u) << "/" << kTotalFrames
                       << " (t=" << std::fixed << std::setprecision(2) << (double(sample) / 48000.0) << "s)\n" << std::flush;
         }
     }
@@ -373,6 +422,13 @@ bool testHeroVideoCaptureGate() {
     fx.shutdown();
     d3d.waitForGpu();
     BOO_CHECK(d3d.debugErrorCount() == 0);
+    if (taipeiSlice) {
+        raw.close();
+        BOO_CHECK(raw.good() && std::filesystem::file_size(pending) == uint64_t(width) * height * 4u * kTotalFrames);
+        BOO_CHECK(MoveFileExW(pending.c_str(), rawPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH));
+        capture["complete"] = true;
+        BOO_CHECK(writeFilmGateJson(manifest, capture));
+    }
     return true;
 }
 
