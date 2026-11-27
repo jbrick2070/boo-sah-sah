@@ -6,6 +6,8 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
 Version 2.0 ships the film benchmark below together with everything in 1.1.13.0, which was not published separately.
 
+- The benchmark allows longer, still bounded, times for a first run and for slower graphics. Closing the app hides it and stops sound before the graphics are released.
+
 - Choose **Run benchmark** in Hardware Orchestra or press **Ctrl+B**. The viewer pauses the film and offers raster, native High path tracing, and DLSS Quality. Each option explains its requirements on the selected adapter.
 - The results table aligns measurements for the current run and a matching RTX 5080 Laptop GPU reference. It gives the median and longest GPU frame time for a six-second shot, the number of valid samples, and the rendering paths observed. An interrupted or substituted run shows its outcome without a timing score.
 - The CPU and NPU rows identify the processors on each rig when available and show their role in the test. The CPU runs the scripted director, and the three fixed GPU protocols leave NPU inference off.

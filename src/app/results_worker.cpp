@@ -22,6 +22,26 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 std::atomic<bool> workerActive{false};
 constexpr DWORD protocol = 0x31435242; // BRC1
+#ifdef BOO_RESULTS_CONTAINMENT_TEST
+// Keep the containment matrix quick while exercising the same deadline paths.
+constexpr auto launchLimit = 2s;
+constexpr auto preparationLimit = 18s;
+constexpr auto warmingLimit = 5s;
+constexpr auto measuringLimit = 20s;
+constexpr auto finishingLimit = 2s;
+constexpr auto frameProgressLimit = 2s;
+constexpr auto absoluteLimit = 50s;
+#else
+// Cold path-tracing shader compilation and slow integrated GPUs are legitimate work.
+// Stage and absolute caps still contain a driver or worker that stops making progress.
+constexpr auto launchLimit = 5s;
+constexpr auto preparationLimit = 120s;
+constexpr auto warmingLimit = 30s;
+constexpr auto measuringLimit = 150s;
+constexpr auto finishingLimit = 10s;
+constexpr auto frameProgressLimit = 15s;
+constexpr auto absoluteLimit = 300s;
+#endif
 enum : LONG { permitted, admitted, revoked };
 struct Channel {
     DWORD version;
@@ -197,7 +217,7 @@ struct ResultsWorker::Shared {
         const auto now = Clock::now();
         if (state == ResultsWorkerState::starting && message.type == MessageType::ready) {
             state = ResultsWorkerState::running;
-            stageLimit = now + 18s;
+            stageLimit = now + preparationLimit;
             return true;
         }
         const auto& next = message.snapshot;
@@ -207,16 +227,16 @@ struct ResultsWorker::Shared {
         }
         if (next.stage != last.stage) {
             switch (next.stage) {
-            case BenchmarkStage::Warming: stageLimit = now + 5s; break;
-            case BenchmarkStage::Measuring: stageLimit = now + 20s; break;
-            case BenchmarkStage::Finishing: stageLimit = now + 2s; break;
-            case BenchmarkStage::Finished: stageLimit = (std::min)(stageLimit, now + 2s); break;
+            case BenchmarkStage::Warming: stageLimit = now + warmingLimit; break;
+            case BenchmarkStage::Measuring: stageLimit = now + measuringLimit; break;
+            case BenchmarkStage::Finishing: stageLimit = now + finishingLimit; break;
+            case BenchmarkStage::Finished: stageLimit = (std::min)(stageLimit, now + finishingLimit); break;
             default: break;
             }
         }
         if (next.stage == BenchmarkStage::Warming || next.stage == BenchmarkStage::Measuring) {
             if (next.stage != last.stage || next.warmupCount != last.warmupCount || next.measuredCount != last.measuredCount)
-                frameLimit = now + 2s;
+                frameLimit = now + frameProgressLimit;
         } else frameLimit = (Clock::time_point::max)();
         last = next;
         return true;
@@ -322,7 +342,10 @@ struct ResultsWorker::Shared {
         killer.terminate();
         // Retain a direct process-handle fallback if Windows fails or delays job termination.
         if (WaitForSingleObject(process.value,100)==WAIT_TIMEOUT) TerminateProcess(process.value,1);
-        while (WaitForSingleObject(process.value, 200) == WAIT_TIMEOUT) {}
+        // A broken driver can delay process retirement even after both job and direct termination.
+        // Close the kill-on-close job after a bounded observation instead of pinning this supervisor forever.
+        const auto reapDeadline = Clock::now() + 5s;
+        while (WaitForSingleObject(process.value, 200) == WAIT_TIMEOUT && Clock::now() < reapDeadline) {}
     }
 };
 
@@ -337,8 +360,8 @@ bool ResultsWorker::start(const BenchmarkRequest& request) {
         shared_->state = ResultsWorkerState::starting;
         shared_->last.mode = request.mode;
         auto start = Clock::now();
-        shared_->absolute = start + 50s;
-        shared_->stageLimit = start + 2s;
+        shared_->absolute = start + absoluteLimit;
+        shared_->stageLimit = start + launchLimit;
     }
     try {
         std::thread([shared = shared_, request] {

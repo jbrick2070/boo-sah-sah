@@ -4053,6 +4053,11 @@ int main(int argc, char** argv) {
         BOO_LOG_DEBUG("Shutdown", line);
         last = now;
     };
+    // Look and sound closed before any GPU/effect teardown that a cold driver may delay.
+    window.hide();
+    shutdownStep("window hidden");
+    audio.shutdown();
+    shutdownStep("audio");
     d3d.retireGpuForShutdown();
     shutdownStep("GPU retired");
     if (settings.enableD3DDebug && (summary.d3dDebugErrors != 0 || summary.d3dDebugWarnings != 0)) runtimeExitCode = 1;
@@ -4064,14 +4069,6 @@ int main(int argc, char** argv) {
     shutdownStep("clock");
     orchestrator.shutdown();
     shutdownStep("effects");
-    // The sound stops and the window leaves the screen before the device goes: after a start
-    // that compiled shaders (the first after an update, with an empty driver cache), releasing
-    // the D3D12 device waits while the driver finishes its own shader work, which can take
-    // most of a minute. The app should look and sound closed meanwhile.
-    audio.shutdown();
-    shutdownStep("audio");
-    window.hide();
-    shutdownStep("window hidden");
     d3d.shutdown();
     shutdownStep("D3D12");
     window.destroy();

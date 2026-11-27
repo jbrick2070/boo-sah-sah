@@ -134,7 +134,7 @@ On a PC whose graphics share system memory (integrated graphics), the app starts
 
 While the app starts, a bar under **Loading** shows how far it has got. It counts bytes, not seconds. It is the average of four gauges, each read from the machine, and the line under the bar gives their figures:
 
-- **Files.** Megabytes of meshes, textures, shaders and network weights read into memory, out of the total (`268 / 268 MB`). Every file the asset manifest lists is also checked against its SHA-256 as it loads, on a second thread so it costs no start-up time; `SHA-256 verified 264 MB` is how much has matched. A file that does not match is counted as `mismatched` and named in the log.
+- **Files.** Megabytes of instrumented meshes, textures, shaders and network weights read into memory, out of the total (`268 / 268 MB`). Instrumented files that are listed in the asset manifest are checked against its SHA-256 as they load, on a second thread so it costs no start-up time; `SHA-256 verified 264 MB` is how much has matched. A checked file that does not match is counted as `mismatched` and named in the log.
 - **RAM.** System memory the app has committed, against what the last start reached.
 - **GPU.** GPU memory the app has in use, as Windows reports it, against what the last start reached.
 - **Shaders.** Megabytes of shader code the graphics driver has compiled into pipelines, against what the last start compiled.
@@ -354,7 +354,7 @@ By default, BOO SAH SAH never accesses user media files, cameras, or microphones
 - **Strict Privacy Guarantees**:
   - Audio and microphone streams are unconditionally deselected at the Media Foundation reader boundary.
   - Whenever a webcam is active, a high-contrast crimson **`LIVE CAMERA`** pill is rendered at top-center of the window—even when the HUD overlay is turned off (`Tab` Mode 3). Press **`[W]`** (outside Explore; in Explore press `F` first) to stop and release the camera hardware immediately.
-  - No camera picture is ever written to disk or transmitted over a network, and all user file paths in logs/diagnostics are redacted (`<USER_HOME>`).
+  - No camera picture is ever written to disk or transmitted over a network. In logs and diagnostics, usernames in standard Windows user-home paths are replaced with `<USER_HOME>`; file names and paths outside a user-home folder may remain visible.
   - Unsupported codecs, corrupt files, or `--inject-media-fail` automatically fall back to procedural Signal Hijack without crashing or pausing the soundtrack.
 
 ---

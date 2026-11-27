@@ -9,7 +9,7 @@ namespace boo {
 namespace {
 using E = BenchmarkEvidence;
 using F = BenchmarkFeature;
-constexpr std::string_view referenceBuild = "1.1.14.0";
+constexpr std::string_view referenceBuild = "2.0.0.0";
 constexpr uint64_t referenceDriver = (32ull << 48) | (16ull << 16) | 2140ull;
 
 // First completed mains-powered measurement per protocol, documented in
@@ -36,11 +36,11 @@ constexpr ResultsReference reference(BenchmarkMode mode, unsigned inputWidth, un
     return {referenceBuild.data(), s, {ResultsCpuModel::IntelCoreUltra9_275HX, ResultsNpuModel::IntelAiBoost}};
 }
 constexpr auto references = std::to_array<ResultsReference>({
-    reference(BenchmarkMode::Raster, 1280, 720, 0.6160, 1.6506,
+    reference(BenchmarkMode::Raster, 1280, 720, 0.6371, 1.9685,
               {E::FilmGpu, E::RasterGpu, E::HlslGpu, E::Unknown, E::ScriptedCpu, E::Off, E::Off}),
-    reference(BenchmarkMode::PathTracing, 1280, 720, 3.5541, 5.1108,
+    reference(BenchmarkMode::PathTracing, 1280, 720, 4.3686, 6.0994,
               {E::FilmGpu, E::PathTracingGpu, E::HlslGpu, E::Unknown, E::ScriptedCpu, E::Off, E::Off}),
-    reference(BenchmarkMode::DlssQuality, 853, 480, 0.9220, 2.0432,
+    reference(BenchmarkMode::DlssQuality, 853, 480, 0.9998, 2.6600,
               {E::FilmGpu, E::RasterGpu, E::HlslGpu, E::Unknown, E::ScriptedCpu, E::Off, E::DlssGpu}),
 });
 } // namespace

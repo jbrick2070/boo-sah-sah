@@ -1,16 +1,16 @@
 # RTX 5080 Laptop GPU reference measurements
 
-The results card uses measurements from the maintainer’s NVIDIA GeForce RTX 5080 Laptop GPU on mains power. The Windows x64 machine reported PCI model 10DE:2C59 and display driver 32.0.16.2140. Testing began after Comfy’s rendering process exited. The Windows desktop remained active. Before the raster run, NVIDIA reported 13–19% GPU utilization and 1,554 MiB in use. Driver-cache warmth is uncontrolled.
+The results card uses measurements from the maintainer’s NVIDIA GeForce RTX 5080 Laptop GPU on mains power, taken on 26 November 2026 with the 2.0.0.0 build. The Windows x64 machine reported PCI model 10DE:2C59 and display driver 32.0.16.2140. The desktop and some background tools stayed active; NVIDIA reported between 5 and 25% GPU utilization and about 1.9 GB in use around the runs.
 
-The reference for each mode is the first run of that protocol after the machine became available for dedicated testing that passed every execution, timing and process-exit check. Only completed runs with 30 warm-up frames and all 180 measurements qualify. GPU time includes the clean film shot at 1280 × 720 output. It excludes viewer startup, preparation and presentation.
+Each reference is the first run of that protocol that passed every execution, timing and process-exit check. Only completed runs with 30 warm-up frames and all 180 measurements qualify. GPU time includes the clean film shot at 1280 × 720 output. It excludes viewer startup, preparation and presentation.
 
 | Build | Protocol | Input | Output | Typical GPU frame (ms) | Worst GPU frame (ms) |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 1.1.14.0 | RC1 raster | 1280 × 720 | 1280 × 720 | 0.6160 | 1.6506 |
-| 1.1.14.0 | PT1 High path tracing | 1280 × 720 | 1280 × 720 | 3.5541 | 5.1108 |
-| 1.1.14.0 | DLSS-Q1 Super Resolution Quality | 853 × 480 | 1280 × 720 | 0.9220 | 2.0432 |
+| 2.0.0.0 | RC1 raster | 1280 × 720 | 1280 × 720 | 0.6371 | 1.9685 |
+| 2.0.0.0 | PT1 High path tracing | 1280 × 720 | 1280 × 720 | 4.3686 | 6.0994 |
+| 2.0.0.0 | DLSS-Q1 Super Resolution Quality | 853 × 480 | 1280 × 720 | 0.9998 | 2.6600 |
 
-The first dedicated DLSS attempt timed out during preparation. The first path-tracing attempt timed out after 116 measured frames. Each produced an interrupted result. The subsequent completed PT1 used the same High path-tracing shaders as ordinary playback, with the driver cache already warmed by the viewer. For all three reference runs, the benchmark checked which rendering path actually ran and waited for the worker process to exit successfully.
+Raster and DLSS completed on their first attempt. Path tracing timed out in preparation three times while the driver had not yet compiled the ray-traced shaders for this build, and completed on the first attempt after the film had played once. For all three reference runs, the benchmark checked which rendering path actually ran and waited for the worker process to exit successfully.
 
 The app matches build, protocol, input and output sizes, native Windows/app architecture, stable power source and observed rendering path before displaying a reference. Both columns use the same precision and units. A reference comparison describes one shot on two systems. A lower time means the GPU rendered a frame faster.
 
