@@ -4,6 +4,7 @@
 #include "boo/audio.hpp"
 #include "boo/benchmark.hpp"
 #include "boo/capabilities.hpp"
+#include "boo/city_draw_stats.hpp"
 #include "boo/director.hpp"
 #include "boo/health.hpp"
 #include "boo/live_accelerators.hpp"
@@ -268,6 +269,7 @@ public:
     uint32_t lastVerifiedRayHits() const noexcept;
     uint32_t activeDenoiseMode() const noexcept;
     bool hasAllAuthoredSceneAssets() const noexcept;
+    CityDrawStats lastCityDrawStats() const noexcept;
 
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(

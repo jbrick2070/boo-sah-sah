@@ -21,6 +21,7 @@ struct Bmesh {
     std::vector<BmeshSubmesh> submeshes;
     std::array<float, 6> bounds{};
     bool proceduralFallback=false;
+    uint32_t sourcePayloadCrc = 0; // Populated after file integrity verification.
 };
 bool loadBmesh(const std::filesystem::path& path, Bmesh& output, std::string* error=nullptr);
 // Original deterministic low-detail fallback authored in m1_scene.cpp.

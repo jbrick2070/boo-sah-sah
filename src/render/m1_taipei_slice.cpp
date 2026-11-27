@@ -12,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "seek_probe_private.hpp"
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -192,7 +193,11 @@ float smoothstepF(float e0, float e1, float x) noexcept {
 }
 
 bool readShaderCso(const char* relPath, std::vector<uint8_t>& outBytes) {
-    const auto resolved = resolveResourcePath(relPath);
+    auto resolved = resolveResourcePath(relPath);
+    if(GetEnvironmentVariableW(L"BOO_SEEK_IEEE",nullptr,0)) {
+        const auto overridePath=std::filesystem::path("D:/boo-sah-sah-phase1/build/seek-probe-ieee")/resolved.filename();
+        if(std::filesystem::exists(overridePath)) resolved=overridePath;
+    }
     std::ifstream ifs(resolved, std::ios::binary | std::ios::ate);
     if (!ifs) return false;
     const auto sz = ifs.tellg();
@@ -2942,6 +2947,10 @@ bool M1TaipeiSliceEffect::hasAllAuthoredSceneAssets() const noexcept {
     return impl_ && impl_->trilogyMesh && impl_->trilogyMesh->hasAllAuthoredSceneAssets();
 }
 
+CityDrawStats M1TaipeiSliceEffect::lastCityDrawStats() const noexcept {
+    return impl_ && impl_->trilogyMesh ? impl_->trilogyMesh->lastCityDrawStats() : CityDrawStats{};
+}
+
 GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     const FrameContext& ctx,
     M1CameraState& outCam) const noexcept {
@@ -3056,6 +3065,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.invSize[0] = 1.0f / static_cast<float>(srcW);
         pc.invSize[1] = 1.0f / static_cast<float>(srcH);
         pc.bloomThreshold = 1.35f;
+        pc.focusDistance=1.f/bloomW[m]; pc.focusWeight=1.f/bloomH[m];
         pc.scaleOrVignette = 1.0f;
         pc.isFirstDownsample = (m == 0) ? 1u : 0u;
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
@@ -3083,6 +3093,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.invSize[1] = 1.0f / static_cast<float>(bloomH[srcIdx]);
         pc.scaleOrVignette = 1.12f;
         pc.bloomIntensity = 0.62f;
+        pc.focusDistance=1.f/bloomW[dstIdx]; pc.focusWeight=1.f/bloomH[dstIdx];
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
         cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(4u + srcIdx)); // [6]=mip2, [5]=mip1
         cmd->DrawInstanced(3, 1, 0, 0);
@@ -3132,6 +3143,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
 
         cmd->SetGraphicsRootSignature(compositeRootSig.Get());
         cmd->SetPipelineState(psoCompositeCanvas.Get());
+        seekProbeHash("compositeCB",&pc,sizeof(pc));
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
         cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(2u)); // [2]=sceneDistance (t0), [3]=sceneHdr (t1), [4]=bloomMip0 (t2)
         cmd->DrawInstanced(3, 1, 0, 0);
@@ -3176,6 +3188,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     M1CameraState cam{};
     GpuM1SceneConstants sc = buildSceneConstants(ctx, cam);
+    seekProbeHash("m1SceneCB",&sc,sizeof(sc));
 
     ID3D12DescriptorHeap* heaps[] = {srvUavHeap.Get()};
     cmd->SetDescriptorHeaps(1, heaps);
@@ -3195,6 +3208,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             const uint16_t* tPixels = liveAccel.evaluateTensorCausticField(
                 ctx.samplePosition, ctx.sampleRate, sc.deterministicSeed, ctx.edition, cam.revealOpen01, tTel);
             if (tPixels != nullptr) {
+                seekProbeHash("tensor",tPixels,size_t(LiveAcceleratorOrchestra::kTensorWidth)*LiveAcceleratorOrchestra::kTensorHeight*8);
                 uint8_t* dstMapped = nullptr;
                 D3D12_RANGE emptyRead{0, 0};
                 if (SUCCEEDED(tensorUploadBuf[slot]->Map(0, &emptyRead, reinterpret_cast<void**>(&dstMapped))) && dstMapped) {
@@ -3404,6 +3418,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                 void* dstMapped = nullptr;
                 D3D12_RANGE emptyRead{0, 0};
                 const size_t byteCount = static_cast<size_t>(reqCudaParticles) * sizeof(LiveParticleState);
+                seekProbeHash("particles",pStates,byteCount);
                 if (SUCCEEDED(particleUploadBuf[slot]->Map(0, &emptyRead, &dstMapped)) && dstMapped) {
                     std::memcpy(dstMapped, pStates, byteCount);
                     D3D12_RANGE written{0, byteCount};
@@ -3465,7 +3480,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         // Two wake layers, six rotors, at most three 40-segment strands per rotor.
         const uint32_t instances = wash.axisAndMotion[3] > 0.0f ? 2u * 6u * 3u * 40u : activeParticleCount;
-        cmd->DrawInstanced(6u, instances, 0u, 0u);
+        if(!GetEnvironmentVariableW(L"BOO_SEEK_NO_PARTICLES",nullptr,0)) cmd->DrawInstanced(6u, instances, 0u, 0u);
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
@@ -4124,6 +4139,36 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
 
 bool M1TaipeiSliceEffect::readSceneHdrFiniteForTest(uint64_t& nonFiniteComponents, std::string* error) {
     nonFiniteComponents = 0;
+    if (GetEnvironmentVariableW(L"BOO_SEEK_STAGES",nullptr,0) && GetEnvironmentVariableW(L"BOO_SEEK_LABEL",nullptr,0)) {
+        auto* device=static_cast<ID3D12Device*>(d3d_.deviceRaw());
+        auto readStage=[&](const char* name,ID3D12Resource* resource,D3D12_RESOURCE_STATES original) {
+            const auto td=resource->GetDesc();
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 total{},rowBytes{};
+            device->GetCopyableFootprints(&td,0,1,0,&fp,nullptr,&rowBytes,&total);
+            D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_READBACK;
+            const auto desc=makeBufferDesc(total);
+            ComPtr<ID3D12Resource> result;
+            if(FAILED(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&result)))) return false;
+            if(!d3d_.executeSingleCommandListAndWait([&](void* raw){
+                auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);
+                transitionResource(cmd,resource,original,D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION dest{},src{};
+                dest.pResource=result.Get();dest.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dest.PlacedFootprint=fp;
+                src.pResource=resource;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                cmd->CopyTextureRegion(&dest,0,0,0,&src,nullptr);
+                transitionResource(cmd,resource,D3D12_RESOURCE_STATE_COPY_SOURCE,original);
+            },error)) return false;
+            D3D12_RANGE read{0,size_t(total)};void* mapped{};
+            if(FAILED(result->Map(0,&read,&mapped))) return false;
+            std::vector<uint8_t> dense(size_t(rowBytes)*td.Height);
+            for(UINT y=0;y<td.Height;++y) std::memcpy(dense.data()+y*rowBytes,static_cast<const uint8_t*>(mapped)+fp.Offset+size_t(y)*fp.Footprint.RowPitch,size_t(rowBytes));
+            seekProbeHash(name,dense.data(),dense.size());
+            D3D12_RANGE written{0,0};result->Unmap(0,&written);return true;
+        };
+        if(!readStage("sceneDist",impl_->sceneDepth.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) ||
+           !readStage("gpuTensor",impl_->tensorFieldTex.Get(),kTensorReadState) ||
+           !readStage("bloomMip0",impl_->bloomMips[0].Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return false;
+    }
     if (!impl_ || !impl_->sceneHdr || !d3d_.deviceRaw()) {
         if (error) *error = "SceneHDR is not initialized";
         return false;
@@ -4167,6 +4212,12 @@ bool M1TaipeiSliceEffect::readSceneHdrFiniteForTest(uint64_t& nonFiniteComponent
         if (error) *error = "Unable to map FP16 readback";
         return false;
     }
+    wchar_t diagnosticPath[1024]{};
+    if (GetEnvironmentVariableW(L"BOO_REPLAY_HDR_FILE", diagnosticPath, 1024) && !GetEnvironmentVariableW(L"BOO_SEEK_SMALL",nullptr,0)) {
+        std::ofstream diagnostic(std::filesystem::path(diagnosticPath), std::ios::binary);
+        for(UINT y=0;y<desc.Height;++y) diagnostic.write(reinterpret_cast<const char*>(mapped)+footprint.Offset+size_t(y)*footprint.Footprint.RowPitch,desc.Width*8);
+    }
+    if(footprint.Footprint.RowPitch==desc.Width*8) seekProbeHash("gpuHDR",static_cast<const uint8_t*>(mapped)+footprint.Offset,size_t(desc.Width)*desc.Height*8);
     for (UINT y = 0; y < desc.Height; ++y) {
         const auto* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(mapped)
             + footprint.Offset + static_cast<size_t>(y) * footprint.Footprint.RowPitch);

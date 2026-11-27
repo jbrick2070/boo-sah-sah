@@ -1417,9 +1417,13 @@ bool testUiStringCatalogs() {
 
 } // namespace
 
+#include "city_module_tests.hpp"
+
 int main() {
     boo::Logger::instance().setConsoleEnabled(false);
 
+    runTest("CityModuleLodTransitions", testCityModuleLodTransitions);
+    runTest("CityModulesPreserveAuthoredKits", testCityModulesPreserveAuthoredKits);
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
     runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);

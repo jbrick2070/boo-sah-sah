@@ -1,10 +1,12 @@
 #include "boo/trilogy_renderer.hpp"
 #include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
+#include "boo/city_modules.hpp"
 #include "boo/btex.hpp"
 #include "boo/nrd_bridge.hpp"
 #include "boo/logging.hpp"
 #include <windows.h>
+#include "seek_probe_private.hpp"
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -12,13 +14,21 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
+#include <map>
+#include <tuple>
 #include <stdexcept>
 namespace boo {
 using Microsoft::WRL::ComPtr;
 namespace {
 void check(HRESULT hr) {if(FAILED(hr))throw std::runtime_error("M2 D3D12 resource/pipeline failure: "+std::to_string(static_cast<uint32_t>(hr)));}
 std::vector<uint8_t> shader(const char* name) {
-    std::ifstream f(resolveResourcePath(std::filesystem::path("assets/shaders")/name),std::ios::binary|std::ios::ate);
+    auto path=resolveResourcePath(std::filesystem::path("assets/shaders")/name);
+    if(GetEnvironmentVariableW(L"BOO_SEEK_IEEE",nullptr,0)) {
+        const auto overridePath=std::filesystem::path("D:/boo-sah-sah-phase1/build/seek-probe-ieee")/name;
+        if(std::filesystem::exists(overridePath)) path=overridePath;
+    }
+    std::ifstream f(path,std::ios::binary|std::ios::ate);
     if(!f)throw std::runtime_error(std::string("Missing M2 shader: ")+name);
     std::vector<uint8_t> data(static_cast<size_t>(f.tellg()));f.seekg(0);f.read(reinterpret_cast<char*>(data.data()),static_cast<std::streamsize>(data.size()));return data;
 }
@@ -32,6 +42,49 @@ void transition(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r,D3D12_RESOURCE_
 }
 void uav(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r) {D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;b.UAV.pResource=r;cmd->ResourceBarrier(1,&b);}
 struct DrawConstants {float rows[12]{};uint32_t first=0,mat=0,part=0,pad=0;};
+// Row-major affine transforms in the same convention as D3D12_RAYTRACING_INSTANCE_DESC.
+// Keep the layout in sync with InstanceData in m2_mesh.hlsl.
+struct alignas(16) InstanceData {
+    float world[12];
+    float worldToObject[12];
+    uint32_t meshId, materialSlice, buildingSeed, flags;
+};
+static_assert(sizeof(InstanceData) == 112 && offsetof(InstanceData, meshId) == 96);
+
+void composeAffine(const float* outer, const float* inner, float* result) noexcept {
+    for (int row = 0; row < 3; ++row) {
+        const float* a = outer + 4 * row;
+        for (int col = 0; col < 4; ++col) {
+            result[4 * row + col] = a[0]*inner[col] + a[1]*inner[4+col] + a[2]*inner[8+col];
+        }
+        result[4 * row + 3] += a[3];
+    }
+}
+
+InstanceData makeInstanceData(const DrawConstants& dc, uint32_t meshId, uint32_t seed) {
+    InstanceData out{};
+    std::copy_n(dc.rows, 12, out.world);
+    const float* m = dc.rows;
+    float* inv = out.worldToObject;
+    inv[0] = m[5]*m[10] - m[6]*m[9]; inv[1] = m[2]*m[9] - m[1]*m[10]; inv[2] = m[1]*m[6] - m[2]*m[5];
+    inv[4] = m[6]*m[8] - m[4]*m[10]; inv[5] = m[0]*m[10] - m[2]*m[8]; inv[6] = m[2]*m[4] - m[0]*m[6];
+    inv[8] = m[4]*m[9] - m[5]*m[8]; inv[9] = m[1]*m[8] - m[0]*m[9]; inv[10] = m[0]*m[5] - m[1]*m[4];
+    const float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8];
+    // Optional LOD details can be tiny but well conditioned near their fade endpoint.
+    const float cofactorMagnitude = std::abs(m[0]*inv[0]) + std::abs(m[1]*inv[4]) + std::abs(m[2]*inv[8]);
+    if (!std::isfinite(det) || std::abs(det) <= 1e-6f * cofactorMagnitude)
+        throw std::runtime_error("Singular city instance transform");
+    for (int row = 0; row < 3; ++row) {
+        float* r = inv + 4*row;
+        for (int col = 0; col < 3; ++col) r[col] /= det;
+        r[3] = -(r[0]*m[3] + r[1]*m[7] + r[2]*m[11]);
+    }
+    out.meshId = meshId;
+    out.materialSlice = dc.mat;
+    out.buildingSeed = seed;
+    out.flags = dc.part;
+    return out;
+}
 struct SceneConstants {float eye[3];float fov;float right[3];float aspect;float up[3];float time;float forward[3];float reveal;uint32_t width,height,act,canonical;float day,pulse;uint32_t showFlags;float moodAccent;float moodBloom,moodLight,moodCut,pad;float sunDir[3];float sunScale;uint32_t accumFrame,interFlags;float jitter[2];};
     static_assert(sizeof(SceneConstants)==36*4,"SceneConstants must match m2_mesh.hlsl cbuffer Scene (36 dwords)");
     float halton(uint32_t i,uint32_t b){float f=1,r=0;while(i){f/=float(b);r+=f*float(i%b);i/=b;}return r;}
@@ -222,11 +275,52 @@ ComPtr<ID3D12Resource> uploadBtexArray(ID3D12Device* d, D3D12Context& ctx, const
 struct TrilogyMeshRenderer::Impl {
     D3D12Context& context;
     ShowVisualMode visualMode=ShowVisualMode::M2Trilogy180s;
-    struct Part {BmeshSubmesh sub;uint32_t kit;ComPtr<ID3D12Resource> blas;};
+    struct Part {
+        BmeshSubmesh sub;
+        uint32_t kit;
+        ComPtr<ID3D12Resource> blas;
+        uint32_t meshId=0;
+        D3D12_GPU_VIRTUAL_ADDRESS compactBlas=0;
+        std::array<float,3> detailCenter{};
+    };
     std::vector<Part> parts;
+    struct Chunk {
+        uint32_t kit = 0;
+        std::array<float,3> center{};
+        float radius = 0;
+        std::vector<uint32_t> placements;
+    };
+    struct SelectedPlacement {
+        uint32_t id;
+        std::array<float,3> detailScale;
+    };
+    struct ModuleSelection {
+        std::vector<SelectedPlacement> visible;
+        std::vector<SelectedPlacement> rayOnly;
+    };
+    struct DrawBatch { uint32_t first, count, indexCount, meshId; bool cutout; };
+    CityModuleLayout city;
+    std::vector<Chunk> chunks;
+    std::vector<std::vector<Part>> moduleParts;
+    std::vector<ModuleSelection> selectedModules;
+    std::vector<InstanceData> frameInstances;
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> rayInstances;
+    std::vector<DrawBatch> batches;
+    ComPtr<ID3D12Resource> instanceBuffer, meshOffsets, compactBlasPool;
+    size_t maxSceneInstances = 0;
+    uint64_t blasBytes = 0, tlasBytes = 0;
+    uint32_t templateBlases = 0;
+    CityDrawStats lastStats{};
     std::array<Part,6> marbleTemplates{};
     size_t maxTlasInstances=0;
     ComPtr<ID3D12Resource> vb,ib,scratch,tlas,tlasScratch,instances,depth;
+    ComPtr<ID3D12Resource> savedTlas;
+    ComPtr<ID3D12PipelineState> earlySky;
+    ComPtr<ID3D12Resource> seekStatsRead;
+    ComPtr<ID3D12Resource> seekRaw[2];
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT rawFootprint{};
+    UINT64 rawBytes=0;
+    ComPtr<ID3D12QueryHeap> seekStats;
     ComPtr<ID3D12Resource> albedoTex,normalTex,ormtTex,envIblTex,fallbackTensorTex;
     ComPtr<ID3D12Resource> gbufNormRough,gbufDiffRadHit,gbufSpecRadHit,gbufModViewZ,nrdMv;
     ComPtr<ID3D12Resource> nrdNormRough,nrdViewZ,nrdDiffIn,nrdSpecIn;
@@ -248,6 +342,85 @@ struct TrilogyMeshRenderer::Impl {
     bool usedFallbackTexture = false;
     bool verified=false,rtReady=false;
     explicit Impl(D3D12Context& c):context(c),nrd(c){}
+    void buildChunks() {
+        std::map<std::tuple<uint32_t,int32_t,int32_t>, std::vector<uint32_t>> cells;
+        for (uint32_t i=0; i<city.placements.size(); ++i) {
+            const auto& p = city.placements[i];
+            cells[{p.kit,p.chunk[0],p.chunk[1]}].push_back(i);
+        }
+        for (auto& [cell,members] : cells) {
+            auto& chunk = chunks.emplace_back();
+            chunk.kit = std::get<0>(cell);
+            chunk.placements = std::move(members);
+            std::array<float,3> lo, hi;
+            lo.fill(std::numeric_limits<float>::max());
+            hi.fill(std::numeric_limits<float>::lowest());
+            for (auto idx : chunk.placements) {
+                const auto& p = city.placements[idx];
+                for (int a=0; a<3; ++a) {
+                    lo[a] = std::min(lo[a],p.center[a]-p.radius);
+                    hi[a] = std::max(hi[a],p.center[a]+p.radius);
+                }
+            }
+            for (int a=0; a<3; ++a) chunk.center[a] = (lo[a]+hi[a])*0.5f;
+            chunk.radius = std::hypot(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2])*0.5f;
+        }
+    }
+    void selectCity(const M1CameraState& camera, float aspect, uint32_t activeKit,
+                    const DrawConstants& kit, bool trace, CityDrawStats& stats) {
+        for (auto& group : selectedModules) {
+            group.visible.clear();
+            group.rayOnly.clear();
+        }
+        float forward[3], right[3], up[3];
+        for (int a=0; a<3; ++a) forward[a]=camera.target[a]-camera.eye[a];
+        normalize(forward); cross(camera.up,forward,right); normalize(right); cross(forward,right,up);
+        const float tanY=std::tan(camera.fovYRadians*.5f), tanX=tanY*aspect;
+        const float sideX=std::hypot(1.f,tanX), sideY=std::hypot(1.f,tanY);
+        const float kitScale=kit.rows[0];
+        auto eyeRelative = [&](const std::array<float,3>& center) {
+            return std::array<float,3>{
+                center[0]*kitScale+kit.rows[3]-camera.eye[0],
+                center[1]*kitScale+kit.rows[7]-camera.eye[1],
+                center[2]*kitScale+kit.rows[11]-camera.eye[2]
+            };
+        };
+        auto inFrustum = [&](const std::array<float,3>& p, float r) {
+            auto project = [&](const float* axis) { return p[0]*axis[0]+p[1]*axis[1]+p[2]*axis[2]; };
+            const float z=project(forward);
+            return z+r>=.1f && z-r<=3200.f && std::abs(project(right))<=z*tanX+r*sideX
+                   && std::abs(project(up))<=z*tanY+r*sideY;
+        };
+        // The longest reflected/transmitted segment is 180 world units, plus a
+        // secondary shadow segment. Retain nearby offscreen casters and reflectors.
+        constexpr float rayReach=256.f;
+        for (const auto& chunk : chunks) {
+            if (chunk.kit!=activeKit) continue;
+            stats.cityPlacements+=static_cast<uint32_t>(chunk.placements.size());
+            auto center=eyeRelative(chunk.center);
+            const float radius=chunk.radius*kitScale;
+            bool directChunk=inFrustum(center,radius+.1f);
+            if (!directChunk && (!trace || !inFrustum(center,radius+rayReach))) continue;
+            for (auto id : chunk.placements) {
+                const auto& placement=city.placements[id];
+                auto offset=eyeRelative(placement.center);
+                const float bounds=placement.radius*kitScale;
+                const bool direct=directChunk && inFrustum(offset,bounds+.1f);
+                if (!direct && (!trace || !inFrustum(offset,bounds+rayReach))) continue;
+                const float distance=std::max(0.f,std::hypot(offset[0],offset[1],offset[2])-bounds);
+                const auto unitsPerMeter=activeKit==2 ? kitScale : .08f;
+                const auto lod=selectCityModuleLod(distance,unitsPerMeter,placement.seed);
+                auto& group=selectedModules[placement.modules[lod]];
+                (direct ? group.visible : group.rayOnly).push_back({id,{
+                    1.f,cityDetailScale(distance,unitsPerMeter,placement.seed,1),
+                    cityDetailScale(distance,unitsPerMeter,placement.seed,2)}});
+                if (direct) {
+                    ++stats.visibleCityPlacements;
+                    ++stats.lodPlacements[lod];
+                }
+            }
+        }
+    }
     bool isPartActiveInShow(const Part& p,float time) const noexcept {
         const uint32_t pt=p.sub.part;
         const bool hero=p.kit>=4;
@@ -401,7 +574,13 @@ TrilogyMeshRenderer::TrilogyMeshRenderer(D3D12Context& c):impl_(std::make_unique
 TrilogyMeshRenderer::~TrilogyMeshRenderer() {impl_->context.waitForGpu();}
 bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMode visualMode,void* tensorTexture) {
     try {
-        auto& s=*impl_;s.visualMode=visualMode;auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
+        auto next=std::make_unique<Impl>(impl_->context);
+        auto& s=*next;s.visualMode=visualMode;auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
+        if(GetEnvironmentVariableW(L"BOO_SEEK_STAGES",nullptr,0)) {
+            D3D12_QUERY_HEAP_DESC desc{D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS,4,0};
+            check(d->CreateQueryHeap(&desc,IID_PPV_ARGS(&s.seekStats)));
+            s.seekStatsRead=buffer(d,4*sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS),D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
+        }
         std::vector<BmeshVertex> vertices;std::vector<uint32_t> indices;
         const char* names[]={"shanghai_trestle","shenzhen_evtol","taipei_101_hero","glass_orchid_hero"};
         for(uint32_t k=0;k<4;++k) {
@@ -409,6 +588,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             if(fault||!loadBmesh(resolveResourcePath(std::string("assets/meshes/")+names[k]+".bmesh"),mesh,&why)) {
                 mesh=buildTrilogyFallbackKit(k);++s.fallbacks;BOO_LOG_WARN("M2Mesh",std::string(names[k])+": procedural fallback "+why);
             }
+            if ((k == 1 || k == 2) && !mesh.proceduralFallback && !fault) appendCityModules(s.city, k, mesh);
             for(auto sub:mesh.submeshes) {sub.firstIndex+=static_cast<uint32_t>(indices.size());sub.firstVertex+=static_cast<uint32_t>(vertices.size());s.parts.push_back({sub,k,{}});}
             for(auto i:mesh.indices)indices.push_back(i+static_cast<uint32_t>(vertices.size()));
             vertices.insert(vertices.end(),mesh.vertices.begin(),mesh.vertices.end());
@@ -432,6 +612,65 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             BmeshSubmesh sph = appendSmoothSphereTemplate(vertices, indices, kMarbleTemplateMats[m], 900u + static_cast<uint32_t>(m));
             s.marbleTemplates[m] = Impl::Part{sph, 99u, {}};
         }
+        s.buildChunks();
+        s.moduleParts.resize(s.city.modules.size());
+        s.selectedModules.resize(s.city.modules.size());
+        for (size_t m=0; m<s.city.modules.size(); ++m) {
+            const Bmesh& mesh = s.city.modules[m];
+            for (auto sub : mesh.submeshes) {
+                std::array<float,3> detailCenter{};
+                if (sub.part >> 16) {
+                    std::array<float,3> lo,hi;
+                    lo.fill(std::numeric_limits<float>::max());
+                    hi.fill(std::numeric_limits<float>::lowest());
+                    for (uint32_t i=0; i<sub.vertexCount; ++i) {
+                        const auto& pos=mesh.vertices[sub.firstVertex+i].positionMaterial;
+                        for (int axis=0; axis<3; ++axis) {
+                            lo[axis]=std::min(lo[axis],pos[axis]);
+                            hi[axis]=std::max(hi[axis],pos[axis]);
+                        }
+                    }
+                    for (int axis=0; axis<3; ++axis) detailCenter[axis]=(lo[axis]+hi[axis])*.5f;
+                }
+                sub.firstIndex += static_cast<uint32_t>(indices.size());
+                sub.firstVertex += static_cast<uint32_t>(vertices.size());
+                s.moduleParts[m].push_back({sub,0,{}});
+                s.moduleParts[m].back().detailCenter=detailCenter;
+            }
+            const uint32_t baseVertex = static_cast<uint32_t>(vertices.size());
+            for (auto index : mesh.indices) indices.push_back(baseVertex+index);
+            vertices.insert(vertices.end(), mesh.vertices.begin(), mesh.vertices.end());
+        }
+        s.city.modules.clear();
+        // A film shot selects exactly one city. Reserve its worst-case near detail
+        // across every visible and ray-only placement, including headless/A-B slots.
+        std::array<size_t,3> cityCapacity{};
+        for (const auto& p : s.city.placements) {
+            size_t largest = 0;
+            for (auto module : p.modules) largest = std::max(largest, s.moduleParts.at(module).size());
+            cityCapacity.at(p.kit) += largest;
+        }
+        s.maxSceneInstances = s.parts.size() + InteractiveView::kMaxMarbles
+            + *std::max_element(cityCapacity.begin(),cityCapacity.end());
+        if (s.maxSceneInstances > (1u<<24)) throw std::runtime_error("City instances exceed the DXR 24-bit identifier range");
+        s.frameInstances.reserve(s.maxSceneInstances);
+        s.rayInstances.reserve(s.maxSceneInstances);
+        // Each buffered frame has independent canonical and A/B uploads; both passes can
+        // be recorded before the GPU reads either. Slot 3 is the serialized headless path.
+        s.instanceBuffer = buffer(d, s.maxSceneInstances*sizeof(InstanceData)*8,
+                                 D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        std::vector<Impl::Part*> geometriesById;
+        for (auto& part : s.parts) geometriesById.push_back(&part);
+        for (auto& part : s.marbleTemplates) geometriesById.push_back(&part);
+        for (auto& module : s.moduleParts)
+            for (auto& part : module) geometriesById.push_back(&part);
+        std::vector<uint32_t> firstIndices;
+        for (auto* part : geometriesById) {
+            part->meshId = static_cast<uint32_t>(firstIndices.size());
+            firstIndices.push_back(part->sub.firstIndex);
+        }
+        s.meshOffsets = buffer(d, firstIndices.size()*sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        upload(s.meshOffsets.Get(),firstIndices.data(),firstIndices.size()*sizeof(uint32_t));
         const size_t vbBytes = vertices.size() * sizeof(BmeshVertex);
         const size_t ibBytes = indices.size() * sizeof(uint32_t);
         auto vbUpload = buffer(d, vbBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -523,11 +762,13 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         bindArraySrv(4u, s.envIblTex.Get(), bEnv); // t7
 
         D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=5;range.BaseShaderRegister=3;
-        D3D12_ROOT_PARAMETER params[7]{};
-        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?16:36;}
+        D3D12_ROOT_PARAMETER params[9]{};
+        for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?5:36;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
         params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={1,&range};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
+        params[7].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[7].Descriptor.ShaderRegister=8;
+        params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[8].Descriptor.ShaderRegister=9;
 
         D3D12_STATIC_SAMPLER_DESC samplers[3]{};
         samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -552,7 +793,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         samplers[2].MaxLOD = D3D12_FLOAT32_MAX;
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=7;rs.pParameters=params;rs.NumStaticSamplers=3;rs.pStaticSamplers=samplers;
+        D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=9;rs.pParameters=params;rs.NumStaticSamplers=3;rs.pStaticSamplers=samplers;
         ComPtr<ID3DBlob> blob,err;check(D3D12SerializeRootSignature(&rs,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&err));check(d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&s.root)));
         const auto vs=shader("m2_mesh_vs.cso"),psDepthCut=shader("m2_depth_cutout_ps.cso"),ps=shader("m2_mesh_ps.cso"),psCut=shader("m2_mesh_cutout_ps.cso"),skyvs=shader("m2_sky_vs.cso"),skyps=shader("m2_sky_ps.cso");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC dp{};dp.pRootSignature=s.root.Get();dp.VS={vs.data(),vs.size()};dp.PS={nullptr,0};dp.SampleMask=UINT_MAX;
@@ -587,6 +828,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             auto skyRtPs=shader("m2_sky_rt_ps.cso");pdRt.VS={skyvs.data(),skyvs.size()};pdRt.PS={skyRtPs.data(),skyRtPs.size()};
             pdRt.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pdRt.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
             check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.skyRt)));
+            if(GetEnvironmentVariableW(L"BOO_SEEK_EARLY_MATRIX",nullptr,0)){
+                auto early=shader("m2_sky_rt_early_ps.cso");pdRt.PS={early.data(),early.size()};
+                check(d->CreateGraphicsPipelineState(&pdRt,IID_PPV_ARGS(&s.earlySky)));
+            }
         }
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&s.sky)));
         const auto avs=shader("m2_accum_vs.cso");
@@ -642,37 +887,83 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
         if(s.rtReady) {
-            const size_t count=s.parts.size();
-            const size_t totalBlas=count+s.marbleTemplates.size();
-            s.maxTlasInstances=count+InteractiveView::kMaxMarbles;
+            const size_t totalBlas=geometriesById.size();
+            s.templateBlases=static_cast<uint32_t>(totalBlas-s.parts.size()-s.marbleTemplates.size());
+            s.maxTlasInstances=s.maxSceneInstances;
             std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries(totalBlas);
             std::vector<D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS> inputs(totalBlas);
             uint64_t scratchBytes=256;
             for(size_t i=0;i<totalBlas;++i) {
-                Impl::Part& pRef = (i < count) ? s.parts[i] : s.marbleTemplates[i - count];
+                Impl::Part& pRef = *geometriesById[i];
                 auto& g=geometries[i];g.Type=D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
                 g.Flags=isCutoutMaterial(pRef.sub.material)?D3D12_RAYTRACING_GEOMETRY_FLAG_NONE:D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
                 g.Triangles.VertexBuffer={s.vb->GetGPUVirtualAddress(),sizeof(BmeshVertex)};g.Triangles.VertexCount=static_cast<UINT>(vertices.size());g.Triangles.VertexFormat=DXGI_FORMAT_R32G32B32_FLOAT;
                 g.Triangles.IndexBuffer=s.ib->GetGPUVirtualAddress()+uint64_t(pRef.sub.firstIndex)*4;g.Triangles.IndexCount=pRef.sub.indexCount;g.Triangles.IndexFormat=DXGI_FORMAT_R32_UINT;
-                auto& in=inputs[i];in.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;in.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;in.NumDescs=1;in.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;in.pGeometryDescs=&g;
+                auto& in=inputs[i];in.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;in.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;in.NumDescs=1;in.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;in.pGeometryDescs=&g;
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};d5->GetRaytracingAccelerationStructurePrebuildInfo(&in,&pre);scratchBytes=std::max(scratchBytes,pre.ScratchDataSizeInBytes);
                 pRef.blas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             }
             s.scratch=buffer(d,scratchBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};ti.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;ti.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;ti.NumDescs=static_cast<UINT>(s.maxTlasInstances);ti.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};ti.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;ti.Flags=(GetEnvironmentVariableW(L"BOO_DIAG_FAST_TRACE",nullptr,0) ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD);ti.NumDescs=static_cast<UINT>(s.maxTlasInstances);ti.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};d5->GetRaytracingAccelerationStructurePrebuildInfo(&ti,&pre);
             s.tlas=buffer(d,pre.ResultDataMaxSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            const auto tlasDesc=s.tlas->GetDesc();
+            if(GetEnvironmentVariableW(L"BOO_SEEK_FROZEN_TLAS",nullptr,0) || GetEnvironmentVariableW(L"BOO_SEEK_MATRIX",nullptr,0))
+                s.savedTlas=buffer(d,tlasDesc.Width,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            s.tlasBytes=d->GetResourceAllocationInfo(0,1,&tlasDesc).SizeInBytes;
             s.tlasScratch=buffer(d,pre.ScratchDataSizeInBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            s.instances=buffer(d,s.maxTlasInstances*sizeof(D3D12_RAYTRACING_INSTANCE_DESC)*4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+            s.instances=buffer(d,s.maxTlasInstances*sizeof(D3D12_RAYTRACING_INSTANCE_DESC)*8,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+            const size_t sizeBytes=totalBlas*sizeof(uint64_t);
+            auto sizes=buffer(d,sizeBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            auto sizesReadback=buffer(d,sizeBytes,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
             if(!s.context.executeSingleCommandListAndWait([&](void* raw) {
                 ComPtr<ID3D12GraphicsCommandList4> cmd;check(static_cast<ID3D12GraphicsCommandList*>(raw)->QueryInterface(IID_PPV_ARGS(&cmd)));
                 for(size_t i=0;i<totalBlas;++i) {
-                    Impl::Part& pRef = (i < count) ? s.parts[i] : s.marbleTemplates[i - count];
-                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs=inputs[i];build.ScratchAccelerationStructureData=s.scratch->GetGPUVirtualAddress();build.DestAccelerationStructureData=pRef.blas->GetGPUVirtualAddress();cmd->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd.Get(),s.scratch.Get());uav(cmd.Get(),pRef.blas.Get());
+                    Impl::Part& pRef = *geometriesById[i];
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info{};
+                    info.DestBuffer=sizes->GetGPUVirtualAddress()+i*sizeof(uint64_t);
+                    info.InfoType=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs=inputs[i];build.ScratchAccelerationStructureData=s.scratch->GetGPUVirtualAddress();build.DestAccelerationStructureData=pRef.blas->GetGPUVirtualAddress();cmd->BuildRaytracingAccelerationStructure(&build,1,&info);uav(cmd.Get(),s.scratch.Get());uav(cmd.Get(),pRef.blas.Get());
                 }
+                transition(cmd.Get(),sizes.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
+                cmd->CopyBufferRegion(sizesReadback.Get(),0,sizes.Get(),0,sizeBytes);
             },error))return false;
+            s.scratch.Reset();
+            // Pack each driver-reported compact BLAS into a single AS buffer. Individual
+            // module BLASes require 256-byte offsets, not separate 64 KiB heap allocations.
+            std::vector<uint64_t> compactSizes(totalBlas);
+            D3D12_RANGE readRange{0,sizeBytes};
+            void* mapped=nullptr;
+            check(sizesReadback->Map(0,&readRange,&mapped));
+            std::memcpy(compactSizes.data(),mapped,sizeBytes);
+            D3D12_RANGE noWrite{0,0};
+            sizesReadback->Unmap(0,&noWrite);
+            uint64_t poolBytes=0;
+            constexpr uint64_t align=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+            for (size_t i=0; i<totalBlas; ++i) {
+                const uint64_t bytes=compactSizes[i];
+                if (!bytes || bytes>geometriesById[i]->blas->GetDesc().Width) throw std::runtime_error("Invalid compact BLAS size");
+                compactSizes[i]=poolBytes;
+                poolBytes+=(bytes+align-1)&~(align-1);
+            }
+            s.compactBlasPool=buffer(d,poolBytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            if (!s.context.executeSingleCommandListAndWait([&](void* raw) {
+                ComPtr<ID3D12GraphicsCommandList4> cmd;
+                check(static_cast<ID3D12GraphicsCommandList*>(raw)->QueryInterface(IID_PPV_ARGS(&cmd)));
+                for (size_t i=0; i<totalBlas; ++i) {
+                    auto* part=geometriesById[i];
+                    part->compactBlas=s.compactBlasPool->GetGPUVirtualAddress()+compactSizes[i];
+                    cmd->CopyRaytracingAccelerationStructure(part->compactBlas,part->blas->GetGPUVirtualAddress(),D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+                }
+                uav(cmd.Get(),s.compactBlasPool.Get());
+            },error))return false;
+            for (auto* part : geometriesById) part->blas.Reset();
+            const auto poolDesc=s.compactBlasPool->GetDesc();
+            s.blasBytes=d->GetResourceAllocationInfo(0,1,&poolDesc).SizeInBytes;
         }
         s.nrd.initialize(nullptr);
+        if (impl_->vb && !s.context.waitForGpu()) throw std::runtime_error("Could not retire previous scene resources");
+        impl_.swap(next);
         BOO_LOG_INFO("M2Mesh","Loaded "+std::to_string(vertices.size())+" vertices / "+std::to_string(indices.size()/3)+" triangles + 42 PBR material arrays; fallback kits="+std::to_string(s.fallbacks));
         return true;
     }catch(const std::exception& e) {if(error)*error=e.what();return false;}
@@ -725,7 +1016,7 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
         s.reblurPrevValid=false;
         s.nrd.resize(width,height);
         s.w=width;s.h=height;return true;
-    }catch(...) {return false;}
+    }catch(...) {s.w=0;s.h=0;return false;}
 }
 void TrilogyMeshRenderer::retire(uint32_t slot) {
     auto& s=*impl_;if(!s.pending[slot])return;void* ptr=nullptr;D3D12_RANGE rr{0,8};
@@ -733,9 +1024,17 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
 }
 bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
+    const uint32_t actualSlot=slot;
+    if(GetEnvironmentVariableW(L"BOO_SEEK_DRAIN_FIXED",nullptr,0) && GetEnvironmentVariableW(L"BOO_SEEK_LABEL",nullptr,0)) slot=3;
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
-    if(!useRt&&canonical){s.verified=false;s.denoiseMode=0u;}
+    if (!useRt && canonical) {
+        s.pending.fill(false);
+        s.verified=false;
+        s.hits=0;
+        s.queries=0;
+        s.denoiseMode=0;
+    }
     const bool isM2=(s.visualMode==ShowVisualMode::M2Trilogy180s);
     const float filmTime=float(double(f.samplePosition)/f.sampleRate);
     const uint32_t act=isM2
@@ -745,19 +1044,80 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const InteractiveView& iv=f.interactive;
     const uint32_t dynMarbles=std::min<uint32_t>(iv.marbleCount,InteractiveView::kMaxMarbles);
 
-    struct DrawEntry { DrawConstants dc; uint32_t indexCount; uint32_t material; uint32_t mask; };
-    std::vector<DrawEntry> drawList;
-    drawList.reserve(s.parts.size() + dynMarbles);
-    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst;
-    inst.reserve(s.parts.size() + dynMarbles);
-
+    s.frameInstances.clear();
+    s.batches.clear();
+    auto& inst = s.rayInstances;
+    inst.clear();
+    CityDrawStats stats{};
+    stats.templateBlases=s.templateBlases; stats.blasBytes=s.blasBytes; stats.tlasBytes=s.tlasBytes;
+    const bool skipGardenRays = GetEnvironmentVariableW(L"BOO_DIAG_MASK_GARDEN",nullptr,0);
+    auto append = [&](const Impl::Part& part, const DrawConstants& draw, uint32_t seed, bool visible, bool city) {
+        const uint32_t id=static_cast<uint32_t>(s.frameInstances.size());
+        s.frameInstances.push_back(makeInstanceData(draw,part.meshId,seed));
+        if (useRt) {
+            const uint32_t m=draw.mat;
+            const bool glass=(m==3 || m==4 || m==18 || m==21 || m==35 || m==40);
+            auto& ray=inst.emplace_back();
+            std::memcpy(ray.Transform,draw.rows,sizeof(ray.Transform));
+            ray.InstanceID=id;
+            ray.InstanceMask=glass?2u:1u;
+            if(skipGardenRays && part.kit>=4 && (draw.part&0xffffu)>=220 && (draw.part&0xffffu)<=227) ray.InstanceMask=0;
+            ray.Flags=D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+            ray.AccelerationStructure=part.compactBlas;
+        }
+        if (!visible) return;
+        if (city) ++stats.visibleCityInstances;
+        if (!s.batches.empty()) {
+            auto& last=s.batches.back();
+            if (last.meshId==part.meshId && last.first+last.count==id) {
+                ++last.count;
+                return;
+            }
+        }
+        s.batches.push_back({id,1,part.sub.indexCount,part.meshId,isCutoutMaterial(draw.mat)});
+        if (city) ++stats.cityDrawBatches;
+    };
     for(const auto& part:s.parts) {
-        auto draw=s.transform(part,f,camera);
         const bool active=isM2?(part.kit==act||(act==2&&part.kit>=2)):s.isPartActiveInShow(part,filmTime);
-        const bool thinGlass=(part.sub.material==3||part.sub.material==4||part.sub.material==18||part.sub.material==21||part.sub.material==35||part.sub.material==40);
-        const uint32_t mask=active?(thinGlass?2u:1u):0u;
-        drawList.push_back({draw, part.sub.indexCount, part.sub.material, mask});
-        D3D12_RAYTRACING_INSTANCE_DESC id{};std::memcpy(id.Transform,draw.rows,48);id.InstanceID=part.sub.firstIndex;id.InstanceMask=mask;id.Flags=D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;if(part.blas)id.AccelerationStructure=part.blas->GetGPUVirtualAddress();inst.push_back(id);
+        if (active) append(part,s.transform(part,f,camera),0,true,false);
+    }
+    Impl::Part kitPart{};
+    kitPart.kit=2;
+    const DrawConstants taipei=s.transform(kitPart,f,camera);
+    const float districtKit[4]={taipei.rows[3],taipei.rows[7],taipei.rows[11],.08f/taipei.rows[0]};
+    if (act==1 || act==2) {
+        kitPart.kit=act;
+        const auto kit=s.transform(kitPart,f,camera);
+        s.selectCity(camera,float(width)/height,act,kit,useRt,stats);
+        for (size_t m=0; m<s.moduleParts.size(); ++m) {
+            const auto& group=s.selectedModules[m];
+            for (const auto& part : s.moduleParts[m]) {
+                auto emit = [&](const Impl::SelectedPlacement& placement,bool visible) {
+                    const auto& location=s.city.placements[placement.id];
+                    const uint32_t tier=part.sub.part>>16;
+                    const float fade=placement.detailScale[tier];
+                    if (fade<=.001f) return;
+                    DrawConstants dc{};
+                    composeAffine(kit.rows,location.rows.data(),dc.rows);
+                    if (fade<1.f) {
+                        // Optional projections shrink continuously to their own anchors.
+                        // Both raster and TLAS use this same world transform.
+                        for (int row=0; row<3; ++row) {
+                            float* basis=dc.rows+row*4;
+                            for (int axis=0; axis<3; ++axis) {
+                                basis[3]+=(1.f-fade)*basis[axis]*part.detailCenter[axis];
+                                basis[axis]*=fade;
+                            }
+                        }
+                    }
+                    dc.mat=part.sub.material;
+                    dc.part=part.sub.part&0xffffu;
+                    append(part,dc,location.seed,visible,true);
+                };
+                for (const auto& place : group.visible) emit(place,true);
+                for (const auto& place : group.rayOnly) emit(place,false);
+            }
+        }
     }
 
     // Append dynamic rigid-body ray-traced physics marbles (with 3D rotation quaternion + world motion vectors!)
@@ -800,29 +1160,48 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             iv.marblePrevPos[m][1] - iv.marblePosRad[m][1],
             iv.marblePrevPos[m][2] - iv.marblePosRad[m][2]);
 
-        const bool thinGlass = (dc.mat == 3u || dc.mat == 4u || dc.mat == 35u);
-        const uint32_t mask = thinGlass ? 2u : 1u;
-        drawList.push_back({dc, tpl.sub.indexCount, dc.mat, mask});
-
-        D3D12_RAYTRACING_INSTANCE_DESC id{};
-        std::memcpy(id.Transform, dc.rows, 48);
-        id.InstanceID = tpl.sub.firstIndex;
-        id.InstanceMask = mask;
-        id.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
-        if (tpl.blas) id.AccelerationStructure = tpl.blas->GetGPUVirtualAddress();
-        inst.push_back(id);
+        // Dynamic marbles use the seed DWORD for the two remaining FP16 motion components.
+        append(tpl,dc,dc.pad,true,false);
     }
 
-    if(useRt&&canonical) {
-        const size_t offset=(slot&3u)*s.maxTlasInstances*sizeof(inst[0]);
+    const size_t passSlot=2u*(slot&3u)+(canonical?0u:1u);
+    seekProbeHash("instances",s.frameInstances.data(),s.frameInstances.size()*sizeof(InstanceData));
+    seekProbeHash("rayInstances",inst.data(),inst.size()*sizeof(inst[0]));
+    char seekLabel[16]{};
+    const bool useSavedTlas=GetEnvironmentVariableA("BOO_SEEK_LABEL",seekLabel,sizeof(seekLabel)) && s.savedTlas && GetEnvironmentVariableW(L"BOO_SEEK_FROZEN_TLAS",nullptr,0);
+    if(seekLabel[0]) std::printf("seek %s physical backbuffer=%u binding-slot=%u instanceOffset=%zu\n",seekLabel,actualSlot,slot,passSlot*s.maxSceneInstances*sizeof(InstanceData));
+    if (s.frameInstances.size()>s.maxSceneInstances) throw std::runtime_error("City instance upload exceeds reserved slot");
+    const size_t instanceOffset=passSlot*s.maxSceneInstances*sizeof(InstanceData);
+    if (!s.frameInstances.empty()) upload(s.instanceBuffer.Get(),s.frameInstances.data(),s.frameInstances.size()*sizeof(InstanceData),instanceOffset);
+    if (canonical) {
+        stats.activeInstances=static_cast<uint32_t>(s.frameInstances.size());
+        stats.rayInstances=static_cast<uint32_t>(inst.size());
+        stats.rasterBatches=static_cast<uint32_t>(s.batches.size());
+        s.lastStats=stats;
+    }
+    if(useRt) {
+        const size_t offset=passSlot*s.maxTlasInstances*sizeof(inst[0]);
         upload(s.instances.Get(),inst.data(),inst.size()*sizeof(inst[0]),offset);
         ComPtr<ID3D12GraphicsCommandList4> c4;check(cmd->QueryInterface(IID_PPV_ARGS(&c4)));
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;build.Inputs.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;build.Inputs.NumDescs=static_cast<UINT>(inst.size());build.Inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;build.Inputs.InstanceDescs=s.instances->GetGPUVirtualAddress()+offset;build.DestAccelerationStructureData=s.tlas->GetGPUVirtualAddress();build.ScratchAccelerationStructureData=s.tlasScratch->GetGPUVirtualAddress();uav(cmd,s.tlas.Get());uav(cmd,s.tlasScratch.Get());c4->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd,s.tlas.Get());
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;build.Inputs.Flags=(GetEnvironmentVariableW(L"BOO_DIAG_FAST_TRACE",nullptr,0) ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD);build.Inputs.NumDescs=static_cast<UINT>(inst.size());build.Inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;build.Inputs.InstanceDescs=s.instances->GetGPUVirtualAddress()+offset;build.DestAccelerationStructureData=s.tlas->GetGPUVirtualAddress();build.ScratchAccelerationStructureData=s.tlasScratch->GetGPUVirtualAddress();uav(cmd,s.tlas.Get());uav(cmd,s.tlasScratch.Get());c4->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd,s.tlas.Get());
     }
     cmd->CopyBufferRegion(s.counters[slot].Get(),0,s.zero.Get(),0,8);transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (useSavedTlas && std::strcmp(seekLabel,"first")==0) {
+        ComPtr<ID3D12GraphicsCommandList4> c4;check(cmd->QueryInterface(IID_PPV_ARGS(&c4)));
+        uav(cmd,s.savedTlas.Get());
+        c4->CopyRaytracingAccelerationStructure(s.savedTlas->GetGPUVirtualAddress(),s.tlas->GetGPUVirtualAddress(),D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE);
+        uav(cmd,s.savedTlas.Get());
+    }
     transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);transition(cmd,dist,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     auto handle=s.rtv->GetCPUDescriptorHandleForHeapStart();d->CreateRenderTargetView(hdr,nullptr,handle);auto second=handle;second.ptr+=rtvInc;d->CreateRenderTargetView(dist,nullptr,second);
+    if (useRt && GetEnvironmentVariableW(L"BOO_DIAG_CLEAR_TARGETS",nullptr,0)) {
+        for (UINT target = 0; target < 7; ++target) {
+            auto dest=handle; dest.ptr+=target*rtvInc;
+            const float zero[4]={0.f,0.f,0.f,0.f};
+            cmd->ClearRenderTargetView(dest,zero,0,nullptr);
+        }
+    }
     auto depthHandle=s.dsv->GetCPUDescriptorHandleForHeapStart();cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
     cmd->OMSetRenderTargets(useRt?7u:2u,&handle,TRUE,&depthHandle);
     D3D12_VIEWPORT vp{0,0,float(width),float(height),0,1};D3D12_RECT sc{0,0,LONG(width),LONG(height)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
@@ -849,6 +1228,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     }
     c.pulse=camera.emissivePulse;
     c.interFlags |= effectiveEffectsDetail(f) << 12u;
+    if(GetEnvironmentVariableW(L"BOO_REPLAY_GARDEN",nullptr,0)) c.interFlags |= 0x8000u;
+    if(GetEnvironmentVariableW(L"BOO_SEEK_NO_SHAFT",nullptr,0)) c.interFlags |= 0x10000u;
     if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
     // Audio drive packed as RGBA8 into the one spare scene DWORD (low, mid, high, beat). Debug AOVs and progressive accumulation stay static.
     uint32_t packedAudio = (f.interactive.aovMode == 0u && !f.interactive.accumulate)
@@ -863,7 +1244,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const bool interactiveMotion = temporalAllowed && useRt && (curAov == 0u) && !accumulate &&
                                    (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
                                    s.nrd.isAvailable();
-    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u);
+    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u) && !GetEnvironmentVariableW(L"BOO_SEEK_NO_SPATIAL",nullptr,0);
 
     if(iv.sunOverride){std::copy_n(iv.sunDir,3,c.sunDir);c.sunScale=iv.sunScale;c.interFlags|=1u;}
     if(iv.lampsOff)c.interFlags|=4u;
@@ -887,48 +1268,55 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     }
 
     (void)tensor;
+    seekProbeHash("sceneCB",&c,sizeof(c));
     ID3D12DescriptorHeap* m2Heaps[] = {s.srvHeap.Get()};
     cmd->SetDescriptorHeaps(1, m2Heaps);
     cmd->SetGraphicsRootSignature(s.root.Get());cmd->SetGraphicsRoot32BitConstants(0,36,&c,0);cmd->SetGraphicsRootShaderResourceView(2,s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(3,s.ib->GetGPUVirtualAddress());cmd->SetGraphicsRootShaderResourceView(4,s.tlas?s.tlas->GetGPUVirtualAddress():s.vb->GetGPUVirtualAddress());cmd->SetGraphicsRootDescriptorTable(5,s.srvHeap->GetGPUDescriptorHandleForHeapStart());cmd->SetGraphicsRootUnorderedAccessView(6,s.counters[slot]->GetGPUVirtualAddress());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // Hardware Z-Prepass eliminates all hidden-surface DXR ray-query & cutout overdraw across overlapping kits
+    cmd->SetGraphicsRoot32BitConstants(1,4,districtKit,0);
+    if(useSavedTlas) cmd->SetGraphicsRootShaderResourceView(4,s.savedTlas->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootShaderResourceView(7,s.instanceBuffer->GetGPUVirtualAddress()+instanceOffset);
+    cmd->SetGraphicsRootShaderResourceView(8,s.meshOffsets->GetGPUVirtualAddress());
+    auto drawBatches = [&](ID3D12PipelineState* pipeline, bool cutout) {
+        cmd->SetPipelineState(pipeline);
+        for (const auto& batch : s.batches) {
+            if (batch.cutout != cutout) continue;
+            cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
+            cmd->DrawInstanced(batch.indexCount,batch.count,0,0);
+        }
+    };
+    // Reuse identical ordering and transforms in the depth and color passes.
     cmd->OMSetRenderTargets(0,nullptr,FALSE,&depthHandle);
-    cmd->SetPipelineState(s.depthOpaque.Get());
-    bool hasActiveCutout=false;
-    for(const auto& de : drawList) {
-        if(!de.mask) continue;
-        if(isCutoutMaterial(de.material)) { hasActiveCutout=true; continue; }
-        cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
-        cmd->DrawInstanced(de.indexCount,1,0,0);
-    }
-    if(hasActiveCutout) {
-        cmd->SetPipelineState(s.depthCutout.Get());
-        for(const auto& de : drawList) {
-            if(de.mask && isCutoutMaterial(de.material)) {
-                cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
-                cmd->DrawInstanced(de.indexCount,1,0,0);
-            }
-        }
-    }
+    drawBatches(s.depthOpaque.Get(),false);
+    drawBatches(s.depthCutout.Get(),true);
     cmd->OMSetRenderTargets(useRt?7u:2u,&handle,TRUE,&depthHandle);
-    cmd->SetPipelineState(useRt?s.rt.Get():s.raster.Get());
-    for(const auto& de : drawList) {
-        if(!de.mask || isCutoutMaterial(de.material)) continue;
-        cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
-        cmd->DrawInstanced(de.indexCount,1,0,0);
-    }
-    if(hasActiveCutout) {
-        cmd->SetPipelineState(useRt?s.rtCutout.Get():s.rasterCutout.Get());
-        for(const auto& de : drawList) {
-            if(de.mask && isCutoutMaterial(de.material)) {
-                cmd->SetGraphicsRoot32BitConstants(1,16,&de.dc,0);
-                cmd->DrawInstanced(de.indexCount,1,0,0);
-            }
-        }
+    bool collectStats=seekLabel[0] && std::strcmp(seekLabel,"locked")!=0 && s.seekStats;
+    UINT statsIndex=std::strcmp(seekLabel,"first")==0?0:2;
+    if(collectStats) cmd->BeginQuery(s.seekStats.Get(),D3D12_QUERY_TYPE_PIPELINE_STATISTICS,statsIndex);
+    drawBatches(useRt?s.rt.Get():s.raster.Get(),false);
+    drawBatches(useRt?s.rtCutout.Get():s.rasterCutout.Get(),true);
+    if(collectStats) {
+        cmd->EndQuery(s.seekStats.Get(),D3D12_QUERY_TYPE_PIPELINE_STATISTICS,statsIndex);
+        cmd->BeginQuery(s.seekStats.Get(),D3D12_QUERY_TYPE_PIPELINE_STATISTICS,statsIndex+1);
     }
     // Sky last, at the far plane: only pixels the Z-prepass left at the cleared depth run the sky
     // shader, so its ray-marched light shafts never trace under geometry.
-    cmd->SetPipelineState(useRt ? s.skyRt.Get() : s.sky.Get());cmd->DrawInstanced(3,1,0,0);
+    cmd->SetPipelineState(useRt ? (s.earlySky && GetEnvironmentVariableA("BOO_SEEK_EARLY",nullptr,0)?s.earlySky.Get():s.skyRt.Get()) : s.sky.Get());cmd->DrawInstanced(3,1,0,0);
+    if(collectStats) {
+        cmd->EndQuery(s.seekStats.Get(),D3D12_QUERY_TYPE_PIPELINE_STATISTICS,statsIndex+1);
+        cmd->ResolveQueryData(s.seekStats.Get(),D3D12_QUERY_TYPE_PIPELINE_STATISTICS,statsIndex,2,s.seekStatsRead.Get(),size_t(statsIndex)*sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+        if(!s.seekRaw[0]) {
+            const auto desc=hdr->GetDesc();
+            d->GetCopyableFootprints(&desc,0,1,0,&s.rawFootprint,nullptr,nullptr,&s.rawBytes);
+            for(auto& rb:s.seekRaw) rb=buffer(d,s.rawBytes,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION dst{},src{};
+        src.pResource=hdr;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.pResource=s.seekRaw[statsIndex/2].Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=s.rawFootprint;
+        cmd->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
 
     const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const UINT slotBase = 5u + 20u * (slot & 3u);
@@ -1139,6 +1527,25 @@ uint32_t TrilogyMeshRenderer::activeDenoiseMode() const noexcept {return impl_?i
 uint32_t TrilogyMeshRenderer::queriedRays() const {return impl_->queries;}
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}
+CityDrawStats TrilogyMeshRenderer::lastCityDrawStats() const noexcept {
+    if (impl_->seekStatsRead) {
+        D3D12_QUERY_DATA_PIPELINE_STATISTICS* p{};D3D12_RANGE r{0,4*sizeof(*p)};
+        if(SUCCEEDED(impl_->seekStatsRead->Map(0,&r,reinterpret_cast<void**>(&p)))) {
+            for(UINT i=0;i<4;++i) std::printf("seek %s %s PSInvocations=%llu\n",i<2?"first":"second",i%2?"sky":"color",p[i].PSInvocations);
+            D3D12_RANGE wr{0,0};impl_->seekStatsRead->Unmap(0,&wr);
+        }
+        if(impl_->seekRaw[0]) for(UINT i=0;i<2;++i){
+            D3D12_RANGE rr{0,size_t(impl_->rawBytes)};void* data{};
+            if(SUCCEEDED(impl_->seekRaw[i]->Map(0,&rr,&data))) {
+                SetEnvironmentVariableA("BOO_SEEK_LABEL",i==0?"first":"second");
+                seekProbeHash("gpuPreGI",data,rr.End);
+                D3D12_RANGE none{0,0};impl_->seekRaw[i]->Unmap(0,&none);
+                SetEnvironmentVariableA("BOO_SEEK_LABEL",nullptr);
+            }
+        }
+    }
+    return impl_->lastStats;
+}
 bool TrilogyMeshRenderer::hasAllAuthoredSceneAssets() const noexcept {
     return impl_->fallbacks == 0 && !impl_->usedFallbackTexture;
 }

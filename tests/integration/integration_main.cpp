@@ -2588,6 +2588,13 @@ int main(int argc, char** argv) {
         else if (option == "--require-debug-layer") gRequireDebugLayer = true;
         else if (option == "--trilogy-captures") trilogyCaptures = true;
         else if (option == "--city-baseline") cityBaseline = true;
+        else if (option == "--show-baseline" || option == "--show-baseline-raster") {
+            cityBaseline = true;
+            gWholeShowBaseline = true;
+            gCityForceRaster = option == "--show-baseline-raster";
+        }
+        else if (option == "--baseline-4k") gBaseline4K = true;
+        else if (option == "--city-baseline-raster") { cityBaseline = true; gCityForceRaster = true; }
         else if (option == "--film-captures") filmCaptures = true;
         else if (option == "--hero-video-capture") heroVideoCapture = true;
         else if (option == "--interactive-captures") interactiveCaptures = true;
@@ -2615,6 +2622,7 @@ int main(int argc, char** argv) {
         }
         else { std::cerr << "Unknown or incomplete option: " << option << "\n"; return 2; }
     }
+    if (gBaseline4K && !cityBaseline) { std::cerr << "--baseline-4k requires a baseline capture suite.\n"; return 2; }
     if (gHeroCaptureStartSeconds && !heroVideoCapture) { std::cerr << "--capture-start-seconds requires --hero-video-capture.\n"; return 2; }
     if (int(trilogyCaptures) + int(filmCaptures) + int(heroVideoCapture) + int(interactiveCaptures) + int(validationCaptures) + int(effectsCaptures) + int(directorCaptures) + int(filmStress) + int(lifecycleTests) + int(cityBaseline) > 1) { std::cerr << "Choose one dedicated integration suite.\n"; return 2; }
     if ((trilogyCaptures || filmCaptures || heroVideoCapture || interactiveCaptures || validationCaptures || effectsCaptures || directorCaptures || filmStress || lifecycleTests || cityBaseline) && !noActivate) {

@@ -1507,6 +1507,7 @@ cbuffer M1PostCB : register(b0)
     uint   gDitherSeed;
     float  gPreExposure;
     float  gBloomIntensity;
+    float2 gDestInvSize;
 };
 
 Texture2D<float4> gSrcTex : register(t0);
@@ -1524,6 +1525,7 @@ float3 softThresholdAndClamp(float3 c, float threshold)
 
 float4 PSBloomDownsample(VSOut pin) : SV_Target
 {
+    pin.uv = (floor(pin.position.xy)+0.5)*gDestInvSize;
     float2 d = gSrcTexelSize * gBloomRadiusScale;
     float3 c0 = gSrcTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
     float3 c1 = gSrcTex.SampleLevel(gLinearClamp, pin.uv + float2(-d.x, -d.y), 0.0).rgb;
@@ -1558,6 +1560,7 @@ cbuffer M1PostCB : register(b0)
     uint   gDitherSeed;
     float  gPreExposure;
     float  gBloomIntensity;
+    float2 gDestInvSize;
 };
 
 Texture2D<float4> gSrcTex : register(t0);
@@ -1565,6 +1568,7 @@ SamplerState      gLinearClamp : register(s0);
 
 float4 PSBloomUpsample(VSOut pin) : SV_Target
 {
+    pin.uv = (floor(pin.position.xy)+0.5)*gDestInvSize;
     float2 d = gSrcTexelSize * gBloomRadiusScale;
     float3 s = 0.0.xxx;
     s += gSrcTex.SampleLevel(gLinearClamp, pin.uv + float2(-d.x, -d.y), 0.0).rgb * 1.0;
@@ -1696,6 +1700,7 @@ float3 bokehDepthOfField(float2 pxPos, int2 size, float3 centerColor, float cent
 
 float4 PSCompositeCanvas(VSOut pin) : SV_Target
 {
+    pin.uv = (floor(pin.position.xy)+0.5)*gCanvasInvSize;
     uint aovMode = gIsFirstDownsample & 0xFFu;
     uint lensFlags = (gIsFirstDownsample >> 8u) & 3u;
     float2 pxPos = floor(pin.position.xy);
