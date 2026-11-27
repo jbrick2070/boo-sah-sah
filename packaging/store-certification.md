@@ -19,7 +19,7 @@ BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. No ac
 
 Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA and an NPU are optional; integrated and AMD graphics start lighter. Unsupported PCs get a plain message.
 
-Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves a film frame (never the camera) to Pictures\BOO SAH SAH. The app makes no network connection.
+Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves a film frame (never the camera) to Pictures\BOO SAH SAH when installed from the Store. The app makes no network connection.
 ```
 
 ## Restricted capability: runFullTrust (justification, 500 characters at most)
