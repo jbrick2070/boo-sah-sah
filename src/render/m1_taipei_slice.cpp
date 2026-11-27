@@ -2830,7 +2830,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         // The networks are off until asked for, and integrated graphics can take most of a minute to compile
         // them on a first start (51 s on Intel Iris Xe): a light start leaves them out.
         if (d3d_.rayTracingAllowed()) impl_->neural->initialize(&neuralError);
-        else impl_->neural->skip("Left out on integrated graphics, so the first start is quick.");
+        else impl_->neural->skip("Left out when ray tracing is off at start (integrated or AMD graphics, or after a graphics reset).");
         startupStep("neural rendering suite");
         startupCheckpoint();
     }

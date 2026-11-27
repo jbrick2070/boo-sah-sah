@@ -19,7 +19,7 @@ To try in the first two minutes (sound on; the film starts by itself):
 5. SCREEN: Tab changes the panels; click a hardware row to compare it in split view; F12 saves a picture; F11 full screen; Esc leaves it, then exits.
 The interface is in 25 languages.
 
-Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA, an NPU and video encoding are optional (built-in substitutes); integrated graphics use a lighter mode. A PC without a suitable adapter gets a plain message.
+Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA, an NPU and video encoding are optional (built-in substitutes); integrated and AMD graphics use a lighter mode. Unsupported PCs get a plain message.
 
 Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves the film frame (never the camera) to Pictures\BOO SAH SAH. Web links open only when asked; the app makes no network connection.
 ```

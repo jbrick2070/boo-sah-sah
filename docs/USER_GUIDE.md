@@ -109,7 +109,7 @@ Full screen is a borderless window that exactly covers the display, presented th
 
 ### Integrated graphics
 
-On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick and playback smooth. Naming a preset with `--preset` (even `safe`) turns the light start off: the app then builds everything the chip supports, and a first start takes much longer.
+On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick and playback smooth. AMD graphics cards also start with raster lighting and without the neural suite, and if any card resets, the app comes back that way. Naming a preset with `--preset` (even `safe`) turns the light start off: the app then builds everything the chip supports, and a first start takes much longer.
 
 ### Loading bar
 

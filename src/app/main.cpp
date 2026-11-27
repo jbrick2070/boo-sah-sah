@@ -2057,6 +2057,12 @@ int main(int argc, char** argv) {
         startupSpec = findQualityPresetSpec(presets, QualityPresetId::Safe);
         BOO_LOG_INFO("Render", "Integrated graphics: starting light (Safe preset, raster lighting).");
     }
+    // An AMD card hung on the ray-traced city (Radeon Pro V710: driver timeout, tested on 1.1.13): until ray
+    // tracing is proven there, AMD graphics start with raster lighting. --preset still asks for everything.
+    if (!d3d.integratedAdapter() && d3d.adapterVendorId() == 0x1002 && !settings.presetFromCommandLine) {
+        d3d.setRayTracingAllowed(false);
+        BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting.");
+    }
     if (settings.coldShaderCache) {
         std::string reason;
         if (d3d.bypassShaderCaches(&reason)) BOO_LOG_INFO("D3D12", "Shader caches bypassed: every pipeline compiles as on a first start.");
@@ -2421,6 +2427,8 @@ int main(int argc, char** argv) {
         retiredDebugWarnings += d3d.debugWarningCount();
         // Retire resources before release on non-removal failures as well.
         d3d.retireGpuForShutdown();
+        // Whatever the card, come back without ray tracing: it is the heaviest work and the likeliest cause.
+        d3d.setRayTracingAllowed(false);
         spoutSender.shutdown();
         liveM1Ptr = nullptr;
         orchestrator.shutdown();
