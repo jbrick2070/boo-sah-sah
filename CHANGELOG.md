@@ -2,7 +2,9 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
-## 1.1.14.0 — Film benchmark preview
+## 2.0.0.0 — Measure your own PC
+
+Version 2.0 ships the film benchmark below together with everything in 1.1.13.0, which was not published separately.
 
 - Choose **Run benchmark** in Hardware Orchestra or press **Ctrl+B**. The viewer pauses the film and offers raster, native High path tracing, and DLSS Quality. Each option explains its requirements on the selected adapter.
 - The results table aligns measurements for the current run and a matching RTX 5080 Laptop GPU reference. It gives the median and longest GPU frame time for a six-second shot, the number of valid samples, and the rendering paths observed. An interrupted or substituted run shows its outcome without a timing score.

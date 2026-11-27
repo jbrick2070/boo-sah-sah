@@ -7,15 +7,19 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. It works offline in 25 languages. The first launch can take longer while the graphics driver prepares shaders. The loading screen shows progress.
+2.0 FIXES both failures. 10.1.2.10 (froze at launch, Dell Inspiron 5379): start-up compiles no longer block the window, and the loading screen shows each step. 10.1.4.4: on GPUs without double-precision math (such as Intel Iris Xe) earlier versions showed only circles instead of the city; it now draws. NEW: a film benchmark (step 2). The first launch is the longest while the driver prepares shaders.
 
-1. Press F to explore. Fly with W A S D, look by dragging the right mouse button, and press Y to drop marbles. Press F to return to the film.
-2. Open Hardware Orchestra and choose Run benchmark, or press Ctrl+B. Select Raster and run it. The film pauses for the fixed shot. Read the GPU frame times and the rendering paths that ran. Save picture and text lets you choose a local folder. Back to film restores playback. The report form opens only after confirmation.
-3. In the same selector, path tracing and DLSS Quality have separate tests. Unavailable choices explain their requirements. Ray tracing is optional for the film and raster test.
-4. Space pauses the film. Left and Right seek. N and P change acts. Z changes the music. Tab changes the panel and F11 toggles full screen.
-5. F12 saves a film frame. The optional camera starts only on request and shows a red LIVE CAMERA label. Press W outside Explore to stop it.
+BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. No account, ads or purchases; it works offline in 25 languages.
 
-Requires Direct3D 12 and Shader Model 6.0. Integrated and AMD graphics use a lighter startup profile.
+1. Press F to explore: W A S D fly, Q/E down/up, right-drag to look, Y drops marbles. F returns.
+2. Press Ctrl+B (or Run benchmark in Hardware Orchestra), choose Raster and run. The film pauses for a fixed shot; read the GPU frame times; Save picture and text writes to a folder you choose; Back to film resumes. The report form opens only after you confirm.
+3. Path tracing and DLSS Quality are separate tests; unavailable choices say why.
+4. Shift+Up / Down add or remove bird flocks; Shift+F changes formation (outside Explore).
+5. Space pauses; Left / Right seek; N / P change acts; Z music; Tab panels; F11 full screen.
+
+Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA and an NPU are optional; integrated and AMD graphics start lighter. Unsupported PCs get a plain message.
+
+Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves a film frame (never the camera) to Pictures\BOO SAH SAH. The app makes no network connection.
 ```
 
 ## Restricted capability: runFullTrust (justification, 500 characters at most)
