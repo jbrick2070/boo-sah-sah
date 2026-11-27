@@ -192,6 +192,8 @@ bool D3D12Context::initialize(
              ++idx) {
             DXGI_ADAPTER_DESC1 desc{};
             candidate->GetDesc1(&desc);
+            if (benchmark_ && (desc.AdapterLuid.HighPart != benchmark_->luidHigh ||
+                               desc.AdapterLuid.LowPart != static_cast<DWORD>(benchmark_->luidLow))) continue;
             if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
                 continue;
             }
@@ -208,7 +210,7 @@ bool D3D12Context::initialize(
         }
         // Graceful fallback to WARP if no hardware D3D12 GPU succeeded. A PC whose only GPU is too old gets the
         // plain "unsupported graphics device" message instead of the software renderer's test picture.
-        if (!impl_->device && !tooOld) {
+        if (!impl_->device && !tooOld && !benchmark_) {
             if (SUCCEEDED(impl_->factory->EnumWarpAdapter(IID_PPV_ARGS(&chosenAdapter))) && chosenAdapter) {
                 if (SUCCEEDED(D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device)))) {
                     isWarp_ = true;
@@ -930,6 +932,10 @@ bool D3D12Context::endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs)
 
     outLastCompletedGpuMs = impl_->lastPassTimings.totalMs;
     return true;
+}
+
+bool D3D12Context::lastPresentationVisible() const noexcept {
+    return impl_ && impl_->swapChain && presentCount_ > 0 && !impl_->occluded;
 }
 
 bool D3D12Context::checkDeviceHealthy(std::string* outReason) const {

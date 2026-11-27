@@ -83,6 +83,7 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `O` | Toggle live **Spout2** clean-feed sender (`BooSahSah_Clean`) |
 | `W` | Toggle / **One-Key Privacy Stop** (outside Explore) for opt-in UVC webcam (`LIVE CAMERA`) |
 | `B` | Run asynchronous standalone numerical benchmark sweep (`BENCH [B]`) |
+| `Ctrl+B` | Open **Run benchmark** to measure a fixed shot from the film. Also available in Hardware Orchestra and the window menu (`Alt+Space`). |
 | `` ` `` | Cycle the dashboard: full table, mini strip, hidden tab |
 | `Shift+N` | Neural rendering on / off |
 | `Shift+Up` / `Shift+Down` | GPU workout level up / down (adds or removes birds) |
@@ -94,6 +95,24 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Esc` | Leave full screen. From a window, clean shutdown |
 
 When the full film reaches its end, the music fades out over its last 8 seconds, and the transport bar's PLAY and NEXT buttons become one **PLAY AGAIN** button (the studio dock's NEXT SCN button reads the same). Click either, or press `Space` or `R`, to start again from the beginning. With looping on (`L`) the film runs straight on instead.
+
+### Benchmark a shot from the film
+
+Choose **Run benchmark**, select a test, and press **Run benchmark** in the dialog. The film and soundtrack pause at their current position. If you were using the camera, it switches off when the film pauses. The dialog explains disabled choices for the selected GPU. Tab reaches the controls and explanations. Esc cancels a running test. **Back to film** returns to playback. If a graphics reset or timeout occurs, save the result, close the viewer, and reopen the film.
+
+| Test | What the GPU renders |
+| --- | --- |
+| Raster (RC1) | The opening shot at 1280 × 720 with raster lighting. |
+| Path tracing (PT1) | The same shot at native 1280 × 720 with High path tracing. Requires the supported DXR path. |
+| DLSS Quality (DLSS-Q1) | The raster-lit shot at the runtime’s Quality input resolution, reconstructed to 1280 × 720. The card records both sizes. |
+
+Each test warms up for 30 frames, then measures 180 frames from film seconds 8 through 14. Frame generation is off. **Typical** is the median GPU time. **Worst** is the longest single GPU frame. Both cover the clean shot. Startup measures this launch of the viewer. Compare runs using the same build, test, graphics adapter, driver and power source. If a run stops early or uses a different rendering path, the card shows what happened and leaves its timing summary unavailable.
+
+Read **This run** and **RTX 5080 reference** across the same timing row. A lower time is faster. The reference comes from a measured run on the maintainer’s RTX 5080 Laptop GPU. The reference column becomes available when the build, mode, resolution and run conditions match. [Reference measurements and conditions](BENCHMARK_REFERENCE.md)
+
+Read the **CPU** and **NPU** rows beside **GPU** for the processors in each system and their role in this shot. The CPU runs the scripted director. All three fixed tests use that script and leave NPU inference off. The median and worst timings measure GPU frame time. For the film’s separate live director comparison, press **4** during playback.
+
+**Save picture and text** opens a folder picker. Choose a local folder to receive a new results folder containing the PNG and UTF-8 text. **Open report page** asks before opening a public GitHub issue form. You choose any attachments and submit the report yourself. [Example picture](examples/benchmark/BOO-SAH-SAH-results.png) · [Example text](examples/benchmark/BOO-SAH-SAH-results.txt)
 
 ### Watch, roam and visit another world
 

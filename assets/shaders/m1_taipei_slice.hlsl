@@ -1896,7 +1896,8 @@ static const uint UI_LBL_PATH_TRACING = 54u, UI_LBL_UNAVAILABLE = 55u, UI_LBL_FE
 static const uint UI_LBL_GRAPHICS = 62u, UI_LBL_AUTO = 63u, UI_LBL_ENABLED = 64u, UI_LBL_BOOST = 65u;
 static const uint UI_LBL_RR = 66u, UI_LBL_FG = 67u, UI_LBL_RENDER_FPS = 68u, UI_LBL_DISPLAY_FPS = 69u;
 static const uint UI_LBL_DLSS_UPSCALING = 70u, UI_LBL_PLAY_AGAIN = 71u;
-static const float UI_CAPTION_TOP = 1080.0;
+static const uint UI_LBL_RUN_BENCHMARK = 72u;
+static const float UI_CAPTION_TOP = 1140.0;
 
 // A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
 // the same site uses; `cells` is the room the label has, in 5-unit glyph cells. Returns `fallback`
@@ -3212,7 +3213,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
         float workoutTop = cpuTop + 18.0;   // WORKOUT level, bird count, [-] [+]
         float flockTop = workoutTop + 20.0; // FLOCK formation (click cycles) and bird camera toggle
         float physxTop = flockTop + 20.0;   // PHYSX genre (click or Shift+P dials) and its timings
-        float2 liveSize = float2(compactTable ? 220.0 : 306.0, physxTop + 22.0) * uiScale;
+        const float benchmarkTop = physxTop + 20.0;
+        float2 liveSize = float2(compactTable ? 220.0 : 306.0, benchmarkTop + 22.0) * uiScale;
         // Dashboard panel: 0 full table, 1 mini two-line strip, 2 hidden (a small HUD+ tab brings it back).
         // The backtick key cycles; main.cpp mirrors every button rectangle below.
         const uint panelMode = min(gNeuralMeta.z, 2u);
@@ -3483,7 +3485,15 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                 sdr = hudOver(uiAlpha, sdr, colEnamel, cpuLine(px, liveMin + float2(7.0, cpuTop + 3.0) * uiScale, 1.20 * uiScale));
             }
             const uint workoutBits = (uint)round(gCpuWorkout.z);
-            if (tablePoint.y >= physxTop) {
+            if (tablePoint.y >= benchmarkTop) {
+                const float sc = 1.25 * uiScale;
+                const float2 at = liveMin + float2(8.0, benchmarkTop + 6.0) * uiScale;
+                float word = max(sampleWord4(px, at, sc, 82u, 85u, 78u, 32u),
+                    sampleWord8(px, at + float2(20.0 * sc, 0), sc, 66u, 69u, 78u, 67u, 72u, 77u, 65u, 82u));
+                word = max(word, textGlyph(px, at + float2(60.0 * sc, 0), sc, 75u));
+                if (tablePoint.y - benchmarkTop < 1.0) sdr = hudInk(uiAlpha, colJade * 0.5);
+                sdr = hudOver(uiAlpha, sdr, colJade, uiLabel(px, at, sc, 24.0, UI_LBL_RUN_BENCHMARK, word));
+            } else if (tablePoint.y >= physxTop) {
                 // PHYSX  SMOKE  SIM 0.82  RAY 1.40 MS  312K VOX      (click to dial through the genres)
                 const float sc = 1.25 * uiScale;
                 const uint bits = (uint)round(gPhysx.x);

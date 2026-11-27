@@ -1,0 +1,31 @@
+BOO SAH SAH · Benchmark results
+Community reported
+
+Measurement                  |                               This run |                     RTX 5080 reference
+Typical GPU frame (ms)       |                                    1.5 |                                    0.6
+Worst GPU frame (ms)         |                                    1.9 |                                    1.7
+Warm-up frames               |                                30 / 30 |                                30 / 30
+Valid samples                |                              180 / 180 |                              180 / 180
+Viewer startup (s)           | Unavailable                            | Unavailable
+Outcome                      | Completed                              | Completed
+GPU                          | NVIDIA GeForce RTX 4060 Laptop GPU     | NVIDIA GeForce RTX 5080 Laptop GPU
+CPU                          | Intel Core i9-13900H · Ran · Scripted  | Intel Core Ultra 9 275HX · Ran ·
+                             |                                        | Scripted
+NPU                          | No NPU detected · Off by preset        | Intel AI Boost · Off by preset
+Display driver               |                           32.0.16.2140 |                           32.0.16.2140
+Build                        |                               1.1.14.0 |                               1.1.14.0
+Architecture (Windows / app) | x64 / x64                              | x64 / x64
+Power                        | Mains                                  | Mains
+Planned workload             | RC1 · Raster · Safe preset · Family    | RC1 · Raster · Safe preset · Family
+                             | edition · 1280 × 720 · taipei_intro ·  | edition · 1280 × 720 · taipei_intro ·
+                             | 00:08–00:14                            | 00:08–00:14
+Render resolution            |                             1280 × 720 |                             1280 × 720
+Film renderer                | Ran · D3D12 · GPU                      | Ran · D3D12 · GPU
+Lighting                     | Ran · Raster · GPU                     | Ran · Raster · GPU
+Particles                    | Fallback · HLSL · GPU                  | Fallback · HLSL · GPU
+Neural material              | Unknown                                | Unknown
+Director                     | Ran · Scripted · CPU                   | Ran · Scripted · CPU
+Codec                        | Off by preset                          | Off by preset
+DLSS SR                      | Off by preset                          | Off by preset
+
+A lower GPU frame time is faster. Frame times cover this shot. Startup is for this launch.

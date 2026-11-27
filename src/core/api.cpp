@@ -157,7 +157,21 @@ bool parseQualityPreset(std::string_view text, QualityPresetId& out) noexcept {
     return false;
 }
 
+namespace {
+std::filesystem::path installedAssetDirectory;
+}
+bool useInstalledAssetDirectory() {
+    wchar_t exe[32768]{};
+    const DWORD size = GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(std::size(exe)));
+    if (!size || size >= std::size(exe)) return false;
+    installedAssetDirectory = std::filesystem::path(exe).parent_path();
+    std::error_code error;
+    std::filesystem::current_path(installedAssetDirectory, error);
+    return !error;
+}
 std::filesystem::path resolveResourcePath(const std::filesystem::path& relativeOrAbs) {
+    if (!installedAssetDirectory.empty() && relativeOrAbs.is_relative() && !relativeOrAbs.empty())
+        return installedAssetDirectory / relativeOrAbs;
     if (relativeOrAbs.empty()) {
         return relativeOrAbs;
     }

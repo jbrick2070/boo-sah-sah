@@ -14,6 +14,7 @@
 #include "boo/flow_smoke.hpp"
 #include "boo/physx_suite.hpp"
 #include "boo/settings.hpp"
+#include "boo/results_benchmark.hpp"
 
 #include <array>
 #include <cstdint>
@@ -148,6 +149,10 @@ public:
 
     // The adapter shares the PC's memory (integrated graphics).
     bool integratedAdapter() const noexcept;
+
+    // A benchmark child opens only the caller's adapter and initializes only its requested runtime.
+    void selectBenchmarkAdapter(const BenchmarkRequest& request) noexcept { benchmark_ = request; }
+    const std::optional<BenchmarkRequest>& benchmark() const noexcept { return benchmark_; }
     // Off for a light start: no ray tracing pipelines, structures or denoisers are built, and the film
     // draws with the raster substitutes. Set before the effects are created.
     void setRayTracingAllowed(bool allowed) noexcept { rayTracingAllowed_ = allowed; }
@@ -172,6 +177,7 @@ public:
     void bindSwapchainRenderTarget() noexcept;
     void writePassTimestamp(uint32_t passSlot1To3) noexcept;
     bool endFrameAndPresent(bool vsync, double& outLastCompletedGpuMs);
+    bool lastPresentationVisible() const noexcept;
     bool executeSingleCommandListAndWait(
         const std::function<void(void* cmdList)>& recordFn,
         std::string* outError = nullptr);
@@ -224,6 +230,7 @@ private:
     uint32_t vendorId_ = 0;
     bool isWarp_ = false;
     bool lowPowerAdapter_ = false;
+    std::optional<BenchmarkRequest> benchmark_;
     bool rayTracingAllowed_ = true;
     uint64_t presentCount_ = 0;
     uint64_t presentStallCount_ = 0;
@@ -327,6 +334,7 @@ public:
     FlowSmokeStats physxSmokeStats() const; // PhysX suite: NVIDIA Flow smoke
     RendererFeatureState dlssState() const noexcept;
     RendererFeatureState rayReconstructionState() const noexcept;
+    BenchmarkReason dlssBenchmarkAvailability() const noexcept;
     uint32_t dlssInputWidth() const noexcept;
     uint32_t dlssInputHeight() const noexcept;
     uint32_t activeDenoiseMode() const noexcept;
@@ -339,6 +347,9 @@ public:
     FlockFocus flockFocus() const noexcept;
     bool hasAllAuthoredSceneAssets() const noexcept;
     CityDrawStats lastCityDrawStats() const noexcept;
+
+    // Exactly one canonical offscreen draw. Query data and feature evidence are consumed only after its fence.
+    BenchmarkReason drawBenchmarkFrame(const FrameContext&, const ResultsSample&, BenchmarkSnapshot&, double& milliseconds);
 
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(

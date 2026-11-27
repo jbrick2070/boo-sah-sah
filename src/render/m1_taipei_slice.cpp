@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -1242,6 +1243,10 @@ struct M1TaipeiSliceEffect::Impl {
     ComPtr<ID3D12Resource> abVerifyUav;
 
     // Dedicated GPU hardware timestamp query heap for exact Pass 1 RT/Raster execution ms (works in headless & swapchain!)
+    ComPtr<ID3D12QueryHeap> checkTimestamps;
+    ComPtr<ID3D12QueryHeap> checkVisibility;
+    bool particleQueryRecorded = false;
+    ComPtr<ID3D12Resource> checkReadback;
     ComPtr<ID3D12QueryHeap> rtTsHeap;
     ComPtr<ID3D12Resource> rtTsReadback;
     std::array<bool, kTotalUploadSlots> rtTsSlotValid{};
@@ -2387,6 +2392,12 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         return res;
     }
 
+    // A first NGX initialization can take several seconds. In the private DLSS worker its
+    // device and pipeline are independent of the bundled mesh/texture loading below.
+    std::future<void> ngxPreparation;
+    if (d3d_.benchmark() && d3d_.benchmark()->mode == BenchmarkMode::DlssQuality) {
+        ngxPreparation = std::async(std::launch::async, [this] { impl_->dlss.warmUp(d3d_); });
+    }
     startupStage(StartupWork::Files);
     if (!readShaderCso("assets/shaders/m0_test_vs.cso", impl_->vsFullscreenBytes) ||
         !readShaderCso("assets/shaders/m1_dxr_scene.cso", impl_->csDxrSceneBytes) ||
@@ -2646,7 +2657,8 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         !makeCsPso("m1_particles_sub_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csParticlesSubBytes, impl_->psoParticlesSubCs) ||
         !makeCsPso("m1_tensor_sub_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csTensorSubBytes, impl_->psoTensorSubCs) ||
         !makeCsPso("m1_nv12_pack_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csNv12PackBytes, impl_->psoNv12PackCs) ||
-        !impl_->ensurePresentPso(dev, static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()), &presentCompiler)) {
+        (!d3d_.benchmark() &&
+         !impl_->ensurePresentPso(dev, static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()), &presentCompiler))) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
         res.diagnosticCode = "M1_GFX_PSO_FAILED";
@@ -2696,6 +2708,11 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     uint32_t targetH = std::clamp<uint32_t>(activeSpec_.renderHeight, 180u, 2160u);
 
     if (!impl_->buildCanvasBundle(d3d_, targetW, targetH, activeSpec_.softVramLimitBytes)) {
+        if (d3d_.benchmark()) {
+            res.status = BackendStatus::Faulted;
+            res.diagnosticCode = "M1_CANVAS_ALLOC_FAILED";
+            return res;
+        }
         activeSpec_.id = QualityPresetId::Safe;
         activeSpec_.renderWidth = 1280;
         activeSpec_.renderHeight = 720;
@@ -2776,7 +2793,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         }
     }
 
-    if (!disableRT_ && !d3d_.isWarp() && d3d_.rayTracingAllowed()) {
+    if (!disableRT_ && !d3d_.isWarp() && d3d_.rayTracingAllowed() && !d3d_.benchmark()) {
         impl_->buildDxrResourcesAndWarmUp(d3d_, activeSpec_.softVramLimitBytes);
         if (!activeSpec_.allowDxr) {
             impl_->dxrVerified = false;
@@ -2798,7 +2815,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     startupStep("trilogy renderer resize");
     startupCheckpoint();
-    if (impl_->trilogyMesh && !disableRT_ && activeSpec_.allowDxr && !d3d_.isWarp()) {
+    if (impl_->trilogyMesh && !disableRT_ && activeSpec_.allowDxr && !d3d_.isWarp() && !d3d_.benchmark()) {
         FrameContext warmCtx{};
         warmCtx.samplePosition = 720000;
         warmCtx.sampleRate = 48000;
@@ -2819,11 +2836,12 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         impl_->trilogyMesh->retire(kHeadlessSlot);
         startupStep("trilogy warm-up frame");
     }
-    if (impl_->trilogyMesh) {
-        impl_->dlss.warmUp(d3d_);
+    if (impl_->trilogyMesh && (!d3d_.benchmark() || d3d_.benchmark()->mode == BenchmarkMode::DlssQuality)) {
+        if (ngxPreparation.valid()) ngxPreparation.get();
+        else impl_->dlss.warmUp(d3d_);
         startupStep("DLSS support");
     }
-    if (!impl_->neural) {
+    if (!impl_->neural && !d3d_.benchmark()) {
         // Unavailable is shown on the dashboard with its reason; it never stops the film.
         impl_->neural = std::make_unique<NeuralRenderingSuite>(d3d_);
         std::string neuralError;
@@ -2834,7 +2852,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         startupStep("neural rendering suite");
         startupCheckpoint();
     }
-    if (!impl_->smoke) {
+    if (!impl_->smoke && !d3d_.benchmark()) {
         // Like the neural suite: unavailable is reported with its reason and never stops the film.
         impl_->smoke = std::make_unique<FlowSmoke>(d3d_);
         std::string smokeError;
@@ -2842,7 +2860,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         startupStep("PhysX smoke");
     }
     StartupProgress::instance().stageDone();
-    if (!presentCompiler.waitAll() || !impl_->psoPresentHud) {
+    if (!presentCompiler.waitAll() || (!d3d_.benchmark() && !impl_->psoPresentHud)) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
         res.diagnosticCode = "M1_GFX_PSO_FAILED";
@@ -3123,6 +3141,9 @@ RendererFeatureState M1TaipeiSliceEffect::dlssState() const noexcept {
 }
 RendererFeatureState M1TaipeiSliceEffect::rayReconstructionState() const noexcept {
     return impl_ ? impl_->dlss.rayReconstructionState() : RendererFeatureState::Unavailable;
+}
+BenchmarkReason M1TaipeiSliceEffect::dlssBenchmarkAvailability() const noexcept {
+    return impl_ ? impl_->dlss.benchmarkAvailability() : BenchmarkReason::DlssInitFailed;
 }
 uint32_t M1TaipeiSliceEffect::dlssInputWidth() const noexcept {
     return dlssState() == RendererFeatureState::Active ? impl_->dlss.width() : 0;
@@ -3515,7 +3536,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     if(trilogyMesh) {
         const bool eligible = !pairedCapture && ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate &&
                               !(ctx.showOverlay && ctx.hudMode == 2) && !orbital;
-        bool sr = isCanonicalPass && dlss.prepare(d3d, cmd, ctx.dlssMode, eligible, ctx.rayReconstruction,
+        const bool allowDlss = !d3d.benchmark() || d3d.benchmark()->mode == BenchmarkMode::DlssQuality;
+        bool sr = isCanonicalPass && allowDlss && dlss.prepare(d3d, cmd, ctx.dlssMode, eligible, ctx.rayReconstruction,
             useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get());
         if (orbital && ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate) {
             trilogyMesh->recordOrbital(cmd,ctx,sceneHdr.Get(),sceneDepth.Get(),canvasW,canvasH,slot,isCanonicalPass);
@@ -3740,7 +3762,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         // Two wake layers, six rotors, at most three 40-segment strands per rotor.
         const uint32_t instances = wash.axisAndMotion[3] > 0.0f ? 2u * 6u * 3u * 40u : activeParticleCount;
+        const bool checkParticles = checkVisibility && isCanonicalPass && wash.axisAndMotion[3] == 0.0f && instances;
+        if (checkParticles) cmd->BeginQuery(checkVisibility.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 0);
         cmd->DrawInstanced(6u, instances, 0u, 0u);
+        if (checkParticles) {
+            cmd->EndQuery(checkVisibility.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 0);
+            particleQueryRecorded = true;
+        }
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
@@ -4366,6 +4394,108 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         d3d_.swapchainChannelBits(),
         slot, ctx, hud_, abCompareEngine_, codecHijackActive_, pathTracingState(), dlssState(), rayReconstructionState(), fgInputs);
     if (fgInputs) d3d_.finishFrameGenerationInputs();
+}
+
+BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
+    const FrameContext& frame, const ResultsSample& sample, BenchmarkSnapshot& snapshot, double& milliseconds) {
+    if (!d3d_.benchmark() || !impl_ || !impl_->trilogyMesh || !hasAllAuthoredSceneAssets())
+        return BenchmarkReason::WorkloadChanged;
+    const auto expected = resultsSampleAt(sample.tag);
+    if (!expected || expected->sample48k != sample.sample48k || expected->kind != sample.kind ||
+        frame.samplePosition != sample.sample48k ||
+        impl_->canvasW != 1280 || impl_->canvasH != 720) return BenchmarkReason::WorkloadChanged;
+
+    auto& scene = *impl_;
+    const bool measured = sample.kind == ResultsSampleKind::Measured;
+    if (measured && !scene.checkTimestamps) {
+        // A distinct pair and readback offset for every measured tag. Warmup has no timing slots.
+        auto* device = static_cast<ID3D12Device*>(d3d_.deviceRaw());
+        D3D12_QUERY_HEAP_DESC heap{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 2u * kResultsMeasuredCount, 0};
+        D3D12_HEAP_PROPERTIES properties{};
+        properties.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_QUERY_HEAP_DESC visibility{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 1, 0};
+        const auto desc = makeBufferDesc((kResultsMeasuredCount * 2 + 1) * sizeof(uint64_t));
+        if (!scene.gpuTimestampFreq || FAILED(device->CreateQueryHeap(&heap, IID_PPV_ARGS(&scene.checkTimestamps))) ||
+            FAILED(device->CreateQueryHeap(&visibility, IID_PPV_ARGS(&scene.checkVisibility))) ||
+            FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&scene.checkReadback))))
+            return BenchmarkReason::TimingUnavailable;
+    }
+    const auto query = measured ? 2u * (sample.tag - static_cast<uint32_t>(kResultsWarmupCount)) : 0u;
+    const auto offset = static_cast<size_t>(query) * sizeof(uint64_t);
+    constexpr auto visibilityOffset = kResultsMeasuredCount * 2 * sizeof(uint64_t);
+    scene.particleQueryRecorded = false;
+    const bool trace = frame.pathTracing != PathTracingLevel::Off;
+    if (!d3d_.executeSingleCommandListAndWait([&](void* raw) {
+        auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);
+        if (measured) cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query);
+        scene.recordScenePipelineToCanvas(d3d_, cmd, frame, trace, false, false, false, false,
+            scene.canvasClean.Get(), 5u, kHeadlessSlot, true, false, false);
+        if (measured) {
+            cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
+            cmd->ResolveQueryData(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query, 2,
+                scene.checkReadback.Get(), offset);
+            if (scene.particleQueryRecorded) cmd->ResolveQueryData(scene.checkVisibility.Get(),
+                D3D12_QUERY_TYPE_BINARY_OCCLUSION, 0, 1, scene.checkReadback.Get(), visibilityOffset);
+        }
+    })) return d3d_.checkDeviceHealthy() ? BenchmarkReason::RendererFailed : BenchmarkReason::GraphicsReset;
+
+    scene.trilogyMesh->retire(kHeadlessSlot);
+    const auto stats = scene.trilogyMesh->lastCityDrawStats();
+    if (!stats.rasterBatches || !stats.activeInstances || scene.orbitalViewActive)
+        return BenchmarkReason::WorkloadChanged;
+    if (!measured) return BenchmarkReason::None;
+
+    auto& evidence = snapshot.evidence;
+    evidence[static_cast<size_t>(BenchmarkFeature::Film)] = BenchmarkEvidence::FilmGpu;
+    // These dispatches supplied inputs to this retired mesh pass and particle draw.
+    const auto shaderOutput = [&](size_t pillar) {
+        const auto& work = scene.livePillars[pillar];
+        return work.activeInScene && work.status == BackendStatus::Substituted && work.workloadItems > 0 ?
+            BenchmarkEvidence::HlslGpu : BenchmarkEvidence::Unknown;
+    };
+    // Preserve a contribution observed on any retired, measured frame.
+    if (scene.trilogyMesh->neuralMaterialDrawn())
+        evidence[static_cast<size_t>(BenchmarkFeature::NeuralMaterial)] = shaderOutput(2);
+    evidence[static_cast<size_t>(BenchmarkFeature::Director)] = BenchmarkEvidence::ScriptedCpu;
+    evidence[static_cast<size_t>(BenchmarkFeature::Codec)] = BenchmarkEvidence::Off;
+    const bool pathRan = scene.trilogyMesh->highPathExecuted() && scene.trilogyMesh->queriedRays() > 0 &&
+                         pathTracingState() == RendererFeatureState::Active;
+    evidence[static_cast<size_t>(BenchmarkFeature::Lighting)] = pathRan ? BenchmarkEvidence::PathTracingGpu :
+        (stats.rayInstances == 0 ? BenchmarkEvidence::RasterGpu : BenchmarkEvidence::Unknown);
+    const bool dlss = frame.dlssMode == DlssMode::Quality;
+    const bool dlssRan = dlssState() == RendererFeatureState::Active && dlssInputWidth() && dlssInputHeight() &&
+                         dlssInputWidth() < scene.canvasW && dlssInputHeight() < scene.canvasH;
+    evidence[static_cast<size_t>(BenchmarkFeature::Upscaling)] = dlssRan ? BenchmarkEvidence::DlssGpu :
+        (dlss ? BenchmarkEvidence::Failed : BenchmarkEvidence::Off);
+    if (dlss && !dlssRan) return BenchmarkReason::DlssInitFailed;
+    if (trace != pathRan || (!trace && stats.rayInstances) || dlss != dlssRan ||
+        rayReconstructionState() == RendererFeatureState::Active)
+        return BenchmarkReason::WorkloadChanged;
+    const uint32_t inputW = dlss ? dlssInputWidth() : scene.canvasW;
+    const uint32_t inputH = dlss ? dlssInputHeight() : scene.canvasH;
+    if (snapshot.measuredCount && (snapshot.inputWidth != inputW || snapshot.inputHeight != inputH))
+        return BenchmarkReason::WorkloadChanged;
+    snapshot.inputWidth = inputW;
+    snapshot.inputHeight = inputH;
+
+    const D3D12_RANGE read{offset, visibilityOffset + sizeof(uint64_t)};
+    void* mapped = nullptr;
+    if (FAILED(scene.checkReadback->Map(0, &read, &mapped)) || !mapped)
+        return BenchmarkReason::TimingUnavailable;
+    uint64_t ticks[2]{};
+    const auto* bytes = static_cast<const uint8_t*>(mapped);
+    std::memcpy(ticks, bytes + offset, sizeof(ticks));
+    uint64_t visible = 0;
+    if (scene.particleQueryRecorded) std::memcpy(&visible, bytes + visibilityOffset, sizeof(visible));
+    auto& particles = evidence[static_cast<size_t>(BenchmarkFeature::Particles)];
+    if (visible) particles = shaderOutput(1);
+    else if (particles == BenchmarkEvidence::Unknown) particles = BenchmarkEvidence::NotExercised;
+    const D3D12_RANGE written{0, 0};
+    scene.checkReadback->Unmap(0, &written);
+    if (ticks[1] < ticks[0] || (ticks[0] == 0 && ticks[1] == 0)) return BenchmarkReason::TimingUnavailable;
+    milliseconds = static_cast<double>(ticks[1] - ticks[0]) * 1000.0 / static_cast<double>(scene.gpuTimestampFreq);
+    return BenchmarkReason::None;
 }
 
 bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(

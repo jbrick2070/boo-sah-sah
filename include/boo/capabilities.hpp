@@ -1,6 +1,7 @@
 #pragma once
 
 #include "boo/api.hpp"
+#include "boo/results_host_hardware.hpp"
 
 #include <array>
 #include <cstdint>
@@ -24,7 +25,7 @@ struct AdapterInfo {
     bool isSoftwareWarp = false;
     bool supportsD3D12 = false;
     std::string maxFeatureLevel = "None";
-    std::string dxrTier = "NotSupported";
+    std::string dxrTier = "Unknown";
     std::string shaderModel = "Unknown";
 };
 
@@ -32,6 +33,8 @@ struct ComputeAcceleratorDevice {
     std::string friendlyName;
     std::string instanceId;
     bool statusOk = false;
+    ResultsNpuModel cardModel = ResultsNpuModel::Unknown;
+    uint16_t vendorId = 0, deviceId = 0;
 };
 
 struct ProbeFlags {
@@ -47,6 +50,8 @@ struct ProbeFlags {
 struct SystemCapabilities {
     std::string osVersion;
     std::string cpuBrand;
+    ResultsCpuModel cpuVendor = ResultsCpuModel::Unknown;
+    uint16_t cpuFamily = 0, cpuModel = 0;
     uint32_t logicalCores = 0;
     uint64_t totalSystemRamBytes = 0;
 
@@ -74,6 +79,7 @@ struct SystemCapabilities {
 
     // Dynamic NPU / OpenVINO probe
     std::vector<ComputeAcceleratorDevice> npuDevices;
+    bool acceleratorEnumerationSucceeded = false;
     bool openvinoRuntimeDllPresent = false;
 
     // Dynamic NVENC / Media Foundation hardware encoder probe
@@ -88,6 +94,9 @@ struct SystemCapabilities {
 };
 
 SystemCapabilities probeSystemCapabilities(const ProbeFlags& flags);
+ResultsHostHardware resultsHostHardware(const SystemCapabilities& caps) noexcept;
+// Headless result exports have no viewer inventory. Only query CPUID and present accelerator devices.
+ResultsHostHardware probeResultsHostHardware();
 const HardwareResult& getEngineResult(const SystemCapabilities& caps, EngineKind kind) noexcept;
 
 } // namespace boo

@@ -47,8 +47,8 @@ StructuredBuffer<Vertex> vertices : register(t0);
 StructuredBuffer<uint>   indices  : register(t1);
 #if defined(M2_RT)
 RaytracingAccelerationStructure scene : register(t2);
-RWStructuredBuffer<uint> verified : register(u0);
 #endif
+RWStructuredBuffer<uint> verified : register(u0);
 
 Texture2D<float4>      tensorField     : register(t3);
 Texture2DArray<float4> gAlbedoAlphaTex : register(t4);
@@ -2908,6 +2908,11 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                     seed ^ (sampleIndex * 277803737u), pathDistance, queries);
                 distanceSum += min(pathDistance, 480.0);
             }
+            // The worker reads this marker after the fence for this specific draw.
+            if ((interFlags & (1u << 19u)) != 0u && pathCount == 4u &&
+                (((uint)i.pos.x | (uint)i.pos.y) & 15u) == 0u) {
+                InterlockedOr(verified[2], 1u);
+            }
             pathIrradiance /= (float)pathCount;
             diffHitDist = max(distanceSum / (float)pathCount, 0.02);
         } else if (inBath && matId != 34u) {
@@ -3218,6 +3223,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         if (((showFlags >> 2u) & 7u) == 2u) {
             caustCol = ((showFlags & 2u) != 0u) ? float3(0.36, 0.10, 0.38) : float3(0.06, 0.34, 0.32);
         }
+        if ((interFlags & (1u << 19u)) != 0u && energy > 0.0f &&
+            (((uint)i.pos.x | (uint)i.pos.y) & 7u) == 0u) InterlockedOr(verified[2], 2u);
         nonIndirectColor += (caustCol * energy + neural * (caustBoost * 0.85)) * (0.25 + 0.75 * wave) * ((((showFlags >> 2u) & 7u) == 2u) ? 1.0f : 0.14f);
     }
 
@@ -3383,6 +3390,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float3 field = siren * 0.70 + sirenB * 0.30;
         float fieldLuma = dot(field, float3(0.2126, 0.7152, 0.0722));
         float3 tone = ((showFlags & 2u) != 0u) ? float3(0.86, 0.42, 0.66) : float3(0.34, 0.72, 0.66);
+        if ((interFlags & (1u << 19u)) != 0u && fieldLuma > 0.0f &&
+            (((uint)i.pos.x | (uint)i.pos.y) & 7u) == 0u) InterlockedOr(verified[2], 2u);
         float3 silk = lerp(fieldLuma.xxx * tone, field * tone, 0.24);
         float2 motif = i.world.xy * 0.34 + i.world.z * float2(0.08, 0.13);
         float scale = ((interFlags & (1u << 14u)) != 0u) ? 0.0f : 0.16f;

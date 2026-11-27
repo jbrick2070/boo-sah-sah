@@ -33,6 +33,8 @@ public:
     void* dlssDepthResource() const noexcept;
     bool dlssHistoryReset() const noexcept;
     bool hardwareVerified() const;
+    bool highPathExecuted() const noexcept;
+    bool neuralMaterialDrawn() const noexcept;
     RendererFeatureState pathTracingState() const noexcept;
     bool nrdActive() const;
     // 0 = Deterministic Spatial Cross-Bilateral, 1 = NRD REBLUR_DIFFUSE_SPECULAR Motion, 2 = NRD REFERENCE PT Accum

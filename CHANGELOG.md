@@ -2,6 +2,13 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.14.0 — Film benchmark preview
+
+- Choose **Run benchmark** in Hardware Orchestra or press **Ctrl+B**. The viewer pauses the film and offers raster, native High path tracing, and DLSS Quality. Each option explains its requirements on the selected adapter.
+- The results table aligns measurements for the current run and a matching RTX 5080 Laptop GPU reference. It gives the median and longest GPU frame time for a six-second shot, the number of valid samples, and the rendering paths observed. An interrupted or substituted run shows its outcome without a timing score.
+- The CPU and NPU rows identify the processors on each rig when available and show their role in the test. The CPU runs the scripted director, and the three fixed GPU protocols leave NPU inference off.
+- Save the card as a PNG and a text file in a local folder. The report action opens a public GitHub form after confirmation. All 25 interface languages cover the selector and the card.
+
 ## 1.1.13.0 — Never frozen, and the city on every GPU
 
 - Fixes the Store's two rejections. Version 1.1.10 appeared frozen at launch on an Intel UHD 620 laptop (10.1.2.10): it compiled two 1 MB dashboard shaders on the window's thread. On a cold start here its window did not answer for about five minutes.

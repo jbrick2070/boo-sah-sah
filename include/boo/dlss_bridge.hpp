@@ -1,6 +1,7 @@
 #pragma once
 
 #include "boo/api.hpp"
+#include "boo/results_benchmark.hpp"
 #include <memory>
 
 struct ID3D12GraphicsCommandList;
@@ -26,6 +27,7 @@ public:
     void rejectInputSize() noexcept;
     bool renderNoisyRays() const noexcept;
     RendererFeatureState state() const noexcept;
+    BenchmarkReason benchmarkAvailability() const noexcept;
     RendererFeatureState rayReconstructionState() const noexcept;
     uint32_t width() const noexcept;
     uint32_t height() const noexcept;

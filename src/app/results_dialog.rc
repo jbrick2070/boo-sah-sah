@@ -1,0 +1,10 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "results_dialog_ids.h"
+
+IDD_RESULTS DIALOGEX 0, 0, 322, 212
+#include "results_dialog_layout.rcinc"
+
+IDD_RESULTS_RTL DIALOGEX 0, 0, 322, 212
+EXSTYLE WS_EX_LAYOUTRTL | WS_EX_RTLREADING
+#include "results_dialog_layout.rcinc"

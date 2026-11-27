@@ -14,6 +14,8 @@
 #include "boo/m1_scene.hpp"
 #include "boo/media_input.hpp"
 #include "boo/render.hpp"
+#include "boo/results_worker.hpp"
+#include "boo/results_dialog.hpp"
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
 #include "boo/startup_progress.hpp"
@@ -1138,7 +1140,10 @@ struct InteractiveExploreController {
                         consumed = true;
                     } else if (const float workoutTop = neuralRowsTop + 3.f * rowH + 20.f + 36.f; y >= workoutTop + 20.f) {
                         // FLOCK row: the name cycles the formation, the CAM pill toggles the bird camera.
-                        if (y >= workoutTop + 40.f && y < workoutTop + 60.f) {
+                        if (y >= workoutTop + 60.f && y < workoutTop + 82.f) {
+                            window.pushCommandFromWndProc(boo::TransportCommand::RunFilmBenchmark);
+                            consumed = true;
+                        } else if (y >= workoutTop + 40.f && y < workoutTop + 60.f) {
                             // PHYSX row: dial through the genres.
                             window.pushCommandFromWndProc(boo::TransportCommand::CyclePhysxGenre);
                             consumed = true;
@@ -1650,8 +1655,18 @@ extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 721; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 #endif
 
+#ifdef BOO_VERIFY_FILM_BENCHMARK
+namespace boo { int verifyFilmBenchmarkIfRequested(int argc, char** argv); }
+#endif
+
 int main(int argc, char** argv) {
+    const auto viewerEntry = std::chrono::steady_clock::now();
     using namespace boo;
+
+    if (const int workerResult = runResultsWorkerIfRequested(argc, argv); workerResult >= 0) return workerResult;
+#ifdef BOO_VERIFY_FILM_BENCHMARK
+    if (const int verification = verifyFilmBenchmarkIfRequested(argc, argv); verification >= 0) return verification;
+#endif
 
     std::vector<std::string> rawArgs;
     bool isCliQuery = false;
@@ -1788,6 +1803,24 @@ int main(int argc, char** argv) {
     // The window and its loading screen come before anything slow, so a first launch never shows nothing.
     // Start-up works for seconds at a time without reading its message queue; keep Windows from swapping
     // in a frozen "Not Responding" copy of the window, which would hide the loading screen.
+    // On-screen language. "auto" follows the Windows display language; timed automation runs stay
+    // English so their frames do not depend on the PC they run on.
+    {
+        // Found beside the exe when the working directory is elsewhere (Start menu, Store package).
+        const std::filesystem::path stringsDir = resolveResourcePath(settings.stringsDir);
+        std::string lang = settings.language;
+        if (lang.empty() || lang == "auto") {
+            lang = (settings.autoExitSeconds > 0.0)
+                ? std::string("en-US")
+                : uiMatchLanguage(uiWindowsPreferredLanguages(), uiAvailableLanguages(stringsDir));
+        }
+        std::string langError;
+        if (!UiStrings::instance().load(stringsDir, lang, &langError)) {
+            BOO_LOG_WARN("UI", "On-screen text stays English: " + langError);
+        } else {
+            BOO_LOG_INFO("UI", "On-screen language: " + UiStrings::instance().languageTag());
+        }
+    }
     AppWindow window;
     if (!settings.runBenchCliOnly && !settings.headlessProbeOnly) {
         DisableProcessWindowsGhosting();
@@ -1832,6 +1865,7 @@ int main(int argc, char** argv) {
     SystemCapabilities probed{};
     runWhilePainting(StartupWork::Device, "hardware check", [&] { probed = probeSystemCapabilities(pflags); });
     const SystemCapabilities& caps = probed;
+    const auto cardHardware = resultsHostHardware(caps);
     FallbackOrchestrator orchestrator;
     for (size_t i = 0; i < kEngineKindCount; ++i) {
         orchestrator.registerEngineState(caps.engines[i]);
@@ -1907,30 +1941,15 @@ int main(int argc, char** argv) {
         BOO_LOG_ERROR("D3D12", msg);
         window.destroy();
         if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
-            MessageBoxW(nullptr, uiText(UiText::UnsupportedGpuBody), uiText(UiText::UnsupportedGpuTitle),
-                        MB_ICONERROR | MB_OK | (uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u));
+            ResultsDialogContext unavailable{};
+            unavailable.hardware = cardHardware;
+            unavailable.closeOnly = true;
+            unavailable.initialFailure = BenchmarkReason::UnsupportedDevice;
+            openResultsDialog(nullptr, unavailable);
         }
         return 1;
     }
 
-    // On-screen language. "auto" follows the Windows display language; timed automation runs stay
-    // English so their frames do not depend on the PC they run on.
-    {
-        // Found beside the exe when the working directory is elsewhere (Start menu, Store package).
-        const std::filesystem::path stringsDir = resolveResourcePath(settings.stringsDir);
-        std::string lang = settings.language;
-        if (lang.empty() || lang == "auto") {
-            lang = (settings.autoExitSeconds > 0.0)
-                ? std::string("en-US")
-                : uiMatchLanguage(uiWindowsPreferredLanguages(), uiAvailableLanguages(stringsDir));
-        }
-        std::string langError;
-        if (!UiStrings::instance().load(stringsDir, lang, &langError)) {
-            BOO_LOG_WARN("UI", "On-screen text stays English: " + langError);
-        } else {
-            BOO_LOG_INFO("UI", "On-screen language: " + UiStrings::instance().languageTag());
-        }
-    }
     const auto titleWord = [](const char* key, const wchar_t* english) {
         const std::wstring w = UiStrings::instance().textOr(key, english);
         const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -2064,8 +2083,11 @@ int main(int argc, char** argv) {
         window.destroy();
         audio.shutdown();
         if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
-            MessageBoxW(nullptr, uiText(UiText::UnsupportedGpuBody), uiText(UiText::UnsupportedGpuTitle),
-                        MB_ICONERROR | MB_OK | (uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u));
+            ResultsDialogContext unavailable{};
+            unavailable.hardware = cardHardware;
+            unavailable.closeOnly = true;
+            unavailable.initialFailure = BenchmarkReason::RendererFailed;
+            openResultsDialog(nullptr, unavailable);
         }
         return 1;
     }
@@ -2310,6 +2332,8 @@ int main(int argc, char** argv) {
     bool running = true;
     bool recoveryAttempted = false;
     bool graphicsUnavailable = false;
+    std::optional<double> viewerStartupSeconds;
+    uint64_t viewerLocalUsage = 0;
     bool deviceLostInjected = false;
     uint64_t retiredPresentCount = 0;
     uint64_t retiredPresentStalls = 0;
@@ -2589,7 +2613,7 @@ int main(int argc, char** argv) {
     }
     bool fallbackReported = false;
     while (running && window.pumpMessages()) {
-        const auto cpuFrameT0 = std::chrono::steady_clock::now();
+        auto cpuFrameT0 = std::chrono::steady_clock::now();
         bool manualPresetChanged = false;
 
         d3d.beginSimulation(settings.frameGeneration, settings.reflex);
@@ -2900,6 +2924,68 @@ int main(int argc, char** argv) {
                     if (hudMode == 1u) hudBeforeComparison = hudMode;
                     hudMode = nextHud;
                     settings.showOverlay = hudMode != 3u;
+                    break;
+                }
+                case TransportCommand::RunFilmBenchmark: {
+                    ResultsDialogContext context{};
+                    context.hardware = cardHardware;
+                    context.viewerStartupSeconds = viewerStartupSeconds;
+                    context.adapter.luidLow = d3d.adapterLuidLow();
+                    context.adapter.luidHigh = d3d.adapterLuidHigh();
+                    context.adapter.viewerLocalUsage = viewerLocalUsage;
+                    if (graphicsUnavailable) context.initialFailure = BenchmarkReason::GraphicsReset;
+                    else if (benchRunning.load()) context.initialFailure = BenchmarkReason::Busy;
+                    else if (d3d.isWarp()) context.availability.fill(BenchmarkReason::SoftwareRenderer);
+                    else if (!viewerLocalUsage) context.availability.fill(BenchmarkReason::MemoryBudget);
+                    else {
+                        context.availability.fill(BenchmarkReason::AdapterMismatch);
+                        for (const auto& adapter : caps.adapters) {
+                            if (adapter.luidLowPart != context.adapter.luidLow || adapter.luidHighPart != context.adapter.luidHigh)
+                                continue;
+                            context.vendorId = adapter.vendorId;
+                            context.deviceId = adapter.deviceId;
+                            if (!adapter.supportsD3D12 || adapter.shaderModel == "5_1") {
+                                context.availability.fill(BenchmarkReason::UnsupportedDevice);
+                                break;
+                            }
+                            if (adapter.shaderModel == "Unknown") break;
+                            context.availability[0] = BenchmarkReason::None;
+                            const bool dxr = adapter.dxrTier == "Tier_1_1" || adapter.dxrTier == "Tier_1_2";
+                            context.availability[1] = adapter.dxrTier == "Unknown" ? BenchmarkReason::AdapterMismatch :
+                                dxr ? BenchmarkReason::None : BenchmarkReason::RequiresDxr;
+                            context.availability[2] = !resultsDlssInBuild() ? BenchmarkReason::RequiresDlss :
+                                adapter.vendorId != 0x10de ? BenchmarkReason::UnsupportedDevice :
+                                liveM1Ptr ? liveM1Ptr->dlssBenchmarkAvailability() : BenchmarkReason::DlssInitFailed;
+                            break;
+                        }
+                    }
+                    const bool resume = clock.state() != TransportState::Paused && clock.state() != TransportState::Ended;
+                    if (resume) clock.pause();
+                    if (audioClockReady) audio.setPaused(true);
+                    // A paused film cannot display the live camera indicator.
+                    stopCamera("the film is paused for a graphics benchmark.");
+                    if (openResultsDialog(window.hwnd(), context)) {
+                        // Driver calls can remain stuck after removal. The native card has closed,
+                        // no further frames are submitted, and teardown never owns the UI thread.
+                        window.hide();
+                        std::thread cleanup([&] {
+                            gpuSensors.stop();
+                            d3d.retireGpuForShutdown();
+                            spoutSender.shutdown();
+                            orchestrator.shutdown();
+                            d3d.shutdown();
+                        });
+                        WaitForSingleObject(cleanup.native_handle(), 1000);
+                        TerminateProcess(GetCurrentProcess(), 1);
+                        std::_Exit(1);
+                    }
+                    if (resume) {
+                        if (audioClockReady) audio.resetPhase(static_cast<uint64_t>(clock.currentSample()));
+                        clock.resume();
+                        if (audioClockReady) audio.setPaused(false);
+                    }
+                    cpuFrameT0 = std::chrono::steady_clock::now();
+                    previousFrameStart.reset();
                     break;
                 }
                 case TransportCommand::TriggerBenchSweep:
@@ -3446,6 +3532,7 @@ int main(int argc, char** argv) {
         const uint64_t appVram = settings.injectVramPressure
                                      ? (15ULL * 1024ULL * 1024ULL * 1024ULL)
                                      : d3d.queryEstimatedAppVramBytes();
+        viewerLocalUsage = appVram;
         peakVramBytes = std::max(peakVramBytes, appVram);
         const QualityPresetSpec prevSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
         const bool comparingDirector = settings.showOverlay && hudMode == 2u && abCompareEngine == AbCompareEngine::NPU;
@@ -3763,6 +3850,10 @@ int main(int argc, char** argv) {
                 }
                 double completedGpuMs = 0.0;
                 const bool presented = d3d.endFrameAndPresent(settings.vsync, completedGpuMs);
+                if (!viewerStartupSeconds && presented && d3d.lastPresentationVisible() &&
+                    !orchestrator.isUsingFallbackEffect() && IsWindowVisible(window.hwnd())) {
+                    viewerStartupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - viewerEntry).count();
+                }
                 const bool published = spoutSender.completePublish();
                 if (presented) {
                     window.hideLoading();

@@ -32,6 +32,7 @@ enum class TransportCommand : uint8_t {
     ToggleCaptions,
     ToggleOverlay,
     TriggerBenchSweep,
+    RunFilmBenchmark,
     ToggleRtRuntime,
     ToggleCudaRuntime,
     ToggleTensorRuntime,

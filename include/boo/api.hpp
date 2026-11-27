@@ -327,6 +327,7 @@ bool parseEdition(std::string_view text, Edition& out) noexcept;
 bool parseQualityPreset(std::string_view text, QualityPresetId& out) noexcept;
 
 // Resolves relative asset/config paths across working directory, exe directory, and repo root.
+bool useInstalledAssetDirectory(); // Call once during private worker entry, before starting other threads.
 std::filesystem::path resolveResourcePath(const std::filesystem::path& relativeOrAbs);
 
 } // namespace boo

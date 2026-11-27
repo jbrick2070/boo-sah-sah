@@ -565,6 +565,8 @@ struct TrilogyMeshRenderer::Impl {
     uint32_t w=0,h=0,hits=0,queries=0,fallbacks=0;
     bool usedFallbackTexture = false;
     bool verified=false,rtReady=false;
+    bool highPathExecuted = false;
+    bool neuralMaterialDrawn = false;
     RendererFeatureState pathTracingState = RendererFeatureState::Unavailable;
     PathTracingLevel lastPathTracingLevel = PathTracingLevel::Off;
     // Deforming meshes (docs/physx_suite_plan.md, step 5): baked PhysX cloth played back on a mesh. The
@@ -1709,7 +1711,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         startupStep("trilogy depth pipelines (2)");
 
         // Piggyback motion on the normal Z prepass only when DLSS consumes it.
-        try {
+        if (!s.context.benchmark() || s.context.benchmark()->mode == BenchmarkMode::DlssQuality) try {
             const auto mvVs=shader("m2_motion_vs.cso"),mvPs=shader("m2_motion_ps.cso"),
                    mvCut=shader("m2_motion_cutout_ps.cso"),mvSky=shader("m2_sky_motion_ps.cso");
             auto md=dp;
@@ -1775,7 +1777,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             pdRt.RTVFormats[4]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             pdRt.RTVFormats[5]=DXGI_FORMAT_R32G32B32A32_UINT;
             pdRt.RTVFormats[6]=DXGI_FORMAT_R16G16B16A16_FLOAT;
-            rps=shader("m2_mesh_rt_ps.cso");rpsCut=shader("m2_mesh_rt_cutout_ps.cso");skyRtPs=shader("m2_sky_rt_ps.cso");
+            // Use the very same PSOs as ordinary viewing so a loaded film warms this worker's driver cache.
+            rps = shader("m2_mesh_rt_ps.cso");
+            rpsCut = shader("m2_mesh_rt_cutout_ps.cso");
+            skyRtPs = shader("m2_sky_rt_ps.cso");
             // Keep the ordinary DXR pipelines usable if optional RR setup fails.
             // MRT 2..4 carry material guides; MRT 6 carries scalar reflection distance.
             auto rrFormats=[](D3D12_GRAPHICS_PIPELINE_STATE_DESC desc){desc.RTVFormats[6]=DXGI_FORMAT_R16_FLOAT;return desc;};
@@ -1785,16 +1790,18 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             skyDesc.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;skyDesc.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
             rtCompiler.start("M2 ray-traced city",vs.size()+rps.size(),[&s,d,opaque,rr=rrFormats(opaque),&rrOpaqueOk] {
                 if(FAILED(d->CreateGraphicsPipelineState(&opaque,IID_PPV_ARGS(&s.rt))))return false;
+                if (s.context.benchmark()) return true;
                 rrOpaqueOk=SUCCEEDED(d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrOpaque)));
                 return true;
             });
             rtCompiler.start("M2 ray-traced city, alpha cutout",vs.size()+rpsCut.size(),[&s,d,cutout,rr=rrFormats(cutout)] {
                 if(FAILED(d->CreateGraphicsPipelineState(&cutout,IID_PPV_ARGS(&s.rtCutout))))return false;
-                d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrCutout));
+                if (!s.context.benchmark()) d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrCutout));
                 return true;
             });
             rtCompiler.start("M2 ray-traced sky",skyvs.size()+skyRtPs.size(),[&s,d,skyDesc,rr=rrFormats(skyDesc),&rrSkyOk] {
                 if(FAILED(d->CreateGraphicsPipelineState(&skyDesc,IID_PPV_ARGS(&s.skyRt))))return false;
+                if (s.context.benchmark()) return true;
                 rrSkyOk=SUCCEEDED(d->CreateGraphicsPipelineState(&rr,IID_PPV_ARGS(&s.rrSky)));
                 return true;
             });
@@ -1859,7 +1866,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         startupStep("trilogy accumulation and denoise pipelines (5)");
         startupStage(StartupWork::Scene);
         D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=10;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
-        s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);uint64_t zero=0;upload(s.zero.Get(),&zero,8);
+        s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);std::array<uint32_t, 3> zeros{};upload(s.zero.Get(), zeros.data(), sizeof(zeros));
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
         if(s.rtReady) {
             const size_t totalBlas=geometriesById.size();
@@ -1994,7 +2001,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             }
         }
         startupStep("trilogy cloth acceleration structures");
-        if(s.rtReady) s.nrd.initialize(nullptr); // it only denoises ray-traced light
+        if(s.rtReady && !s.context.benchmark()) s.nrd.initialize(nullptr); // it only denoises ray-traced light
         startupStep("NRD");
         StartupProgress::instance().stageDone();
         if(!rtCompiler.waitAll()) {
@@ -2076,13 +2083,29 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
     }catch(...) {s.w=0;s.h=0;return false;}
 }
 void TrilogyMeshRenderer::retire(uint32_t slot) {
-    auto& s=*impl_;if(!s.pending[slot])return;void* ptr=nullptr;D3D12_RANGE rr{0,8};
-    if(SUCCEEDED(s.readbacks[slot]->Map(0,&rr,&ptr))) {s.hits=*static_cast<uint32_t*>(ptr);s.queries=static_cast<uint32_t*>(ptr)[1];s.verified=s.hits>0;D3D12_RANGE wr{0,0};s.readbacks[slot]->Unmap(0,&wr);}s.pending[slot]=false;
+    auto& s = *impl_;
+    if (!s.pending[slot]) return;
+    s.pending[slot] = false;
+    s.hits = s.queries = 0;
+    s.verified = s.highPathExecuted = s.neuralMaterialDrawn = false;
+    void* ptr = nullptr;
+    D3D12_RANGE read{0, 12};
+    if (SUCCEEDED(s.readbacks[slot]->Map(0, &read, &ptr)) && ptr) {
+        const auto* counts = static_cast<const uint32_t*>(ptr);
+        s.hits = counts[0];
+        s.queries = counts[1];
+        s.verified = s.hits > 0;
+        s.highPathExecuted = (counts[2] & 1u) != 0;
+        s.neuralMaterialDrawn = (counts[2] & 2u) != 0;
+        D3D12_RANGE written{0, 0};
+        s.readbacks[slot]->Unmap(0, &written);
+    }
 }
 bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting,const float* dlssJitterPixels,bool rayReconstruction,bool temporalSuperResolution) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
+    if (canonical) s.highPathExecuted = s.neuralMaterialDrawn = false;
     if (!useRt && canonical) {
         s.pending.fill(false);
         s.verified=false;
@@ -2665,7 +2688,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         ComPtr<ID3D12GraphicsCommandList4> c4;check(cmd->QueryInterface(IID_PPV_ARGS(&c4)));
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};build.Inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;build.Inputs.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;build.Inputs.NumDescs=static_cast<UINT>(rayCount);build.Inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;build.Inputs.InstanceDescs=rayResource->GetGPUVirtualAddress()+rayOffset;build.DestAccelerationStructureData=s.tlas->GetGPUVirtualAddress();build.ScratchAccelerationStructureData=s.tlasScratch->GetGPUVirtualAddress();uav(cmd,s.tlas.Get());uav(cmd,s.tlasScratch.Get());c4->BuildRaytracingAccelerationStructure(&build,0,nullptr);uav(cmd,s.tlas.Get());
     }
-    cmd->CopyBufferRegion(s.counters[slot].Get(),0,s.zero.Get(),0,8);transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->CopyBufferRegion(s.counters[slot].Get(),0,s.zero.Get(),0,12);transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);transition(cmd,dist,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     const bool rr=rayReconstruction && useRt && writeMotion && !orbital && !iv.aovMode && rrGuidesReady();
@@ -2713,6 +2736,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     c.pulse=camera.emissivePulse;
     c.courierLamp=courierLamp;
     c.interFlags |= effectiveEffectsDetail(f) << 12u;
+    if (canonical && s.context.benchmark()) c.interFlags |= 1u << 19u;
     if (traceIndirect) c.interFlags |= static_cast<uint32_t>(f.pathTracing) << 15u;
     if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
     // Audio drive packed as RGBA8 into the one spare scene DWORD (low, mid, high, beat). Debug AOVs and progressive accumulation stay static.
@@ -2777,6 +2801,12 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         s.previousClip=currentClip;
     }
 
+    if (s.context.benchmark() && s.context.benchmark()->mode == BenchmarkMode::PathTracing) {
+        constexpr uint32_t openingFlags = (1u << 19u) | (static_cast<uint32_t>(PathTracingLevel::High) << 15u) | 16u;
+        if (!useRt || c.time < 7.f || c.time >= 14.f || c.act != 2 || c.canonical != 1 ||
+            c.showFlags != 65 || packedAudio != 0 || c.interFlags != openingFlags || c.accumFrame != 0)
+            throw BenchmarkWorkloadChanged{};
+    }
     (void)tensor;
     ID3D12DescriptorHeap* m2Heaps[] = {s.srvHeap.Get()};
     cmd->SetDescriptorHeaps(1, m2Heaps);
@@ -3031,7 +3061,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     }
     transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
-    if(canonical&&useRt) {cmd->CopyBufferRegion(s.readbacks[slot].Get(),0,s.counters[slot].Get(),0,8);s.pending[slot]=true;}
+    if(canonical && (useRt || s.context.benchmark())) {cmd->CopyBufferRegion(s.readbacks[slot].Get(),0,s.counters[slot].Get(),0,12);s.pending[slot]=true;}
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     if (writeMotion) {
         transition(cmd,s.depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3210,6 +3240,8 @@ bool TrilogyMeshRenderer::reserveWorkoutBirds(uint32_t birds) {
     }
 }
 FlockFocus TrilogyMeshRenderer::flockFocus() const noexcept { return impl_ ? impl_->flockFocus : FlockFocus{}; }
+bool TrilogyMeshRenderer::neuralMaterialDrawn() const noexcept { return impl_->neuralMaterialDrawn; }
+bool TrilogyMeshRenderer::highPathExecuted() const noexcept { return impl_->highPathExecuted; }
 uint32_t TrilogyMeshRenderer::verifiedHits() const {return impl_->hits;}
 RendererFeatureState TrilogyMeshRenderer::pathTracingState() const noexcept {return impl_->pathTracingState;}
 uint32_t TrilogyMeshRenderer::fallbackKits() const {return impl_->fallbacks;}

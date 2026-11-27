@@ -17,6 +17,7 @@
 #include "boo/spout_sender.hpp"
 #include "../../src/app/world_portal.h"
 #include "boo/ui_text.hpp"
+#include "boo/results_text.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1663,7 +1664,7 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 96);
+    BOO_CHECK(keys.size() == 96 + static_cast<size_t>(ResultText::Count));
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.play_again") != keys.end());
 

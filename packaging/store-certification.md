@@ -7,27 +7,21 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-1.1.13 FIXES the launch freeze reported for 1.1.10 (10.1.2.10, Dell Inspiron 5379): startup compiles no longer block the window, and the loading screen shows each step as it runs, with its file and time. It also fixes a likely cause of 10.1.4.4: on GPUs without double-precision math (Intel Iris Xe, Snapdragon) earlier versions showed only circles instead of the city and its controls. The first launch is the longest, while the driver compiles shaders.
+BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. It works offline in 25 languages. The first launch can take longer while the graphics driver prepares shaders. The loading screen shows progress.
 
-BOO SAH SAH is an interactive real-time 3D show for Windows 11: a six-minute film through Shanghai, Shenzhen and Taipei with an original soundtrack, which you can step into at any moment. No account, ads or purchases; it works offline.
+1. Press F to explore. Fly with W A S D, look by dragging the right mouse button, and press Y to drop marbles. Press F to return to the film.
+2. Open Hardware Orchestra and choose Run benchmark, or press Ctrl+B. Select Raster and run it. The film pauses for the fixed shot. Read the GPU frame times and the rendering paths that ran. Save picture and text lets you choose a local folder. Back to film restores playback. The report form opens only after confirmation.
+3. In the same selector, path tracing and DLSS Quality have separate tests. Unavailable choices explain their requirements. Ray tracing is optional for the film and raster test.
+4. Space pauses the film. Left and Right seek. N and P change acts. Z changes the music. Tab changes the panel and F11 toggles full screen.
+5. F12 saves a film frame. The optional camera starts only on request and shows a red LIVE CAMERA label. Press W outside Explore to stop it.
 
-To try in the first two minutes (sound on; the film starts by itself):
-1. EXPLORE: press F to take the camera. W A S D fly, Q/E down/up, drag with the right mouse button to look, wheel to zoom, Alt+drag to move the sun, Y to drop physics marbles. F returns.
-2. BIRDS: Shift+Up / Shift+Down add or remove flocks of animated birds; Shift+F changes the formation (outside Explore).
-3. TIME: Space pauses; Left / Right seek; N / P jump between acts; R restarts. E switches the Family and Midnight editions (outside Explore).
-4. MUSIC: Z switches between the original tracks; you can drop in your own MP3, WAV or FLAC.
-5. SCREEN: Tab changes the panels; click a hardware row to compare it in split view; F12 saves a picture; F11 full screen; Esc leaves it, then exits.
-The interface is in 25 languages.
-
-Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA, an NPU and video encoding are optional (built-in substitutes); integrated and AMD graphics use a lighter mode. Unsupported PCs get a plain message.
-
-Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves the film frame (never the camera) to Pictures\BOO SAH SAH. Web links open only when asked; the app makes no network connection.
+Requires Direct3D 12 and Shader Model 6.0. Integrated and AMD graphics use a lighter startup profile.
 ```
 
 ## Restricted capability: runFullTrust (justification, 500 characters at most)
 
 ```
-BOO SAH SAH is a Win32 Direct3D 12 desktop app (C++). Full trust lets it use the GPU directly through D3D12 and DXGI, play audio through WASAPI, and load optional GPU helper libraries (NVIDIA denoiser, DLSS and Streamline, OpenVINO) from its own install folder at launch. It makes no internet connection, collects no data and does not change system settings.
+BOO SAH SAH is a Win32 Direct3D 12 desktop app (C++). Full trust lets it use the GPU directly through D3D12 and DXGI, play audio through WASAPI, and load optional GPU helper libraries (NVIDIA denoiser, DLSS and Streamline, OpenVINO) from its own install folder at launch. For a requested film benchmark it starts its own executable in a local Windows job. This lets the viewer cancel an unresponsive graphics worker. Saving is local.
 ```
 
 ## Device capability: webcam

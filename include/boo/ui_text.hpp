@@ -28,7 +28,7 @@ enum class UiLabel : uint32_t {
     LiveCamera, OstSynth, OstCustom, StateScript, StateWarming, StateIdle,
     PathTracing, Unavailable, Low, Medium, High, Quality, Balanced, Performance,
     RealTimeGraphics, Automatic, Enabled, Boost, RayReconstruction, FrameGeneration, RenderFps, DisplayFps, DlssUpscaling,
-    PlayAgain,
+    PlayAgain, RunBenchmark,
     Count
 };
 
@@ -45,7 +45,7 @@ const UiLabelSpec& uiLabelSpec(UiLabel label) noexcept;
 struct UiTextAtlasLayout {
     static constexpr uint32_t kWidth = 3072;
     static constexpr uint32_t kLabelCols = 4;
-    static constexpr uint32_t kLabelRows = 18;
+    static constexpr uint32_t kLabelRows = 19;
     static constexpr uint32_t kLabelCellW = 160;   // x uiScale
     static constexpr uint32_t kLabelCellH = 20;    // x uiScale
     static constexpr uint32_t kMaxUiScale = 3;

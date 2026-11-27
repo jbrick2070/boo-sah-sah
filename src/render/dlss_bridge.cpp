@@ -26,6 +26,11 @@ using Microsoft::WRL::ComPtr;
 
 struct DlssBridge::Impl {
     RendererFeatureState status = RendererFeatureState::Unavailable;
+#ifdef BOO_HAS_DLSS
+    BenchmarkReason availability = BenchmarkReason::DlssInitFailed;
+#else
+    BenchmarkReason availability = BenchmarkReason::RequiresDlss;
+#endif
     RendererFeatureState rrStatus = RendererFeatureState::Unavailable;
     bool configuredRR = false;
     ComPtr<ID3D12Resource> inputColor, inputDistance;
@@ -63,6 +68,7 @@ struct DlssBridge::Impl {
 
 DlssBridge::DlssBridge() : impl_(std::make_unique<Impl>()) {}
 DlssBridge::~DlssBridge() = default;
+BenchmarkReason DlssBridge::benchmarkAvailability() const noexcept { return impl_->availability; }
 RendererFeatureState DlssBridge::state() const noexcept { return impl_->status; }
 RendererFeatureState DlssBridge::rayReconstructionState() const noexcept { return impl_->rrStatus; }
 bool DlssBridge::renderNoisyRays() const noexcept { return impl_->configuredRR; }
@@ -144,7 +150,10 @@ void shutdownNgxDevice(ID3D12Device* device) noexcept {
 #ifdef BOO_HAS_DLSS
 bool DlssBridge::Impl::probe() {
     // NVIDIA's runtime serves NVIDIA graphics only: elsewhere it is not started and creates no cache folder.
-    if (context->adapterVendorId() != 0x10DE) return false;
+    if (context->adapterVendorId() != 0x10DE) {
+        availability = BenchmarkReason::UnsupportedDevice;
+        return false;
+    }
     std::array<wchar_t, 32768> exe{};
     if (!GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()))) return false;
     const auto folder = std::filesystem::path(exe.data()).parent_path() / L"dlss";
@@ -153,9 +162,13 @@ bool DlssBridge::Impl::probe() {
     int available = 0;
     const auto query = NVSDK_NGX_D3D12_GetCapabilityParameters(&params);
     if (NVSDK_NGX_FAILED(query) || !params ||
-        NVSDK_NGX_FAILED(params->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available)) || !available) {
+        NVSDK_NGX_FAILED(params->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available))) {
         BOO_LOG_INFO("DLSS","Driver reported no Super Resolution capability; NGX parameter result " +
             std::to_string(static_cast<uint32_t>(query)));
+        return false;
+    }
+    if (!available) {
+        availability = BenchmarkReason::UnsupportedDevice;
         return false;
     }
 #ifdef BOO_HAS_DLSS_RR
@@ -163,7 +176,10 @@ bool DlssBridge::Impl::probe() {
     supportsRR = std::filesystem::is_regular_file(folder / L"nvngx_dlssd.dll", error) &&
         NVSDK_NGX_SUCCEED(params->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &rrAvailable)) && rrAvailable != 0;
 #endif
-    if (makeResolvePipeline()) return true;
+    if (makeResolvePipeline()) {
+        availability = BenchmarkReason::None;
+        return true;
+    }
     BOO_LOG_WARN("DLSS","Failed to create the output reconstruction pipeline");
     return false;
 }

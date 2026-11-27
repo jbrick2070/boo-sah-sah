@@ -1,5 +1,6 @@
 #include "boo/window.hpp"
 #include "boo/localization.hpp"
+#include "boo/results_text.hpp"
 #include "world_portal.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,6 +22,7 @@ namespace {
 constexpr const wchar_t* kWindowClassName = L"BooSahSahGlassOrchidWindowClass";
 constexpr UINT kMapAttributionCommand = 0x1D00;
 constexpr UINT kWorldPortalCommand = 0x1D10;
+constexpr UINT kFilmBenchmarkCommand = 0x1D20;
 constexpr const wchar_t* kMapCredit = L"© OpenStreetMap contributors";
 
 std::wstring utf8ToWide(const std::string& utf8) {
@@ -69,6 +71,10 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0u) == kFilmBenchmarkCommand) {
+                self->pushCommandFromWndProc(TransportCommand::RunFilmBenchmark);
+                return 0;
+            }
             if ((wParam & 0xFFF0u) == kWorldPortalCommand && worldPortalDialogAvailable()) {
                 openWorldPortalDialog(hwnd);
                 return 0;
@@ -217,6 +223,10 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case VK_TAB:
                     case VK_F1:     self->pushCommandFromWndProc(TransportCommand::ToggleOverlay); return 0;
                     case 'B':
+                        if (GetKeyState(VK_CONTROL) & 0x8000) {
+                            self->pushCommandFromWndProc(TransportCommand::RunFilmBenchmark);
+                            return 0;
+                        }
                         self->pushCommandFromWndProc((GetKeyState(VK_SHIFT) & 0x8000) ? TransportCommand::ToggleBirdCam
                                                                                       : TransportCommand::TriggerBenchSweep);
                         return 0;
@@ -348,6 +358,8 @@ bool AppWindow::create(
     }
     if (HMENU systemMenu = GetSystemMenu(hwnd_, FALSE)) {
         AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+        const std::wstring benchmarkLabel = std::wstring(resultText(ResultText::Run)) + L"…\tCtrl+B";
+        AppendMenuW(systemMenu, MF_STRING, kFilmBenchmarkCommand, benchmarkLabel.c_str());
         if (worldPortalDialogAvailable())
             AppendMenuW(systemMenu, MF_STRING, kWorldPortalCommand, L"Visit a Demo-Verse &world...\tCtrl+L");
         AppendMenuW(systemMenu, MF_STRING, kMapAttributionCommand, L"Taipei 101 · 臺北 · © OpenStreetMap…");

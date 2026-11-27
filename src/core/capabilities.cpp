@@ -21,7 +21,9 @@
 #include <mftransform.h>
 
 #include <intrin.h>
+#include <charconv>
 #include <cstring>
+#include <string_view>
 
 namespace boo {
 
@@ -33,8 +35,9 @@ std::string wideToUtf8(const wchar_t* wstr) {
     if (!wstr || !*wstr) return {};
     const int needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
     if (needed <= 1) return {};
-    std::string out(static_cast<size_t>(needed - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, out.data(), needed, nullptr, nullptr);
+    std::string out(static_cast<size_t>(needed), '\0');
+    if (!WideCharToMultiByte(CP_UTF8, 0, wstr, -1, out.data(), needed, nullptr, nullptr)) return {};
+    out.pop_back();
     return out;
 }
 
@@ -54,6 +57,28 @@ std::string queryCpuBrandString() {
     if (first == std::string::npos) return "Unknown x64 Processor";
     const size_t last = s.find_last_not_of(' ');
     return s.substr(first, last - first + 1);
+}
+
+void probeProcessorIdentity(SystemCapabilities& caps) {
+    caps.cpuBrand = queryCpuBrandString();
+    int leaf[4]{};
+    __cpuid(leaf, 0);
+    const bool hasSignature = leaf[0] >= 1;
+    char vendor[13]{};
+    std::memcpy(vendor, leaf + 1, 4);
+    std::memcpy(vendor + 4, leaf + 3, 4);
+    std::memcpy(vendor + 8, leaf + 2, 4);
+    const std::string_view manufacturer(vendor);
+    if (manufacturer == "GenuineIntel") caps.cpuVendor = ResultsCpuModel::Intel;
+    else if (manufacturer == "AuthenticAMD") caps.cpuVendor = ResultsCpuModel::AMD;
+    if (!hasSignature) return;
+    __cpuid(leaf, 1);
+    const auto signature = static_cast<unsigned>(leaf[0]);
+    const unsigned baseFamily = (signature >> 8) & 15;
+    const unsigned baseModel = (signature >> 4) & 15;
+    const bool extendedModel = baseFamily == 6 || baseFamily == 15;
+    caps.cpuFamily = static_cast<uint16_t>(baseFamily + (baseFamily == 15 ? (signature >> 20) & 255 : 0));
+    caps.cpuModel = static_cast<uint16_t>(baseModel + (extendedModel ? (signature >> 12) & 0xf0 : 0));
 }
 
 std::string queryWindowsVersion() {
@@ -118,27 +143,60 @@ const char* dxrTierToString(D3D12_RAYTRACING_TIER tier) noexcept {
     return "NotSupported";
 }
 
-void enumerateComputeAccelerators(std::vector<ComputeAcceleratorDevice>& outDevices) {
+void readAcceleratorChip(ComputeAcceleratorDevice& dev) {
+    const std::string_view id = dev.instanceId;
+    if (!id.starts_with("PCI\\VEN_") || id.size() < 21 || id.substr(12, 5) != "&DEV_") return;
+    const auto hex4 = [](std::string_view digits) -> uint16_t {
+        uint16_t value = 0;
+        const auto end = digits.data() + digits.size();
+        const auto parsed = std::from_chars(digits.data(), end, value, 16);
+        return parsed.ec == std::errc{} && parsed.ptr == end ? value : 0;
+    };
+    dev.vendorId = hex4(id.substr(8, 4));
+    dev.deviceId = hex4(id.substr(17, 4));
+}
+
+ResultsNpuModel publicNpuModel(const ComputeAcceleratorDevice& dev, DEVINST node) {
+    // Only the public PCI vendor/chip prefix and the driver-supplied description affect this enum.
+    // A friendly name is configurable; neither it nor the per-device instance suffix goes on the card.
+    if (dev.vendorId == 0x8086 && dev.deviceId == 0xad1d) return ResultsNpuModel::IntelAiBoost;
+    DEVPROPTYPE type = 0;
+    wchar_t model[256]{};
+    ULONG bytes = sizeof(model);
+    if (CM_Get_DevNode_PropertyW(node, &DEVPKEY_Device_DeviceDesc, &type,
+                                 reinterpret_cast<PBYTE>(model), &bytes, 0) != CR_SUCCESS ||
+        type != DEVPROP_TYPE_STRING) return ResultsNpuModel::Unknown;
+    const std::wstring_view label(model);
+    if (dev.vendorId == 0x8086 && (label == L"Intel(R) AI Boost" || label == L"Intel AI Boost"))
+        return ResultsNpuModel::IntelAiBoost;
+    if (dev.vendorId == 0x1022 && (label == L"AMD IPU Device" || label == L"AMD Ryzen AI" ||
+        label == L"AMD(R) Ryzen(TM) AI" || label == L"AMD NPU Device"))
+        return ResultsNpuModel::AmdRyzenAI;
+    return ResultsNpuModel::Unknown;
+}
+
+bool enumerateComputeAccelerators(std::vector<ComputeAcceleratorDevice>& outDevices) {
     // Windows ComputeAccelerator setup class GUID: {f01a9d53-3ff6-48d2-9f97-c8a7004be10c}
     const wchar_t* kClassGuidStr = L"{f01a9d53-3ff6-48d2-9f97-c8a7004be10c}";
     ULONG listChars = 0;
-    if (CM_Get_Device_ID_List_SizeW(&listChars, kClassGuidStr, CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT) != CR_SUCCESS ||
-        listChars <= 1) {
-        return;
-    }
+    if (CM_Get_Device_ID_List_SizeW(&listChars, kClassGuidStr, CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT) != CR_SUCCESS)
+        return false;
+    if (listChars <= 1) return true;
 
     std::vector<wchar_t> buffer(listChars, L'\0');
     if (CM_Get_Device_ID_ListW(kClassGuidStr, buffer.data(), listChars, CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT) != CR_SUCCESS) {
-        return;
+        return false;
     }
 
     const wchar_t* cur = buffer.data();
     while (*cur) {
         ComputeAcceleratorDevice dev{};
         dev.instanceId = wideToUtf8(cur);
+        readAcceleratorChip(dev);
 
         DEVINST devInst = 0;
         if (CM_Locate_DevNodeW(&devInst, const_cast<DEVINSTID_W>(cur), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) {
+            dev.cardModel = publicNpuModel(dev, devInst);
             ULONG status = 0;
             ULONG problem = 0;
             if (CM_Get_DevNode_Status(&status, &problem, devInst, 0) == CR_SUCCESS) {
@@ -158,6 +216,7 @@ void enumerateComputeAccelerators(std::vector<ComputeAcceleratorDevice>& outDevi
         outDevices.push_back(std::move(dev));
         cur += std::wcslen(cur) + 1;
     }
+    return true;
 }
 
 void probeDynamicCudaDriver(SystemCapabilities& caps, const AdapterInfo* selectedAdapter) {
@@ -316,10 +375,42 @@ void probeOptionalNvencAndHardwareMft(SystemCapabilities& caps, const AdapterInf
 
 } // namespace
 
+ResultsHostHardware resultsHostHardware(const SystemCapabilities& caps) noexcept {
+    ResultsHostHardware host;
+    host.cpu = caps.cpuVendor;
+    host.cpuFamily = caps.cpuFamily;
+    host.cpuModel = caps.cpuModel;
+    const std::string_view cpu = caps.cpuBrand;
+    if (caps.cpuVendor == ResultsCpuModel::Intel && cpu == "Intel(R) Core(TM) Ultra 9 275HX")
+        host.cpu = ResultsCpuModel::IntelCoreUltra9_275HX;
+    else if (caps.cpuVendor == ResultsCpuModel::Intel && cpu == "13th Gen Intel(R) Core(TM) i9-13900H")
+        host.cpu = ResultsCpuModel::IntelCoreI9_13900H;
+    for (const auto& accelerator : caps.npuDevices) {
+        if (!host.acceleratorVendor && accelerator.vendorId && accelerator.deviceId) {
+            host.acceleratorVendor = accelerator.vendorId;
+            host.acceleratorDevice = accelerator.deviceId;
+        }
+        if (accelerator.cardModel == ResultsNpuModel::Unknown) continue;
+        host.npu = accelerator.cardModel;
+        host.acceleratorVendor = accelerator.vendorId;
+        host.acceleratorDevice = accelerator.deviceId;
+        return host;
+    }
+    if (caps.acceleratorEnumerationSucceeded && caps.npuDevices.empty()) host.npu = ResultsNpuModel::NoneDetected;
+    return host;
+}
+
+ResultsHostHardware probeResultsHostHardware() {
+    SystemCapabilities caps;
+    probeProcessorIdentity(caps);
+    caps.acceleratorEnumerationSucceeded = enumerateComputeAccelerators(caps.npuDevices);
+    return resultsHostHardware(caps);
+}
+
 SystemCapabilities probeSystemCapabilities(const ProbeFlags& flags) {
     SystemCapabilities caps{};
     caps.osVersion = queryWindowsVersion();
-    caps.cpuBrand  = queryCpuBrandString();
+    probeProcessorIdentity(caps);
 
     SYSTEM_INFO sysInfo{};
     GetSystemInfo(&sysInfo);
@@ -431,7 +522,7 @@ SystemCapabilities probeSystemCapabilities(const ProbeFlags& flags) {
         probeDynamicCudaDriver(caps, sel);
     }
     if (!flags.disableNPU) {
-        enumerateComputeAccelerators(caps.npuDevices);
+        caps.acceleratorEnumerationSucceeded = enumerateComputeAccelerators(caps.npuDevices);
         probeDynamicOpenVinoRuntime(caps);
     }
     // Section 3.5: Set NVENC state = not_loaded unless Signal Hijack is explicitly enabled

@@ -326,31 +326,31 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSUnpackNrdReblur -DBOO_NRD_UNPACK=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 
-set(BOO_DLSS_SHADER_OUTPUTS)
-function(boo_dlss_shader name source profile entry)
+set(BOO_VARIANT_SHADER_OUTPUTS)
+function(boo_variant_shader name source profile entry)
     set(output "${BOO_OUT_SHADER_DIR}/${name}.cso")
     add_custom_command(OUTPUT "${output}"
         COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ${profile} -E ${entry} ${ARGN} -Ges -WX -O3
             "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" -Fo "${output}"
         DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" VERBATIM)
-    set(BOO_DLSS_SHADER_OUTPUTS ${BOO_DLSS_SHADER_OUTPUTS} "${output}" PARENT_SCOPE)
+    set(BOO_VARIANT_SHADER_OUTPUTS ${BOO_VARIANT_SHADER_OUTPUTS} "${output}" PARENT_SCOPE)
 endfunction()
-boo_dlss_shader(dlss_resolve dlss_resolve cs_6_0 CSResolve)
-boo_dlss_shader(m2_motion_vs m2_mesh vs_6_0 VSSceneMotion)
-boo_dlss_shader(m2_motion_ps m2_mesh ps_6_0 PSSceneMotion)
-boo_dlss_shader(m2_motion_cutout_ps m2_mesh ps_6_0 PSSceneMotion -DBOO_ALPHA_CUTOUT=1)
-boo_dlss_shader(m2_sky_motion_ps m2_mesh ps_6_0 PSSkyMotion)
-boo_dlss_shader(m1_present_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
-boo_dlss_shader(m1_present_clean_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS -DBOO_PRESENT_CLEAN)
+boo_variant_shader(dlss_resolve dlss_resolve cs_6_0 CSResolve)
+boo_variant_shader(m2_motion_vs m2_mesh vs_6_0 VSSceneMotion)
+boo_variant_shader(m2_motion_ps m2_mesh ps_6_0 PSSceneMotion)
+boo_variant_shader(m2_motion_cutout_ps m2_mesh ps_6_0 PSSceneMotion -DBOO_ALPHA_CUTOUT=1)
+boo_variant_shader(m2_sky_motion_ps m2_mesh ps_6_0 PSSkyMotion)
+boo_variant_shader(m1_present_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
+boo_variant_shader(m1_present_clean_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS -DBOO_PRESENT_CLEAN)
 # Neural rendering suite (src/render/neural_rendering.cpp)
-boo_dlss_shader(neural_clear_cs neural_rendering cs_6_0 CSClearStats)
-boo_dlss_shader(neural_ntc_decode_cs neural_rendering cs_6_0 CSNtcDecode)
-boo_dlss_shader(neural_nrc_init_cs neural_rendering cs_6_0 CSNrcInit)
-boo_dlss_shader(neural_nrc_train_cs neural_rendering cs_6_0 CSNrcTrain)
-boo_dlss_shader(neural_nrc_update_cs neural_rendering cs_6_0 CSNrcUpdate)
-boo_dlss_shader(neural_nrc_infer_cs neural_rendering cs_6_0 CSNrcInfer)
-boo_dlss_shader(neural_composite_cs neural_rendering cs_6_0 CSNeuralComposite)
-boo_dlss_shader(neural_nrc_pack_cs neural_rendering cs_6_0 CSNrcPackF16)
+boo_variant_shader(neural_clear_cs neural_rendering cs_6_0 CSClearStats)
+boo_variant_shader(neural_ntc_decode_cs neural_rendering cs_6_0 CSNtcDecode)
+boo_variant_shader(neural_nrc_init_cs neural_rendering cs_6_0 CSNrcInit)
+boo_variant_shader(neural_nrc_train_cs neural_rendering cs_6_0 CSNrcTrain)
+boo_variant_shader(neural_nrc_update_cs neural_rendering cs_6_0 CSNrcUpdate)
+boo_variant_shader(neural_nrc_infer_cs neural_rendering cs_6_0 CSNrcInfer)
+boo_variant_shader(neural_composite_cs neural_rendering cs_6_0 CSNeuralComposite)
+boo_variant_shader(neural_nrc_pack_cs neural_rendering cs_6_0 CSNrcPackF16)
 
 # Tensor-core neural rendering: D3D12 Agility SDK 1.721 preview + DXC preview (Shader Model 6.10 LinAlg).
 # Test-rig builds only: the preview runtime needs Windows Developer Mode and is not allowed in Store packages.
@@ -372,7 +372,7 @@ if(ENABLE_LINALG_PREVIEW)
                 COMMAND "${BOO_DXC_PREVIEW}/bin/x64/dxc.exe" -nologo -I "${BOO_DXC_PREVIEW}/inc/hlsl" -T cs_6_10 -enable-16bit-types
                     -DBOO_NEURAL_LINALG=1 -E ${tc_entry} -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/neural_rendering.hlsl" -Fo "${tc_out}"
                 DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/neural_rendering.hlsl" VERBATIM)
-            list(APPEND BOO_DLSS_SHADER_OUTPUTS "${tc_out}")
+            list(APPEND BOO_VARIANT_SHADER_OUTPUTS "${tc_out}")
         endforeach()
     else()
         message(WARNING "ENABLE_LINALG_PREVIEW is ON but the preview SDKs are missing; run tools/fetch_neural_sdk.py")
@@ -397,13 +397,13 @@ if(ENABLE_PHYSX)
             COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSSmokeMarch -I "${BOO_PHYSX_SDK}/flow/include/nvflow/nanovdb"
                 -Ges -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/flow_smoke.hlsl" -Fo "${flow_cso}"
             DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/flow_smoke.hlsl" VERBATIM)
-        list(APPEND BOO_DLSS_SHADER_OUTPUTS "${flow_cso}")
+        list(APPEND BOO_VARIANT_SHADER_OUTPUTS "${flow_cso}")
     else()
         message(WARNING "ENABLE_PHYSX is ON but NVIDIA Flow is not built; run tools/fetch_physx_sdk.py")
     endif()
 endif()
 
-add_custom_target(boo_shaders DEPENDS ${BOO_DLSS_SHADER_OUTPUTS}
+add_custom_target(boo_shaders DEPENDS ${BOO_VARIANT_SHADER_OUTPUTS}
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
@@ -505,6 +505,13 @@ add_library(boo_core STATIC
     src/app/world_portal.cpp
     src/app/localization.cpp
     src/app/diagnostics.cpp
+    src/app/results_worker.cpp
+    src/app/results_text.cpp
+    src/app/results_dialog.cpp
+    src/app/results_card.cpp
+    src/app/results_reference.cpp
+    src/app/results_export.cpp
+    src/bench/results_benchmark.cpp
     "${M0_FALLBACK_VS_HPP}"
     "${M0_FALLBACK_PS_HPP}"
 )
@@ -513,6 +520,7 @@ target_include_directories(boo_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
     "${BOO_GEN_SHADER_DIR}"
 )
+target_compile_definitions(boo_core PRIVATE BOO_RELEASE_VERSION="${PROJECT_VERSION}")
 boo_apply_compiler_flags(boo_core)
 
 set(BOO_STREAMLINE_SDK "${CMAKE_SOURCE_DIR}/build/dependencies/nvidia_streamline" CACHE PATH "NVIDIA Streamline x64 release")
@@ -595,6 +603,7 @@ endif()
 # Link strictly against inbox Windows 11 system libraries
 target_link_libraries(boo_core PUBLIC
     bcrypt
+    comctl32
     d3d12
     dxgi
     dxguid
@@ -633,7 +642,7 @@ add_custom_target(boo_stage_assets ALL
 )
 
 # 1. Main Milestone M1 Demoscene Application (Native WIN32 GUI subsystem — zero console window)
-add_executable(boo_sah_sah WIN32 src/app/main.cpp src/app/world_portal.rc assets/icons/app_icon.rc)
+add_executable(boo_sah_sah WIN32 src/app/main.cpp src/app/results_dialog.rc src/app/world_portal.rc assets/icons/app_icon.rc)
 if(BOO_HAS_LINALG)
     target_compile_definitions(boo_sah_sah PRIVATE BOO_HAS_LINALG=1) # exports D3D12SDKVersion / D3D12SDKPath
 endif()
@@ -674,6 +683,44 @@ boo_apply_compiler_flags(boo_installer_stub)
 # 4. Unit & Hardware Integration Tests (CTest)
 if(BOO_BUILD_TESTS)
     enable_testing()
+    target_sources(boo_sah_sah PRIVATE tests/verify_film_benchmark.cpp)
+    target_compile_definitions(boo_sah_sah PRIVATE BOO_VERIFY_FILM_BENCHMARK=1)
+    add_executable(boo_results_card_test tests/results_card_tests.cpp)
+    target_link_libraries(boo_results_card_test PRIVATE boo_core)
+    boo_apply_compiler_flags(boo_results_card_test)
+    add_test(NAME BooResultsCard COMMAND boo_results_card_test)
+    add_executable(boo_results_dialog_test tests/integration/results_dialog_test.cpp)
+    target_link_libraries(boo_results_dialog_test PRIVATE boo_core user32 oleacc oleaut32 ole32)
+    boo_apply_compiler_flags(boo_results_dialog_test)
+    add_executable(boo_results_reset_fixture tests/integration/results_reset_fixture.cpp src/app/results_dialog.rc)
+    target_link_libraries(boo_results_reset_fixture PRIVATE boo_core)
+    boo_apply_compiler_flags(boo_results_reset_fixture)
+    add_test(NAME BooResultsDialog COMMAND boo_results_dialog_test "$<TARGET_FILE:boo_sah_sah>" "$<TARGET_FILE:boo_results_reset_fixture>")
+    set_tests_properties(BooResultsDialog PROPERTIES LABELS "integration;native-ui" TIMEOUT 85 RUN_SERIAL TRUE)
+
+    add_executable(boo_worker_isolation_test tests/worker_isolation/worker_isolation.cpp)
+    boo_apply_compiler_flags(boo_worker_isolation_test)
+    add_test(NAME BooWorkerIsolation COMMAND boo_worker_isolation_test)
+    set_tests_properties(BooWorkerIsolation PROPERTIES LABELS "unit;isolation" TIMEOUT 10)
+
+    add_executable(boo_results_worker_test tests/worker_isolation/results_worker_test.cpp src/app/results_worker.cpp)
+    target_compile_definitions(boo_results_worker_test PRIVATE BOO_RESULTS_CONTAINMENT_TEST=1)
+    target_include_directories(boo_results_worker_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    boo_apply_compiler_flags(boo_results_worker_test)
+    add_test(NAME BooResultsWorker COMMAND boo_results_worker_test --no-activate --mute)
+    set_tests_properties(BooResultsWorker PROPERTIES LABELS "unit;isolation" TIMEOUT 75)
+
+    foreach(mode warp wrong-adapter low-budget)
+        add_test(NAME BooFilmBenchmark-${mode}
+            COMMAND boo_sah_sah --verify-film-benchmark ${mode} --no-activate --mute)
+        set_tests_properties(BooFilmBenchmark-${mode} PROPERTIES LABELS "integration;isolation" TIMEOUT 60)
+    endforeach()
+
+    add_executable(boo_results_model_tests tests/results_model_tests.cpp)
+    target_include_directories(boo_results_model_tests PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    boo_apply_compiler_flags(boo_results_model_tests)
+    add_test(NAME BooResultsModelTests COMMAND boo_results_model_tests)
+    set_tests_properties(BooResultsModelTests PROPERTIES LABELS "unit" TIMEOUT 10)
 
     add_executable(boo_unit_tests tests/unit/unit_main.cpp)
     target_link_libraries(boo_unit_tests PRIVATE boo_core)

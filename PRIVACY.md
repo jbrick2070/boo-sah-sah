@@ -29,6 +29,8 @@ These stay on your PC. None of them is sent to the publisher or to anyone else.
 - **Texture sharing (Spout)**, when you switch it on, makes the film picture available to other programs running on the same PC.
 - **Your own music or video file**, if you choose one, is read from your PC to play in the film. It is not copied or uploaded.
 - **Diagnostic logs and benchmark reports** are written to your PC only if you ask for them. They describe your graphics hardware and the app's performance.
+- **Run benchmark** measures a short film scene on your PC. **Save picture and text** writes the same card to two local files. They contain the app build and test settings, identified CPU, GPU and NPU models or public chip codes, display driver, system and app architecture, power source, GPU timings, outcome and the work each processor performed. You can delete the results folder at any time.
+- **Open report page** asks before opening a public GitHub issue form in your browser. You decide what to attach and whether to submit it. Running the test and saving the files work offline. [Benchmark privacy in all interface languages](docs/BENCHMARK_PRIVACY.md)
 
 ## Opening a Demo-Verse world
 

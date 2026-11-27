@@ -71,6 +71,17 @@ bool testCapabilityProbeHonestyAndPermutations() {
     BOO_CHECK(!caps.osVersion.empty());
     BOO_CHECK(!caps.cpuBrand.empty());
     BOO_CHECK(caps.d3d12Available);
+    const auto cached = resultsHostHardware(caps);
+    const auto headless = probeResultsHostHardware();
+    BOO_CHECK(cached.cpu == headless.cpu && cached.cpuFamily == headless.cpuFamily && cached.cpuModel == headless.cpuModel);
+    BOO_CHECK(cached.npu == headless.npu && cached.acceleratorVendor == headless.acceleratorVendor &&
+              cached.acceleratorDevice == headless.acceleratorDevice);
+    SystemCapabilities missing;
+    BOO_CHECK(resultsHostHardware(missing).npu == ResultsNpuModel::Unknown);
+    missing.acceleratorEnumerationSucceeded = true;
+    BOO_CHECK(resultsHostHardware(missing).npu == ResultsNpuModel::NoneDetected);
+    missing.npuDevices.emplace_back();
+    BOO_CHECK(resultsHostHardware(missing).npu == ResultsNpuModel::Unknown);
 
     for (size_t i = 0; i < kEngineKindCount; ++i) {
         const auto& r = caps.engines[i];
@@ -86,6 +97,7 @@ bool testCapabilityProbeHonestyAndPermutations() {
     allDisabled.disableNPU = true;
     allDisabled.disableNVENC = true;
     const auto disCaps = probeSystemCapabilities(allDisabled);
+    BOO_CHECK(resultsHostHardware(disCaps).npu == ResultsNpuModel::Unknown);
     for (size_t i = 0; i < kEngineKindCount; ++i) {
         BOO_CHECK(disCaps.engines[i].diagnosticCode == "DISABLED_BY_FLAG");
         BOO_CHECK(disCaps.engines[i].status == BackendStatus::Substituted);
