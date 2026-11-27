@@ -1576,6 +1576,27 @@ struct InteractiveExploreController {
     }
 };
 
+// Runs slow graphics work on a thread of its own while this thread keeps answering the window. A close
+// asked for meanwhile hides the window; it is destroyed after the work is done.
+template <class Work> void runKeepingWindowAlive(boo::AppWindow& window, Work&& work) {
+    std::exception_ptr failure;
+    std::atomic<bool> done{false};
+    window.setBusy(true);
+    std::thread worker([&] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        try { work(); } catch (...) { failure = std::current_exception(); }
+        if (SUCCEEDED(com)) CoUninitialize();
+        done.store(true);
+    });
+    while (!done.load()) {
+        (void)window.pumpMessages();
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+    }
+    worker.join();
+    window.setBusy(false);
+    if (failure) std::rethrow_exception(failure);
+}
+
 } // namespace
 
 // Bird camera: follows the flock from above and behind its centre, framing all of it, and turns
@@ -2059,7 +2080,7 @@ int main(int argc, char** argv) {
     }
     // An AMD card hung on the ray-traced city (Radeon Pro V710: driver timeout, tested on 1.1.13): until ray
     // tracing is proven there, AMD graphics start with raster lighting. --preset still asks for everything.
-    if (!d3d.integratedAdapter() && d3d.adapterVendorId() == 0x1002 && !settings.presetFromCommandLine) {
+    if (!d3d.integratedAdapter() && d3d.adapterVendorId() == 0x1002 && (!settings.presetFromCommandLine || settings.disableRT)) {
         d3d.setRayTracingAllowed(false);
         BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting.");
     }
@@ -2128,6 +2149,9 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> latestMediaNv12;
     if (window.closeRequested()) {
         // Closed while loading: open no camera or file for a film nobody will see.
+    } else if (settings.enableCameraInput && (!liveM1Ptr || orchestrator.isUsingFallbackEffect())) {
+        settings.enableCameraInput = false;
+        BOO_LOG_WARN("Media", "Camera left off: its LIVE CAMERA label cannot be shown here.");
     } else if (settings.enableCameraInput) {
         if (mediaIngest.openLiveCamera(settings.injectMediaFail)) {
             settings.enableSignalHijack = true;
@@ -2408,6 +2432,16 @@ int main(int argc, char** argv) {
         }
     };
 
+    // A camera runs only while its red LIVE CAMERA label can be drawn: by the film renderer.
+    const auto cameraLabelAvailable = [&] { return liveM1Ptr && !orchestrator.isUsingFallbackEffect(); };
+    const auto stopCamera = [&](const char* why) {
+        if (!mediaIngest.isLiveCameraActive()) return;
+        mediaIngest.shutdown();
+        settings.enableCameraInput = false;
+        if (liveM1Ptr) liveM1Ptr->clearExternalNv12Frame();
+        BOO_LOG_INFO("Media", std::string("LIVE CAMERA STOPPED: ") + why);
+    };
+
     // One recovery policy covers loss during resize, fence waits, resource sync,
     // and Present. The 48 kHz transport is deliberately never stopped or rebased.
     auto recoverGraphics = [&](const std::string& cause) {
@@ -2418,6 +2452,7 @@ int main(int argc, char** argv) {
         // from inside pipeline builds nor leave the window in its loading state.
         StartupProgress::instance().cancel();
         window.hideLoading();
+        stopCamera("graphics are being restarted.");
         benchCancel.store(true, std::memory_order_release);
         if (benchThread.joinable()) benchThread.join();
         benchCompleted.store(false, std::memory_order_release);
@@ -2425,6 +2460,13 @@ int main(int argc, char** argv) {
         retiredPresentStalls += d3d.presentStallCount();
         retiredDebugErrors += d3d.debugErrorCount();
         retiredDebugWarnings += d3d.debugWarningCount();
+        const HWND recoveryWindow = window.hwnd();
+        const uint32_t recoveryW = window.clientWidth(), recoveryH = window.clientHeight();
+        std::string recoveryError = mayRecover ? std::string{} : "The single graphics recovery attempt was already used.";
+        bool rebuilt = false;
+        // Releasing a lost device and building a new one can take many seconds: another thread does it while
+        // this one keeps answering the window.
+        runKeepingWindowAlive(window, [&] {
         // Retire resources before release on non-removal failures as well.
         d3d.retireGpuForShutdown();
         // Whatever the card, come back without ray tracing: it is the heaviest work and the likeliest cause.
@@ -2433,11 +2475,10 @@ int main(int argc, char** argv) {
         liveM1Ptr = nullptr;
         orchestrator.shutdown();
         d3d.shutdown();
-        std::string recoveryError = mayRecover ? std::string{} : "The single graphics recovery attempt was already used.";
         if (mayRecover) {
             BOO_LOG_WARN("D3D12", "Attempting single D3D12 device recovery with bounded fence waits...");
             const auto spec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
-            if (d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(),
+            if (d3d.initialize(recoveryWindow, recoveryW, recoveryH,
                                settings.forceWarp, settings.enableD3DDebug, &recoveryError)) {
                 liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, spec, orchestrator);
                 const auto result = orchestrator.initializeEffects(false);
@@ -2454,6 +2495,7 @@ int main(int argc, char** argv) {
                     BOO_LOG_INFO("D3D12", "Device recovery completed; sample timeline preserved.");
                     ++deviceRecoverySuccesses;
                     debugLayerWasActive = debugLayerWasActive && d3d.debugLayerActive();
+                    rebuilt = true;
                     return;
                 }
                 if (recoveryError.empty()) recoveryError = "Neither primary nor safe graphics could initialize.";
@@ -2463,6 +2505,8 @@ int main(int argc, char** argv) {
         liveM1Ptr = nullptr;
         orchestrator.shutdown();
         d3d.shutdown();
+        });
+        if (rebuilt) return;
         graphicsUnavailable = true;
         runtimeExitCode = 1;
         BOO_LOG_ERROR("D3D12", "Graphics recovery unsuccessful: " + recoveryError);
@@ -2930,7 +2974,9 @@ int main(int argc, char** argv) {
                     }
                     break;
                 case TransportCommand::ToggleCameraRuntime:
-                    if (mediaIngest.isLiveCameraActive()) {
+                    if (!mediaIngest.isLiveCameraActive() && !cameraLabelAvailable()) {
+                        BOO_LOG_WARN("Media", "Camera left off: its LIVE CAMERA label cannot be shown here.");
+                    } else if (mediaIngest.isLiveCameraActive()) {
                         mediaIngest.shutdown();
                         settings.enableCameraInput = false;
                         if (liveM1Ptr) liveM1Ptr->clearExternalNv12Frame();
@@ -3651,6 +3697,7 @@ int main(int argc, char** argv) {
             hud.workoutState = workoutGovernor.atFloor() ? 2u
                 : (workoutGovernor.releasing() || workoutGovernor.released() < workoutBirdCount(settings.gpuWorkout)) ? 1u : 0u;
             uint64_t mediaFrameSeq = 0;
+            if (!cameraLabelAvailable()) stopCamera("its label can no longer be shown.");
             if (mediaIngest.isActive() && mediaIngest.copyLatestNv12Frame(latestMediaNv12, mediaFrameSeq)) {
                 if (liveM1Ptr) {
                     liveM1Ptr->setExternalNv12Frame(latestMediaNv12.data(), latestMediaNv12.size(), mediaFrameSeq);

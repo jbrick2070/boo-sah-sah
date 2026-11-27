@@ -495,7 +495,7 @@ bool AppWindow::paintGraphicsFailureFromWndProc() {
 }
 
 bool AppWindow::closeWhileLoadingFromWndProc() noexcept {
-    if (!loading_) return false;
+    if (!loading_ && !busy_) return false;
     // The loader thread still draws into this window: take it off the screen now, destroy it later.
     closeRequested_ = true;
     hide();

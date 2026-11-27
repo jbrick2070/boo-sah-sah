@@ -15,6 +15,7 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 - Optional graphics abilities are checked before use. An adapter without Shader Model 6.0, or a graphics start that fails, ends with the unsupported-graphics message. The neural suite needs compute reads of 16-bit float and 8-bit images, and the ray-traced city needs wave operations; where the suite is not built, its controls stay off and the log says why.
 - The unit tests find the built shaders when CTest runs them. The privacy policy names the files the app keeps; the app's own captures never include the camera.
 - Closing during loading starts nothing more (no sound, camera or benchmark). A benchmark after a light start runs without ray tracing. NVIDIA's runtime starts only on NVIDIA graphics, on the loading thread. A ray-traced pipeline the driver cannot build now costs ray tracing, not the city. If no picture at all can be built, a message says so.
+- Graphics recovery runs on its own thread, so the window keeps answering. The camera runs only while its LIVE CAMERA label can be shown. The listing says ray tracing needs a supported card.
 - AMD graphics start with raster lighting: on a Radeon Pro V710 the ray-traced city hung the card and the app exited. After any graphics reset the app now recovers without ray tracing.
 
 ## 1.1.12.0 — No wait on the first start

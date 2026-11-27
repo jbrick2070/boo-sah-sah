@@ -156,6 +156,8 @@ public:
     // Closed while loading: the window is hidden at once and start-up ends as soon as it can.
     bool closeWhileLoadingFromWndProc() noexcept;
     bool closeRequested() const noexcept { return closeRequested_; }
+    // Another thread is working on this window's graphics: a close hides it now and destroys it later.
+    void setBusy(bool busy) noexcept { busy_ = busy; }
     void paintLoadingList(::HDC__* dc, const ::tagRECT& client, int top, int dpi);
     void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
     void fitFullscreenToMonitor();
@@ -205,6 +207,7 @@ private:
     std::wstring graphicsFailureText_;
     bool loading_ = false;
     bool closeRequested_ = false;
+    bool busy_ = false;
     float loadingFraction_ = -1.0f; // below zero: no bar yet
     std::wstring loadingDetail_;
     std::wstring loadingClock_;
