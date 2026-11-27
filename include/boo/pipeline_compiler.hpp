@@ -34,4 +34,10 @@ private:
     std::unique_ptr<State> state_;
 };
 
+// One slow driver call on the loading thread, usually a single pipeline compile. While start-up runs,
+// `create` runs on a thread of its own and the caller keeps the loading screen painting and the window
+// answering until it returns, however long the driver takes. At any other time it simply runs.
+// Returns what `create` returned (an HRESULT).
+long compileWhilePainting(std::string name, uint64_t shaderBytes, const std::function<long()>& create);
+
 } // namespace boo

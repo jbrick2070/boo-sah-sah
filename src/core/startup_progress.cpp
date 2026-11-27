@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <mutex>
 #include <set>
@@ -19,6 +20,7 @@
 #endif
 #define PSAPI_VERSION 2 // K32GetProcessMemoryInfo, in kernel32
 #include <windows.h>
+#include <objbase.h>
 #include <psapi.h>
 
 namespace boo {
@@ -36,6 +38,8 @@ uint64_t peakCommittedBytes() {
     return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
                ? static_cast<uint64_t>(counters.PeakPagefileUsage) : 0u;
 }
+constexpr double kListedSeconds = 0.15; // a finished step quicker than this leaves the list
+constexpr size_t kListedTasks = 16;
 std::string megabytes(uint64_t bytes) {
     char text[32]{};
     std::snprintf(text, sizeof(text), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
@@ -53,7 +57,21 @@ std::string startupAssetKey(const std::filesystem::path& file) {
 struct StartupProgress::State {
     mutable std::mutex mutex;
     std::atomic<bool> active{false};
-    std::thread::id owner;
+    std::thread::id owner, loader; // loader: none unless runWhilePainting has one at work
+    bool loadingHereLocked() const {
+        const std::thread::id here = std::this_thread::get_id();
+        return here == owner || here == loader;
+    }
+    // GPU memory, read by whichever thread may talk to the driver now (null for the others).
+    std::function<uint64_t()> probeHereLocked() const {
+        const std::thread::id here = std::this_thread::get_id();
+        const bool mayAsk = loader == std::thread::id() ? here == owner : here == loader;
+        return mayAsk ? gpuProbe : nullptr;
+    }
+    void sampleGpuLocked(uint64_t bytes) {
+        gpuNow = bytes;
+        gpuPeak = std::max(gpuPeak, bytes);
+    }
     Setup setup;
     std::function<uint64_t()> gpuProbe;
 
@@ -68,6 +86,57 @@ struct StartupProgress::State {
     float fraction = 0.0f;
     std::chrono::steady_clock::time_point lastStep{}, lastIdleLog{};
     std::function<void()> pump;
+
+    struct Task {
+        uint32_t id;
+        StartupWork work;
+        std::string item;
+        std::chrono::steady_clock::time_point begun, ended;
+        bool done;
+    };
+    std::vector<Task> tasks; // in the order they began
+    uint32_t nextTask = 1, stageTask = 0;
+    std::chrono::steady_clock::time_point started{};
+    bool firstStart = false;
+
+    uint32_t beginTaskLocked(StartupWork work, std::string item) {
+        const uint32_t id = nextTask++;
+        tasks.push_back({id, work, std::move(item), std::chrono::steady_clock::now(), {}, false});
+        return id;
+    }
+    void endTaskLocked(uint32_t id) {
+        const auto it = std::find_if(tasks.begin(), tasks.end(), [id](const Task& t) { return t.id == id; });
+        if (it == tasks.end() || it->done) return;
+        it->done = true;
+        it->ended = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(it->ended - it->begun).count();
+        static constexpr const char* kWork[] = {"device", "files", "shaders", "scene"};
+        char line[240]{};
+        std::snprintf(line, sizeof(line), "Step took %.2f s, from +%.2f s: %s %s", seconds,
+                      std::chrono::duration<double>(it->begun - started).count(),
+                      kWork[static_cast<size_t>(it->work) & 3u], it->item.c_str());
+        BOO_LOG_DEBUG("Startup", line);
+        if (seconds < kListedSeconds) tasks.erase(it);
+    }
+    // The list as the screen shows it: everything still running, then the latest finished.
+    std::vector<StartupTask> listLocked() const {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<const Task*> shown;
+        for (const Task& t : tasks) {
+            if (!t.done && shown.size() < kListedTasks) shown.push_back(&t);
+        }
+        for (auto it = tasks.rbegin(); it != tasks.rend() && shown.size() < kListedTasks; ++it) {
+            if (it->done) shown.push_back(&*it);
+        }
+        std::sort(shown.begin(), shown.end(), [](const Task* a, const Task* b) { return a->id < b->id; });
+        std::vector<StartupTask> list;
+        list.reserve(shown.size());
+        for (const Task* t : shown) {
+            list.push_back({t->id, t->work, t->item, std::chrono::duration<double>(t->begun - started).count(),
+                            std::chrono::duration<double>((t->done ? t->ended : now) - t->begun).count(), t->done});
+        }
+        return list;
+    }
 
     // Checksums are checked off the loading thread, so they cost start-up no time.
     struct Job { std::filesystem::path file; std::string key, digest; uint64_t bytes; };
@@ -92,6 +161,9 @@ struct StartupProgress::State {
         v.gpuBytesExpected = gpuExpected;
         v.shaderBytesCompiled = shaderDoneBytes;
         v.shaderBytesTotal = std::max(shaderExpected, shaderQueuedBytes);
+        v.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        v.firstStart = firstStart;
+        v.tasks = listLocked();
         return v;
     }
 
@@ -184,6 +256,7 @@ void StartupProgress::begin(Setup setup) {
     std::lock_guard<std::mutex> lock(s.mutex);
     s.setup = std::move(setup);
     s.owner = std::this_thread::get_id();
+    s.loader = {};
     s.gpuProbe = nullptr;
     s.expected.clear(); s.counted.clear(); s.loadedFiles.clear();
     s.loaded = s.total = s.verified = 0;
@@ -193,7 +266,11 @@ void StartupProgress::begin(Setup setup) {
     s.shaderQueuedBytes = s.shaderDoneBytes = s.shaderExpected = 0;
     s.fraction = 0.0f;
     s.summarise = false;
-    s.lastStep = s.lastIdleLog = std::chrono::steady_clock::now();
+    s.lastStep = s.lastIdleLog = s.started = std::chrono::steady_clock::now();
+    s.tasks.clear();
+    s.nextTask = 1;
+    s.stageTask = 0;
+    std::string rememberedBuild;
 
     // What the last start on this machine loaded, and the GPU memory it reached.
     if (!s.setup.memoryFile.empty()) {
@@ -205,6 +282,8 @@ void StartupProgress::begin(Setup setup) {
                     try { s.gpuExpected = std::stoull(line.substr(4)); } catch (...) { s.gpuExpected = 0; }
                 } else if (line.rfind("ram ", 0) == 0) {
                     try { s.ramExpected = std::stoull(line.substr(4)); } catch (...) { s.ramExpected = 0; }
+                } else if (line.rfind("build ", 0) == 0) {
+                    rememberedBuild = line.substr(6);
                 } else if (line.rfind("shaders ", 0) == 0) {
                     try { s.shaderExpected = std::stoull(line.substr(8)); } catch (...) { s.shaderExpected = 0; }
                 } else if (line.rfind("asset ", 0) == 0) {
@@ -218,6 +297,7 @@ void StartupProgress::begin(Setup setup) {
             }
         }
     }
+    s.firstStart = s.expected.empty() || (!s.setup.buildId.empty() && rememberedBuild != s.setup.buildId);
     if (s.expected.empty()) {
         // First run (or nothing remembered): every file in the asset folders.
         s.gpuExpected = 0;
@@ -227,7 +307,11 @@ void StartupProgress::begin(Setup setup) {
             std::error_code ec;
             for (std::filesystem::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
                 if (!it->is_regular_file(ec)) continue;
-                if (s.expected.insert(startupAssetKey(it->path())).second) s.total += sizeOnDisk(it->path());
+                if (!s.expected.insert(startupAssetKey(it->path())).second) continue;
+                const uint64_t bytes = sizeOnDisk(it->path());
+                s.total += bytes;
+                // The shader code there is to compile, so one quick compile does not read as all of it.
+                if (it->path().extension() == ".cso") s.shaderExpected += bytes;
             }
         }
     }
@@ -269,8 +353,8 @@ void StartupProgress::checkpoint() {
     std::function<uint64_t()> probe;
     {
         std::lock_guard<std::mutex> lock(s.mutex);
-        if (std::this_thread::get_id() != s.owner) return;
-        probe = s.gpuProbe;
+        if (!s.loadingHereLocked()) return;
+        probe = s.probeHereLocked();
     }
     const uint64_t gpu = probe ? probe() : 0u;
     std::function<void(const StartupProgressView&)> notify;
@@ -278,10 +362,9 @@ void StartupProgress::checkpoint() {
     {
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.active.load(std::memory_order_relaxed)) return;
-        s.gpuNow = gpu;
-        s.gpuPeak = std::max(s.gpuPeak, gpu);
+        if (probe) s.sampleGpuLocked(gpu);
         s.recomputeLocked();
-        notify = s.setup.onChange;
+        if (std::this_thread::get_id() == s.owner) notify = s.setup.onChange;
         v = s.viewLocked();
     }
     {
@@ -309,6 +392,96 @@ void StartupProgress::step(const char* stage) {
     char line[200]{};
     std::snprintf(line, sizeof(line), "Stage done in %.0f ms: %s", ms, stage ? stage : "");
     BOO_LOG_DEBUG("Startup", line);
+}
+
+void StartupProgress::stage(StartupWork work, std::string item) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::function<void(const StartupProgressView&)> notify;
+    std::function<void()> pump;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed) || !s.loadingHereLocked()) return;
+        if (s.stageTask != 0) s.endTaskLocked(s.stageTask);
+        s.stageTask = s.beginTaskLocked(work, std::move(item));
+        if (std::this_thread::get_id() == s.owner) {
+            notify = s.setup.onChange;
+            pump = s.pump;
+            v = s.viewLocked();
+        }
+    }
+    if (notify) notify(v);
+    if (pump) pump();
+}
+
+void StartupProgress::stageDone() {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.loadingHereLocked() || s.stageTask == 0) return;
+    s.endTaskLocked(s.stageTask);
+    s.stageTask = 0;
+}
+
+void StartupProgress::reading(const std::filesystem::path& file) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return;
+    std::function<void(const StartupProgressView&)> notify;
+    std::function<void()> pump;
+    StartupProgressView v;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.active.load(std::memory_order_relaxed) || !s.loadingHereLocked()) return;
+        const auto it = std::find_if(s.tasks.begin(), s.tasks.end(),
+                                     [&](const State::Task& t) { return t.id == s.stageTask; });
+        if (it == s.tasks.end() || it->done || it->work != StartupWork::Files) return;
+        it->item = file.filename().generic_string();
+        if (std::this_thread::get_id() == s.owner) {
+            notify = s.setup.onChange;
+            pump = s.pump;
+            v = s.viewLocked();
+        }
+    }
+    if (notify) notify(v);
+    if (pump) pump();
+}
+
+uint32_t StartupProgress::taskBegin(StartupWork work, std::string item) {
+    auto& s = *state_;
+    if (!s.active.load(std::memory_order_relaxed)) return 0;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.active.load(std::memory_order_relaxed)) return 0;
+    return s.beginTaskLocked(work, std::move(item));
+}
+
+void StartupProgress::taskEnd(uint32_t id) {
+    auto& s = *state_;
+    if (id == 0 || !s.active.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.endTaskLocked(id);
+}
+
+bool StartupProgress::onWindowThread() const {
+    if (!state_->active.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return std::this_thread::get_id() == state_->owner;
+}
+
+bool StartupProgress::onLoadingThread() const {
+    if (!state_->active.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->loadingHereLocked();
+}
+
+void StartupProgress::beginLoader() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->loader = std::this_thread::get_id();
+}
+
+void StartupProgress::endLoader() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->loader = {};
 }
 
 void StartupProgress::shaderQueued(uint64_t bytes) {
@@ -347,8 +520,8 @@ void StartupProgress::idle() {
     std::function<uint64_t()> probe;
     {
         std::lock_guard<std::mutex> lock(s.mutex);
-        if (std::this_thread::get_id() != s.owner) return;
-        probe = s.gpuProbe;
+        if (!s.loadingHereLocked()) return;
+        probe = s.probeHereLocked();
     }
     const uint64_t gpu = probe ? probe() : 0u;
     std::function<void(const StartupProgressView&)> notify;
@@ -358,8 +531,8 @@ void StartupProgress::idle() {
     {
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.active.load(std::memory_order_relaxed)) return;
-        s.gpuNow = gpu;
-        s.gpuPeak = std::max(s.gpuPeak, gpu);
+        if (probe) s.sampleGpuLocked(gpu);
+        if (std::this_thread::get_id() != s.owner) return; // the window's thread does the painting
         s.recomputeLocked();
         notify = s.setup.onChange;
         pump = s.pump;
@@ -368,9 +541,9 @@ void StartupProgress::idle() {
         if (now - s.lastIdleLog >= std::chrono::seconds(2)) { s.lastIdleLog = now; log = true; }
     }
     if (log) {
-        // For anyone following the bar in a debug log while pipelines compile.
+        // For anyone following the bar in a debug log while start-up waits.
         char line[240]{};
-        std::snprintf(line, sizeof(line), "Loading bar %.0f%% while compiling: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB, shaders %.2f/%.2f MB",
+        std::snprintf(line, sizeof(line), "Loading bar %.0f%% while waiting: files %.0f/%.0f MB, system memory %.0f/%.0f MB, GPU %.0f/%.0f MB, shaders %.2f/%.2f MB",
                       static_cast<double>(v.fraction) * 100.0, v.assetBytesLoaded / 1048576.0, v.assetBytesTotal / 1048576.0,
                       v.ramBytes / 1048576.0, v.ramBytesExpected / 1048576.0, v.gpuBytes / 1048576.0, v.gpuBytesExpected / 1048576.0,
                       v.shaderBytesCompiled / 1048576.0, v.shaderBytesTotal / 1048576.0);
@@ -383,6 +556,12 @@ void StartupProgress::idle() {
 void StartupProgress::setPump(std::function<void()> pump) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->pump = std::move(pump);
+}
+
+void StartupProgress::cancel() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->active.store(false);
+    state_->gpuProbe = nullptr;
 }
 
 void StartupProgress::finish() {
@@ -402,6 +581,10 @@ void StartupProgress::finish() {
         s.gpuNow = gpu;
         s.gpuPeak = std::max(s.gpuPeak, gpu);
         s.gpuProbe = nullptr;
+        if (s.stageTask != 0) {
+            s.endTaskLocked(s.stageTask);
+            s.stageTask = 0;
+        }
         s.ramPeak = std::max(s.ramPeak, peakCommittedBytes());
         s.fraction = 1.0f;
         // Remember what this start loaded and how much GPU memory it reached, for the next one.
@@ -412,6 +595,7 @@ void StartupProgress::finish() {
             if (file) {
                 file << "boo-startup-memory 1\n" << "gpu " << s.gpuPeak << '\n' << "ram " << s.ramPeak << '\n'
                      << "shaders " << s.shaderDoneBytes << '\n';
+                if (!s.setup.buildId.empty()) file << "build " << s.setup.buildId << '\n';
                 for (const auto& [key, bytes] : s.loadedFiles) file << "asset " << bytes << ' ' << key << '\n';
             }
         }
@@ -445,6 +629,50 @@ void startupCheckpoint() { StartupProgress::instance().checkpoint(); }
 void startupStep(const char* stage) {
     auto& progress = StartupProgress::instance();
     progress.step(stage);
+}
+void startupStage(StartupWork work, std::string item) { StartupProgress::instance().stage(work, std::move(item)); }
+void startupReading(const std::filesystem::path& file) { StartupProgress::instance().reading(file); }
+
+void runWhilePainting(StartupWork work, std::string item, const std::function<void()>& call) {
+    auto& progress = StartupProgress::instance();
+    if (!progress.onWindowThread()) {
+        call();
+        return;
+    }
+    // Objects the loader creates stay usable after it ends: keep the process in the multithreaded apartment.
+    static CO_MTA_USAGE_COOKIE apartment = nullptr;
+    if (!apartment) (void)CoIncrementMTAUsage(&apartment);
+    progress.stage(work, std::move(item));
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done = false;
+    std::exception_ptr error;
+    std::thread worker([&] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        progress.beginLoader();
+        try {
+            call();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        progress.endLoader();
+        if (SUCCEEDED(com)) CoUninitialize();
+        std::lock_guard<std::mutex> lock(mutex);
+        done = true;
+        finished.notify_one();
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        while (!finished.wait_for(lock, std::chrono::milliseconds(50), [&] { return done; })) {
+            lock.unlock();
+            progress.idle();
+            lock.lock();
+        }
+    }
+    worker.join();
+    progress.checkpoint();
+    progress.stageDone();
+    if (error) std::rethrow_exception(error);
 }
 
 } // namespace boo

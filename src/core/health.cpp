@@ -84,6 +84,7 @@ HardwareResult FallbackOrchestrator::initializeEffects(bool injectPrimaryFailure
                 return primRes;
             }
             primaryFaulted_ = true;
+            primaryFailureReason_ = primRes.humanReadableReason;
             ++faultCount_;
             BOO_LOG_WARN(
                 "Health",
@@ -91,11 +92,13 @@ HardwareResult FallbackOrchestrator::initializeEffects(bool injectPrimaryFailure
                     "' failed init (" + primRes.humanReadableReason + "); activating safe fallback.");
         } catch (const std::exception& e) {
             primaryFaulted_ = true;
+            primaryFailureReason_ = e.what();
             ++faultCount_;
             BOO_LOG_WARN("Health", std::string("Primary effect exception on init: ") + e.what());
         }
     } else if (injectPrimaryFailure) {
         primaryFaulted_ = true;
+        primaryFailureReason_ = "Injected failure (--inject-shader-fail)";
         ++faultCount_;
         BOO_LOG_WARN("Health", "Injected primary effect initialization failure; activating safe fallback.");
     }
@@ -148,15 +151,18 @@ bool FallbackOrchestrator::syncPresetBeforeFrame(
     double filmTimeSeconds) {
     if (!usingFallback_ && primaryEffect_) {
         bool ok = false;
+        std::string why = "The picture could not be rebuilt at the new size.";
         try {
             ok = primaryEffect_->syncPresetBeforeFrame(spec, allowImmediateResize);
         } catch (const std::exception& e) {
             BOO_LOG_WARN("Health", std::string("Primary effect threw during preset sync: ") + e.what());
+            why = e.what();
             ok = false;
         }
         if (ok) {
             return true;
         }
+        primaryFailureReason_ = why;
         ++faultCount_;
         primaryFaulted_ = true;
         usingFallback_ = (fallbackEffect_ != nullptr);
@@ -234,6 +240,7 @@ void FallbackOrchestrator::renderFrame(const FrameContext& ctx, bool injectRende
         } catch (const std::exception& e) {
             ++faultCount_;
             primaryFaulted_ = true;
+            primaryFailureReason_ = e.what();
             usingFallback_ = true;
             syncLiveEngineStatuses();
             BOO_LOG_WARN(

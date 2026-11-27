@@ -1,5 +1,6 @@
 #include "boo/dlss_bridge.hpp"
 #include "boo/startup_progress.hpp"
+#include "boo/pipeline_compiler.hpp"
 #include "boo/render.hpp"
 #include "boo/trilogy_renderer.hpp"
 #include "boo/logging.hpp"
@@ -142,6 +143,8 @@ void shutdownNgxDevice(ID3D12Device* device) noexcept {
 }
 #ifdef BOO_HAS_DLSS
 bool DlssBridge::Impl::probe() {
+    // NVIDIA's runtime serves NVIDIA graphics only: elsewhere it is not started and creates no cache folder.
+    if (context->adapterVendorId() != 0x10DE) return false;
     std::array<wchar_t, 32768> exe{};
     if (!GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()))) return false;
     const auto folder = std::filesystem::path(exe.data()).parent_path() / L"dlss";
@@ -189,7 +192,9 @@ bool DlssBridge::Impl::makeResolvePipeline() {
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = root.Get();
     pso.CS = {code.data(),code.size()};
-    if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&resolvePso)))) return false;
+    if (FAILED(compileWhilePainting("dlss_resolve.cso", code.size(), [&] {
+            return device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&resolvePso));
+        }))) return false;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors = 4;
@@ -292,15 +297,23 @@ bool DlssBridge::Impl::configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, 
 }
 #endif
 
+void DlssBridge::warmUp(D3D12Context& context) {
+#ifdef BOO_HAS_DLSS
+    auto& s = *impl_;
+    if (s.context) return;
+    s.context = &context;
+    s.device = static_cast<ID3D12Device*>(context.deviceRaw());
+    s.supported = !context.isWarp() && s.device && s.probe();
+#else
+    (void)context;
+#endif
+}
+
 bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible,
                          bool requestRR, bool raytracing, ID3D12Resource* fullColor, ID3D12Resource* fullDistance) {
 #ifdef BOO_HAS_DLSS
     auto& s = *impl_;
-    if (!s.context) {
-        s.context = &context;
-        s.device = static_cast<ID3D12Device*>(context.deviceRaw());
-        s.supported = !context.isWarp() && s.device && s.probe();
-    }
+    warmUp(context);
     if (!s.supported) return false;
     const auto output = fullColor->GetDesc();
     if (output.Width != s.requestedWidth || output.Height != s.requestedHeight) {

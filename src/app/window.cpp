@@ -12,6 +12,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace boo {
@@ -257,6 +258,7 @@ LRESULT CALLBACK mainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_CLOSE:
             self->pushCommandFromWndProc(TransportCommand::Quit);
+            if (self->closeWhileLoadingFromWndProc()) return 0;
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
@@ -492,6 +494,14 @@ bool AppWindow::paintGraphicsFailureFromWndProc() {
     return true;
 }
 
+bool AppWindow::closeWhileLoadingFromWndProc() noexcept {
+    if (!loading_) return false;
+    // The loader thread still draws into this window: take it off the screen now, destroy it later.
+    closeRequested_ = true;
+    hide();
+    return true;
+}
+
 void AppWindow::showLoading() {
     loading_ = true;
     if (hwnd_) {
@@ -503,9 +513,11 @@ void AppWindow::showLoading() {
 namespace {
 // Where the loading bar and the figures under it go. The paint routine and the repaint request share this.
 struct LoadingBarLayout { RECT track, detail, dirty; };
+// The title sits above the middle, which leaves the lower half to the list of start-up steps.
+int loadingMidY(const RECT& client) { return client.top + (client.bottom - client.top) * 3 / 10; }
 LoadingBarLayout loadingBarLayout(const RECT& client, int dpi) {
     const int bodyPx = MulDiv(17, dpi, 96);
-    const int midY = (client.top + client.bottom) / 2;
+    const int midY = loadingMidY(client);
     const int clientW = client.right - client.left;
     const int width = std::max(40, std::min(std::clamp(clientW * 2 / 5, MulDiv(220, dpi, 96), MulDiv(560, dpi, 96)),
                                             clientW - MulDiv(32, dpi, 96)));
@@ -515,16 +527,26 @@ LoadingBarLayout loadingBarLayout(const RECT& client, int dpi) {
     LoadingBarLayout l{};
     l.track = {left, top, left + width, top + height};
     l.detail = {client.left, top + height + bodyPx / 2, client.right, top + height + bodyPx / 2 + bodyPx * 3 / 2};
-    l.dirty = {client.left, top - 2, client.right, l.detail.bottom + 2};
+    // The clock beside "Loading", the bar, the figures, the notice and the list change; the credits do not.
+    l.dirty = {client.left, midY, client.right, std::max<LONG>(l.detail.bottom + 2, client.bottom - bodyPx * 5)};
     return l;
 }
 } // namespace
 
-void AppWindow::setLoadingProgress(float fraction, std::wstring detail) {
+void AppWindow::setLoadingProgress(float fraction, std::wstring detail, std::wstring clock, std::wstring notice,
+                                   std::vector<LoadingLine> lines) {
     if (!loading_) return;
     const bool first = loadingFraction_ < 0.0f;
-    loadingFraction_ = std::clamp(fraction, 0.0f, 1.0f);
+    const float filled = std::clamp(fraction, 0.0f, 1.0f);
+    if (!first && std::fabs(filled - loadingFraction_) < 0.0005f && detail == loadingDetail_ && clock == loadingClock_ &&
+        notice == loadingNotice_ && lines == loadingLines_) {
+        return; // nothing to repaint
+    }
+    loadingFraction_ = filled;
     loadingDetail_ = std::move(detail);
+    loadingClock_ = std::move(clock);
+    loadingNotice_ = std::move(notice);
+    loadingLines_ = std::move(lines);
     if (!hwnd_) return;
     RECT client{};
     GetClientRect(hwnd_, &client);
@@ -537,9 +559,22 @@ void AppWindow::setLoadingProgress(float fraction, std::wstring detail) {
 bool AppWindow::paintLoadingFromWndProc() {
     if (!hwnd_ || !loading_) return false;
     PAINTSTRUCT ps{};
-    HDC dc = BeginPaint(hwnd_, &ps);
+    HDC screen = BeginPaint(hwnd_, &ps);
     RECT r{};
     GetClientRect(hwnd_, &r);
+    // Drawn off screen and copied in one go, so the ticking list does not flicker.
+    const int paintW = std::max<LONG>(ps.rcPaint.right - ps.rcPaint.left, 1);
+    const int paintH = std::max<LONG>(ps.rcPaint.bottom - ps.rcPaint.top, 1);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = dc ? CreateCompatibleBitmap(screen, paintW, paintH) : nullptr;
+    HGDIOBJ oldBitmap = nullptr;
+    if (bitmap) {
+        oldBitmap = SelectObject(dc, bitmap);
+        SetWindowOrgEx(dc, ps.rcPaint.left, ps.rcPaint.top, nullptr);
+    } else {
+        if (dc) DeleteDC(dc);
+        dc = screen;
+    }
     FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     const int dpi = static_cast<int>(GetDpiForWindow(hwnd_));
     const int titlePx = MulDiv(30, dpi, 96);
@@ -549,7 +584,7 @@ bool AppWindow::paintLoadingFromWndProc() {
     HFONT bodyFont = CreateFontW(-bodyPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     SetBkMode(dc, TRANSPARENT);
-    const int midY = (r.top + r.bottom) / 2;
+    const int midY = loadingMidY(r);
     const UINT rtl = uiIsRightToLeft() ? DT_RTLREADING : 0;
     auto oldFont = SelectObject(dc, titleFont ? titleFont : GetStockObject(DEFAULT_GUI_FONT));
     SetTextColor(dc, RGB(235, 240, 240));
@@ -558,7 +593,9 @@ bool AppWindow::paintLoadingFromWndProc() {
     SelectObject(dc, bodyFont ? bodyFont : GetStockObject(DEFAULT_GUI_FONT));
     SetTextColor(dc, RGB(150, 200, 195));
     RECT bodyRect{r.left, midY + bodyPx / 2, r.right, midY + bodyPx * 3};
-    DrawTextW(dc, uiText(UiText::Loading), -1, &bodyRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | rtl);
+    std::wstring loadingWord = uiText(UiText::Loading);
+    if (!loadingClock_.empty()) loadingWord += L"   " + loadingClock_;
+    DrawTextW(dc, loadingWord.c_str(), -1, &bodyRect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | rtl);
     if (loadingFraction_ >= 0.0f) {
         // The loading bar and its figures: megabytes read and checksummed, GPU memory in use.
         const LoadingBarLayout l = loadingBarLayout(r, dpi);
@@ -581,6 +618,7 @@ bool AppWindow::paintLoadingFromWndProc() {
             SelectObject(dc, previousFont);
             if (detailFont) DeleteObject(detailFont);
         }
+        paintLoadingList(dc, r, l.detail.bottom, dpi);
     }
     RECT creditsRect{r.left, midY + bodyPx * 3, r.right, r.bottom - bodyPx};
     SetTextColor(dc, RGB(154, 170, 173));
@@ -593,8 +631,69 @@ bool AppWindow::paintLoadingFromWndProc() {
     SelectObject(dc, oldFont);
     if (titleFont) DeleteObject(titleFont);
     if (bodyFont) DeleteObject(bodyFont);
+    if (dc != screen) {
+        BitBlt(screen, ps.rcPaint.left, ps.rcPaint.top, paintW, paintH, dc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        SelectObject(dc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
     EndPaint(hwnd_, &ps);
     return true;
+}
+
+// The first-start notice and the list of start-up steps, between the figures and the credits: when each
+// step began, what it is, and how long it has taken. Running steps are bright, finished ones dim.
+void AppWindow::paintLoadingList(HDC dc, const RECT& client, int top, int dpi) {
+    const int bodyPx = MulDiv(17, dpi, 96);
+    const int fontPx = MulDiv(13, dpi, 96);
+    const int lineH = fontPx * 3 / 2;
+    const int bottom = client.bottom - bodyPx * 5; // the credits start here
+    const int width = std::max(40, std::min<int>(client.right - client.left - MulDiv(32, dpi, 96), MulDiv(640, dpi, 96)));
+    const int left = (client.left + client.right - width) / 2;
+    const bool rightToLeft = uiIsRightToLeft();
+    const UINT reading = rightToLeft ? DT_RTLREADING : 0;
+    HFONT font = CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    auto previousFont = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
+    int y = top + fontPx / 2;
+    if (!loadingNotice_.empty()) {
+        RECT box{left, y, left + width, bottom};
+        RECT measured = box;
+        DrawTextW(dc, loadingNotice_.c_str(), -1, &measured, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT | reading);
+        box.bottom = std::min<LONG>(box.top + (measured.bottom - measured.top), bottom);
+        SetTextColor(dc, RGB(222, 196, 128));
+        DrawTextW(dc, loadingNotice_.c_str(), -1, &box, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | reading);
+        y = box.bottom + fontPx / 2;
+    }
+    // As many steps as fit; finished ones make room first, oldest first.
+    const size_t fits = static_cast<size_t>(std::max(0, (bottom - y) / std::max(lineH, 1)));
+    std::vector<const LoadingLine*> shown;
+    for (const LoadingLine& line : loadingLines_) shown.push_back(&line);
+    while (shown.size() > fits) {
+        auto drop = std::find_if(shown.begin(), shown.end(), [](const LoadingLine* l) { return !l->running; });
+        shown.erase(drop != shown.end() ? drop : shown.begin());
+    }
+    const int whenW = MulDiv(48, dpi, 96), tookW = MulDiv(64, dpi, 96);
+    for (const LoadingLine* line : shown) {
+        RECT when{left, y, left + whenW, y + lineH};
+        RECT what{left + whenW, y, left + width - tookW, y + lineH};
+        RECT took{left + width - tookW, y, left + width, y + lineH};
+        if (rightToLeft) {
+            when = {left + width - whenW, y, left + width, y + lineH};
+            what = {left + tookW, y, left + width - whenW, y + lineH};
+            took = {left, y, left + tookW, y + lineH};
+        }
+        constexpr UINT kOneLine = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+        SetTextColor(dc, line->running ? RGB(120, 214, 200) : RGB(92, 110, 112));
+        DrawTextW(dc, line->when.c_str(), -1, &when, kOneLine | (rightToLeft ? DT_RIGHT : DT_LEFT));
+        SetTextColor(dc, line->running ? RGB(235, 240, 240) : RGB(128, 150, 152));
+        DrawTextW(dc, line->what.c_str(), -1, &what,
+                  kOneLine | DT_END_ELLIPSIS | reading | (rightToLeft ? DT_RIGHT : DT_LEFT));
+        DrawTextW(dc, line->took.c_str(), -1, &took, kOneLine | (rightToLeft ? DT_LEFT : DT_RIGHT));
+        y += lineH;
+    }
+    SelectObject(dc, previousFont);
+    if (font) DeleteObject(font);
 }
 
 bool AppWindow::consumeResizeFlag() noexcept {

@@ -214,6 +214,7 @@ float smoothstepF(float e0, float e1, float x) noexcept {
 
 bool readShaderCso(const char* relPath, std::vector<uint8_t>& outBytes) {
     const auto resolved = resolveResourcePath(relPath);
+    startupReading(resolved);
     std::ifstream ifs(resolved, std::ios::binary | std::ios::ate);
     if (!ifs) return false;
     const auto sz = ifs.tellg();
@@ -1874,10 +1875,13 @@ bool M1TaipeiSliceEffect::Impl::buildDxrResourcesAndWarmUp(D3D12Context& d3d, ui
     D3D12_COMPUTE_PIPELINE_STATE_DESC cpso{};
     cpso.pRootSignature = dxrRootSig.Get();
     cpso.CS = {csDxrSceneBytes.data(), csDxrSceneBytes.size()};
-    if (FAILED(dev->CreateComputePipelineState(&cpso, IID_PPV_ARGS(&psoDxrScene))) || !psoDxrScene) {
+    if (FAILED(compileWhilePainting("m1_dxr_scene.cso", csDxrSceneBytes.size(), [&] {
+            return dev->CreateComputePipelineState(&cpso, IID_PPV_ARGS(&psoDxrScene));
+        })) || !psoDxrScene) {
         return false;
     }
     startupStep("M1 DXR compute pipeline");
+    startupStage(StartupWork::Scene);
 
     std::vector<GpuM1Vertex> allVerts;
     std::vector<uint32_t> allIndices;
@@ -2383,6 +2387,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         return res;
     }
 
+    startupStage(StartupWork::Files);
     if (!readShaderCso("assets/shaders/m0_test_vs.cso", impl_->vsFullscreenBytes) ||
         !readShaderCso("assets/shaders/m1_dxr_scene.cso", impl_->csDxrSceneBytes) ||
         !readShaderCso("assets/shaders/m1_raster_scene.cso", impl_->psRasterSceneBytes) ||
@@ -2575,7 +2580,10 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     }
     startupStep("M1 root signatures");
 
-    auto makeGfxPso = [&](ID3D12RootSignature* rs,
+    // Every compile below runs off the window's thread, so the loading screen names it, keeps painting and
+    // answers the window however long the driver takes (compileWhilePainting).
+    auto makeGfxPso = [&](const char* name,
+                          ID3D12RootSignature* rs,
                           const std::vector<uint8_t>& vsBytes,
                           const std::vector<uint8_t>& psBytes,
                           DXGI_FORMAT rtvFmt0,
@@ -2607,32 +2615,37 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         pd.RTVFormats[0] = rtvFmt0;
         pd.RTVFormats[1] = rtvFmt1;
         pd.SampleDesc.Count = 1;
-        return SUCCEEDED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&outPso))) && outPso;
+        return SUCCEEDED(compileWhilePainting(name, vsBytes.size() + psBytes.size(), [&] {
+                   return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&outPso));
+               })) && outPso;
     };
 
-    auto makeCsPso = [&](ID3D12RootSignature* rs, const std::vector<uint8_t>& csBytes, ComPtr<ID3D12PipelineState>& outPso) {
+    auto makeCsPso = [&](const char* name, ID3D12RootSignature* rs, const std::vector<uint8_t>& csBytes,
+                         ComPtr<ID3D12PipelineState>& outPso) {
         D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
         cp.pRootSignature = rs;
         cp.CS = {csBytes.data(), csBytes.size()};
-        return SUCCEEDED(dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&outPso))) && outPso;
+        return SUCCEEDED(compileWhilePainting(name, csBytes.size(), [&] {
+                   return dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&outPso));
+               })) && outPso;
     };
 
     // The present pipelines compile on threads of their own through the rest of start-up, and are waited for
     // at the end of it. (Until 1.1.12.0 they took 44 s each on a cold shader cache; text runs made that ~2 s.)
     PipelineCompiler presentCompiler;
-    if (!makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psRasterSceneBytes,
+    if (!makeGfxPso("m1_raster_scene.cso", impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psRasterSceneBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT, false, impl_->psoRasterScene) ||
-        !makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomDownBytes,
+        !makeGfxPso("m1_bloom_down.cso", impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomDownBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, false, impl_->psoBloomDown) ||
-        !makeGfxPso(impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomUpBytes,
+        !makeGfxPso("m1_bloom_up.cso", impl_->gfxRootSig.Get(), impl_->vsFullscreenBytes, impl_->psBloomUpBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, true, impl_->psoBloomUpAdditive) ||
-        !makeGfxPso(impl_->compositeRootSig.Get(), impl_->vsFullscreenBytes, impl_->psCompositeBytes,
+        !makeGfxPso("m1_composite.cso", impl_->compositeRootSig.Get(), impl_->vsFullscreenBytes, impl_->psCompositeBytes,
                     DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_UNKNOWN, false, impl_->psoCompositeCanvas) ||
-        !makeGfxPso(impl_->particlesGfxRootSig.Get(), impl_->vsParticlesBytes, impl_->psParticlesBytes,
+        !makeGfxPso("m1_particles_ps.cso", impl_->particlesGfxRootSig.Get(), impl_->vsParticlesBytes, impl_->psParticlesBytes,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN, true, impl_->psoParticles3D) ||
-        !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csParticlesSubBytes, impl_->psoParticlesSubCs) ||
-        !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csTensorSubBytes, impl_->psoTensorSubCs) ||
-        !makeCsPso(impl_->auxComputeRootSig.Get(), impl_->csNv12PackBytes, impl_->psoNv12PackCs) ||
+        !makeCsPso("m1_particles_sub_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csParticlesSubBytes, impl_->psoParticlesSubCs) ||
+        !makeCsPso("m1_tensor_sub_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csTensorSubBytes, impl_->psoTensorSubCs) ||
+        !makeCsPso("m1_nv12_pack_cs.cso", impl_->auxComputeRootSig.Get(), impl_->csNv12PackBytes, impl_->psoNv12PackCs) ||
         !impl_->ensurePresentPso(dev, static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()), &presentCompiler)) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
@@ -2641,6 +2654,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         return res;
     }
     startupStep("M1 graphics and compute pipelines (7; the 4 present pipelines carry on compiling)");
+    startupStage(StartupWork::Scene);
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHd{};
     rtvHd.NumDescriptors = 7;
@@ -2762,7 +2776,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         }
     }
 
-    if (!disableRT_ && !d3d_.isWarp()) {
+    if (!disableRT_ && !d3d_.isWarp() && d3d_.rayTracingAllowed()) {
         impl_->buildDxrResourcesAndWarmUp(d3d_, activeSpec_.softVramLimitBytes);
         if (!activeSpec_.allowDxr) {
             impl_->dxrVerified = false;
@@ -2773,7 +2787,13 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     if (impl_->trilogy && !impl_->trilogyMesh) {
         impl_->trilogyMesh=std::make_unique<TrilogyMeshRenderer>(d3d_);
         std::string error;
-        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) throw std::runtime_error(error);
+        if(!impl_->trilogyMesh->initialize(impl_->injectMeshFailure,&error,impl_->visualMode,impl_->tensorFieldTex.Get())) {
+            // A graphics chip that cannot build the full city still gets this renderer's built-in scene, with its
+            // controls, never the test picture of the emergency fallback.
+            BOO_LOG_WARN("Render", "Full city unavailable on this graphics chip; drawing the built-in scene. " + error);
+            impl_->trilogyMesh.reset();
+            impl_->trilogy = false;
+        }
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
     startupStep("trilogy renderer resize");
@@ -2799,11 +2819,18 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         impl_->trilogyMesh->retire(kHeadlessSlot);
         startupStep("trilogy warm-up frame");
     }
+    if (impl_->trilogyMesh) {
+        impl_->dlss.warmUp(d3d_);
+        startupStep("DLSS support");
+    }
     if (!impl_->neural) {
         // Unavailable is shown on the dashboard with its reason; it never stops the film.
         impl_->neural = std::make_unique<NeuralRenderingSuite>(d3d_);
         std::string neuralError;
-        impl_->neural->initialize(&neuralError);
+        // The networks are off until asked for, and integrated graphics can take most of a minute to compile
+        // them on a first start (51 s on Intel Iris Xe): a light start leaves them out.
+        if (d3d_.rayTracingAllowed()) impl_->neural->initialize(&neuralError);
+        else impl_->neural->skip("Left out on integrated graphics, so the first start is quick.");
         startupStep("neural rendering suite");
         startupCheckpoint();
     }
@@ -2814,6 +2841,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         impl_->smoke->initialize(&smokeError);
         startupStep("PhysX smoke");
     }
+    StartupProgress::instance().stageDone();
     if (!presentCompiler.waitAll() || !impl_->psoPresentHud) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
@@ -2887,7 +2915,7 @@ bool M1TaipeiSliceEffect::syncPresetBeforeFrame(const QualityPresetSpec& spec, b
         ++impl_->dxrGeneration;
         if (!activeSpec_.allowDxr) {
             impl_->dxrVerified = false;
-        } else if (!disableRT_ && !impl_->dxrPipelineReady && !d3d_.isWarp()) {
+        } else if (!disableRT_ && !impl_->dxrPipelineReady && !d3d_.isWarp() && d3d_.rayTracingAllowed()) {
             impl_->buildDxrResourcesAndWarmUp(d3d_, activeSpec_.softVramLimitBytes);
         }
     }
@@ -2914,7 +2942,7 @@ void M1TaipeiSliceEffect::setDisableRt(bool disable) noexcept {
     ++impl_->dxrGeneration;
     if (disableRT_) {
         impl_->dxrVerified = false;
-    } else if (!impl_->dxrPipelineReady && !d3d_.isWarp()) {
+    } else if (!impl_->dxrPipelineReady && !d3d_.isWarp() && d3d_.rayTracingAllowed()) {
         impl_->buildDxrResourcesAndWarmUp(d3d_, activeSpec_.softVramLimitBytes);
     }
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);

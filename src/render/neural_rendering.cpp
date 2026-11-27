@@ -231,8 +231,15 @@ struct NeuralRenderingSuite::Impl {
 bool NeuralRenderingSuite::Impl::initialize(std::string* error) {
     device = static_cast<ID3D12Device*>(d3d.deviceRaw());
     if (!device) return fail("No D3D12 device", error);
+    // The composite and cache-training shaders read 16-bit float and 8-bit images in compute, an optional ability.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS abilities{};
+    if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &abilities, sizeof(abilities))) ||
+        !abilities.TypedUAVLoadAdditionalFormats) {
+        return fail("This graphics chip cannot read these image formats in compute shaders", error);
+    }
 
     // Trained networks
+    startupStage(StartupWork::Files, "neural_networks.bin");
     std::ifstream file(resolveResourcePath("assets/neural/neural_networks.bin"), std::ios::binary);
     const std::vector<char> blob((std::istreambuf_iterator<char>(file)), {});
     startupAssetLoaded(resolveResourcePath("assets/neural/neural_networks.bin"));
@@ -269,11 +276,13 @@ bool NeuralRenderingSuite::Impl::initialize(std::string* error) {
     // bar keeps moving while they compile.
     std::vector<std::vector<char>> code(kPsoCount);
     for (uint32_t i = 0; i < kPsoCount; ++i) {
+        startupReading(resolveResourcePath(kEntryFiles[i]));
         std::ifstream cso(resolveResourcePath(kEntryFiles[i]), std::ios::binary);
         code[i].assign(std::istreambuf_iterator<char>(cso), {});
         startupAssetLoaded(resolveResourcePath(kEntryFiles[i]));
         if (code[i].empty()) return fail(std::string("Missing shader ") + kEntryFiles[i], error);
     }
+    StartupProgress::instance().stageDone();
     {
         PipelineCompiler compiler;
         for (uint32_t i = 0; i < kPsoCount; ++i) {
@@ -415,7 +424,9 @@ void NeuralRenderingSuite::Impl::probeTensorCores() {
         D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
         d.pRootSignature = root.Get();
         d.CS = {code.data(), code.size()};
-        if (code.empty() || FAILED(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&tensorPso[i])))) {
+        if (code.empty() || FAILED(compileWhilePainting(kTensorFiles[i], code.size(), [&] {
+                return device->CreateComputePipelineState(&d, IID_PPV_ARGS(&tensorPso[i]));
+            }))) {
             tensorReason = std::string("Tensor pipeline failed for ") + kTensorFiles[i];
             return;
         }
@@ -521,6 +532,12 @@ bool NeuralRenderingSuite::initialize(std::string* error) {
 }
 
 bool NeuralRenderingSuite::ready() const noexcept { return impl_->ready; }
+
+void NeuralRenderingSuite::skip(std::string reason) {
+    if (impl_->ready) return;
+    impl_->published = NeuralRenderingStats{};
+    impl_->published.unavailableReason = std::move(reason);
+}
 
 void NeuralRenderingSuite::resetCache() noexcept {
     impl_->cacheNeedsInit = true;

@@ -10,7 +10,7 @@ There is no gameplay, score, or combat: by default, sit back and watch the deter
 
 - **Minimum (`BASE_ONLY` Safe / Balanced)**:
   - Windows 11 x64 (`22H2` or newer)
-- Any Direct3D 12 Feature Level `11_0+` GPU (discrete or integrated).
+- Any Direct3D 12 Feature Level `11_0+` GPU with Shader Model 6.0 (discrete or integrated).
 - On Microsoft WARP, the app displays a lightweight procedural orchid with a numerical HUD. It follows the film clock and selected edition, changes with each act, and supports reduced motion and reduced flash. Use `--force-warp` to test this software-rendered diagnostic mode.
   - Stereo audio output device (`48 kHz` WASAPI shared mode; automatically switches to a monotonic QPC silence clock if no audio endpoint is connected)
 - **Optional Hardware Accelerators (Probed Dynamically at Launch — Zero Hard Dependency)**:
@@ -76,12 +76,12 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `-` / `=` (or `Down` / `Up`) | Master volume `-5%` / `+5%` |
 | `E` | Switch **Family** / **Midnight** edition (palette, score voicing, and captions) |
 | `K` | Toggle lower-third captions (`--captions` / `--no-captions`; non-medical end card always shown) |
-| `Q` | Cycle Quality Preset (`Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`) |
+| `Q` | Cycle Quality Preset, outside Explore (`Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`); after a light start on integrated graphics, ray tracing stays off |
 | `Tab` / `F1` | Cycle HUD: `Full Telemetry` -> `Compact Strip` -> `A/B Split-Screen` -> `Off (Clean Cinema)` |
 | `A` | Cycle the split-screen comparison through RT, CUDA, Tensor, Codec, and the stage director. |
 | `X` / `C` / `T` / `U` / `V` | Live failover toggle for **RT** (`X`), **CUDA** (`C`), **Tensor** (`T`), **NPU** (`U`), **Codec** (`V`) |
 | `O` | Toggle live **Spout2** clean-feed sender (`BooSahSah_Clean`) |
-| `W` | Toggle / **One-Key Privacy Stop** for opt-in UVC webcam (`LIVE CAMERA`) |
+| `W` | Toggle / **One-Key Privacy Stop** (outside Explore) for opt-in UVC webcam (`LIVE CAMERA`) |
 | `B` | Run asynchronous standalone numerical benchmark sweep (`BENCH [B]`) |
 | `` ` `` | Cycle the dashboard: full table, mini strip, hidden tab |
 | `Shift+N` | Neural rendering on / off |
@@ -89,7 +89,7 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Shift+F` | Next flock formation (outside Explore) |
 | `Shift+B` | Bird camera on / off |
 | `F11` / `Alt+Enter` | Full screen on / off (the same as the **Full screen** button, top right) |
-| `F12` | Save clean 8-bit `.bmp` frame + `.json` timing metadata into `diagnostics/captures/` |
+| `F12` | Save a clean 8-bit `.bmp` film frame (without the camera layer) + `.json` timing metadata into `diagnostics/captures/`, or `Pictures\BOO SAH SAH` when that folder cannot be written (Store installs) |
 | `Ctrl+L` | Open a Demo-Verse world address from Film or Explore |
 | `Esc` | Leave full screen. From a window, clean shutdown |
 
@@ -107,6 +107,10 @@ The button is always there while the HUD is showing. With the HUD off (`Tab` to 
 
 Full screen is a borderless window that exactly covers the display, presented through a flip-model swap chain. On Windows 10 and 11 that lets the GPU scan the app's frames straight out to the display without the desktop compositor in between, which is what exclusive full screen used to be for, and it switches in and out without the display blanking. `--fullscreen` starts that way.
 
+### Integrated graphics
+
+On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick and playback smooth. Naming a preset with `--preset` (even `safe`) turns the light start off: the app then builds everything the chip supports, and a first start takes much longer.
+
 ### Loading bar
 
 While the app starts, a bar under **Loading** shows how far it has got. It counts bytes, not seconds. It is the average of four gauges, each read from the machine, and the line under the bar gives their figures:
@@ -116,7 +120,9 @@ While the app starts, a bar under **Loading** shows how far it has got. It count
 - **GPU.** GPU memory the app has in use, as Windows reports it, against what the last start reached.
 - **Shaders.** Megabytes of shader code the graphics driver has compiled into pipelines, against what the last start compiled.
 
-The bar moves only when something has actually loaded, never runs backwards, and fills when the first frame is on screen. The totals are this machine's own: the app keeps a small file, `%LOCALAPPDATA%\BOO SAH SAH\startup-memory.txt`, listing what the last start loaded, how much memory it reached and how much shader code it compiled, and nothing else. On a first start there is nothing to compare with yet, so the bar follows the files and shaders alone and stops short of full until the first frame. The log records the totals of every start, and `--log-level debug` records the gauges at each stage and how long each stage took.
+The bar moves only when something has actually loaded, never runs backwards, and fills when the first frame is on screen. The totals are this machine's own: the app keeps a small file, `%LOCALAPPDATA%\BOO SAH SAH\startup-memory.txt`, listing what the last start loaded, how much memory it reached, how much shader code it compiled and which build it was, and nothing else. On a first start there is nothing to compare with yet, so the bar follows the files and shaders alone and stops short of full until the first frame. The log records the totals of every start, and `--log-level debug` records the gauges at each stage and how long each stage took.
+
+Beside **Loading** the screen shows the time since start-up began, and under the figures it lists the steps: when each one began, what it is (starting the graphics device, reading files, compiling shaders or preparing the scene, with the exact file or pipeline name) and how long it has taken. Steps still running are bright and their seconds count up; finished ones stay on the list, dimmed, if they took a noticeable time. On the first start of a version a line says why that start is the longest. Start-up's driver calls run off the window's thread, so the screen keeps repainting and the window can be moved or closed however long the call takes. `--log-level debug` writes every step and its time to the log.
 
 The first start after an app or driver update takes longer than the others (about 27 s instead of 7 on an RTX 5080 Laptop GPU), because the driver's shader cache starts empty and it has to compile the app's shaders again. Most of that is the two ray-traced city shaders, about 15 s each; they, the dashboard shaders and the neural rendering shaders compile side by side while everything else loads, and the window keeps answering while start-up waits for them. Later starts take their pipelines from the cache in a fraction of a second. `--cold-shader-cache` starts as after an update (it needs Windows Developer Mode). Closing the app after such a start, the sound and window go at once, but the process may stay in Task Manager for a few seconds while the driver finishes its own shader work, which is what makes the next start fast.
 
@@ -129,8 +135,8 @@ When Explore mode is inactive, playback remains 100% deterministic and identical
 | Input | Function |
 |---|---|
 | `F` / Right-Mouse Drag / `F:EXPLOR` Pill | Toggle **6-DOF Interactive Explore Camera**. The film and music keep playing while you fly; `Space` pauses and resumes inside Explore, and a paused, still camera refines into the path-traced reference frame (smooth `0.65 s` cubic blend back to live film camera on exit) |
-| `W` `A` `S` `D` + `Q` / `E` (in Explore) | Fly Forward / Left / Back / Right + Down / Up (`Shift` = 3.5x sprint, `Ctrl`/`Alt` = 0.22x macro precision) |
-| Mouse Wheel / Gamepad `LT` `RT` | Smooth optical FOV zoom (`14 deg` macro telephoto to `85 deg` wide angle) |
+| `W` `A` `S` `D` + `Q` / `E` (in Explore) | Fly Forward / Left / Back / Right + Down / Up (`Shift` = 2.85x sprint, `Alt` = 0.22x precision; `Page Down` or `Ctrl` also fly down, `Page Up` up) |
+| Mouse Wheel; Gamepad `LT` / `RT` | The wheel zooms the field of view (about `17 deg` to `92 deg`); the triggers fly down / up |
 | XInput Gamepad (`Y` button + Sticks) | `Y` toggles Explore; Left Stick moves, Right Stick looks, `LB` cycles AOVs, `RB` spawns physics marbles, `D-Pad Left/Right` cycles Hero Presets |
 | `F2` – `F7` (or Studio Bar `[1]..[6]`) | Jump to curated **Hero Showcase Presets** (`1` Dawn Bathroom Wide, `2` CNC Faucet & Aerator Droplet Macro, `3` Backlit `Calathea` & Keepsake Orchid, `4` Hero Glass Orchid Sanctuary, `5` Enamel Cathedral & Mirrors, `6` Botanical Sanctuary & Brass Iris) |
 | `Alt` + Left-Mouse Drag / `[` `]` / `SUN` `AZM` Sliders | Orbit live **Sun Elevation (Time-of-Day)** and **Sun Azimuth** (`Golden Dawn` -> `High Day` -> `Midnight`) |
@@ -153,7 +159,7 @@ Edition changes crossfade the score's voices. The seven acts now include dedicat
 The dashboard has three sizes. Press `` ` `` (backtick) to cycle through them, or use the buttons on the panel:
 
 - **Full:** the complete table. Click **[-]** at the top right to collapse it.
-- **Mini:** a two-line strip. The first line colours each engine and graphics feature by state. The second line shows the neural suite, Tensor or shader cores, TFLOPS and render FPS. Click **[+]** to expand it or **[X]** to hide it.
+- **Mini:** a four-line strip. The first line colours each engine and graphics feature by state. The second shows the neural suite, Tensor or shader cores, TFLOPS and render FPS; the third the GPU sensors; the fourth the CPU and the workout level. Click **[+]** to expand it or **[X]** to hide it.
 - **Hidden:** only a small **HUD +** tab remains. Click it to bring the full table back.
 
 `--dashboard full|mini|hidden`, or `dashboard` under `[display]`, sets the starting size.
@@ -182,7 +188,7 @@ The **Neural rendering** section sits beneath Real-time graphics. It runs three 
 
 Each row shows GPU milliseconds measured with timestamps, plus a quality score in dB. For Neural Shading the score compares the network with the analytic grade. For Neural Textures it compares the decode with the original texture. For Radiance Cache it measures how closely the network fits the live frame. The heading shows the combined throughput in TFLOPS. `--export-diagnostics` writes the same figures under `runtime.neural_rendering`.
 
-All three networks run as standard Shader Model 6.0 compute shaders on any DirectX 12 GPU, using the shader cores. Test-rig builds can also run the network inference on **Tensor Cores** through Shader Model 6.10 LinAlg in FP16. The heading shows `TC` when Tensor Cores do the work and `SC` when shader cores do. Shift-click the heading to switch between them and compare the timings. On an RTX 5080 Laptop GPU at 1080p, neural shading took 1.43 ms on shader cores and 0.25 ms on Tensor Cores at the same quality. Cache training stays on shader cores in FP32.
+All three networks run as standard Shader Model 6.0 compute shaders using the shader cores, on GPUs that can read typed images in compute shaders. A light start on integrated graphics leaves them out, and their rows read N/A. Test-rig builds can also run the network inference on **Tensor Cores** through Shader Model 6.10 LinAlg in FP16. The heading shows `TC` when Tensor Cores do the work and `SC` when shader cores do. Shift-click the heading to switch between them and compare the timings. On an RTX 5080 Laptop GPU at 1080p, neural shading took 1.43 ms on shader cores and 0.25 ms on Tensor Cores at the same quality. Cache training stays on shader cores in FP32.
 
 Tensor Cores need a test-rig build and Windows Developer Mode, because Shader Model 6.10 is still a Microsoft preview:
 
@@ -209,7 +215,7 @@ Two lines beneath the frame rates read the hardware itself:
 
 ### GPU workout: the bird flock
 
-The **Workout** row is a load dial. Level 0 is the film as authored. Each step up asks for more birds, and every one is a fully articulated, ray-traced bird. Press **[+]** and **[-]**, or `Shift+Up` and `Shift+Down`, and watch the frame rate, load, watts and temperature answer. The film's own birds never change: they keep their places and their flight.
+The **Workout** row is a load dial. Level 0 is the film as authored. Each step up asks for more birds, and every one is a fully articulated bird, ray-traced where ray tracing is running. Press **[+]** and **[-]**, or `Shift+Up` and `Shift+Down`, and watch the frame rate, load, watts and temperature answer. The film's own birds never change: they keep their places and their flight.
 
 | Level | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 (`MAX`) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -328,8 +334,8 @@ By default, BOO SAH SAH never accesses user media files, cameras, or microphones
 
 - **Strict Privacy Guarantees**:
   - Audio and microphone streams are unconditionally deselected at the Media Foundation reader boundary.
-  - Whenever a webcam is active, a high-contrast crimson **`LIVE CAMERA`** pill is rendered at top-center of the window—even when the HUD overlay is turned off (`Tab` Mode 3). Press **`[W]`** at any moment to stop and release the camera hardware immediately.
-  - No video frames or pixels are ever written to disk or transmitted over a network, and all user file paths in logs/diagnostics are redacted (`<USER_HOME>`).
+  - Whenever a webcam is active, a high-contrast crimson **`LIVE CAMERA`** pill is rendered at top-center of the window—even when the HUD overlay is turned off (`Tab` Mode 3). Press **`[W]`** (outside Explore; in Explore press `F` first) to stop and release the camera hardware immediately.
+  - No camera picture is ever written to disk or transmitted over a network, and all user file paths in logs/diagnostics are redacted (`<USER_HOME>`).
   - Unsupported codecs, corrupt files, or `--inject-media-fail` automatically fall back to procedural Signal Hijack without crashing or pausing the soundtrack.
 
 ---

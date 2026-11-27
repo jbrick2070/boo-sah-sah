@@ -25,6 +25,7 @@ uint32_t crc(const uint8_t* p,size_t size) {
 }
 bool loadBmesh(const std::filesystem::path& path,Bmesh& output,std::string* error) {
     const auto fail=[&](const char* reason) { if(error)*error=reason; return false; };
+    startupReading(path);
     std::ifstream file(path,std::ios::binary|std::ios::ate);
     if(!file)return fail("Mesh missing or unreadable");
     const auto size=file.tellg();

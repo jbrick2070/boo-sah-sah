@@ -29,6 +29,14 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr uint32_t kTimestampsPerFrame = 5;
 constexpr ULONGLONG kGpuWaitTimeoutMs = 5000;
+// Every shader is built for Shader Model 6.0, which a feature level 11 adapter need not have.
+bool supportsShaderModel6(ID3D12Device* device) noexcept {
+    D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
+    return SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model))) &&
+           model.HighestShaderModel >= D3D_SHADER_MODEL_6_0;
+}
+// While loading, the window answers from its own thread, so a slow GPU or a busy driver gets longer.
+constexpr ULONGLONG kStartupGpuWaitTimeoutMs = 60000;
 
 std::string w2u8(const wchar_t* w) {
     if (!w || !*w) return {};
@@ -168,6 +176,7 @@ bool D3D12Context::initialize(
     }
 
     ComPtr<IDXGIAdapter1> chosenAdapter;
+    bool tooOld = false; // a hardware adapter without Shader Model 6.0
     if (forceWarp) {
         hr = impl_->factory->EnumWarpAdapter(IID_PPV_ARGS(&chosenAdapter));
         if (SUCCEEDED(hr) && chosenAdapter) {
@@ -177,7 +186,9 @@ bool D3D12Context::initialize(
     } else {
         ComPtr<IDXGIAdapter1> candidate;
         for (UINT idx = 0;
-             SUCCEEDED(impl_->factory->EnumAdapterByGpuPreference(idx, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate)));
+             SUCCEEDED(impl_->factory->EnumAdapterByGpuPreference(
+                 idx, lowPowerAdapter_ ? DXGI_GPU_PREFERENCE_MINIMUM_POWER : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                 IID_PPV_ARGS(&candidate)));
              ++idx) {
             DXGI_ADAPTER_DESC1 desc{};
             candidate->GetDesc1(&desc);
@@ -185,13 +196,19 @@ bool D3D12Context::initialize(
                 continue;
             }
             if (SUCCEEDED(D3D12CreateDevice(candidate.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device)))) {
+                if (!supportsShaderModel6(impl_->device.Get())) {
+                    impl_->device.Reset();
+                    tooOld = true;
+                    continue;
+                }
                 chosenAdapter = candidate;
                 isWarp_ = false;
                 break;
             }
         }
-        // Graceful fallback to WARP if no hardware D3D12 GPU succeeded
-        if (!impl_->device) {
+        // Graceful fallback to WARP if no hardware D3D12 GPU succeeded. A PC whose only GPU is too old gets the
+        // plain "unsupported graphics device" message instead of the software renderer's test picture.
+        if (!impl_->device && !tooOld) {
             if (SUCCEEDED(impl_->factory->EnumWarpAdapter(IID_PPV_ARGS(&chosenAdapter))) && chosenAdapter) {
                 if (SUCCEEDED(D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&impl_->device)))) {
                     isWarp_ = true;
@@ -202,7 +219,11 @@ bool D3D12Context::initialize(
     }
 
     if (!impl_->device || !chosenAdapter) {
-        if (outError) *outError = "No compatible Direct3D 12 device found on this system.";
+        if (outError) {
+            *outError = tooOld ? "The graphics adapter has no Shader Model 6.0, which BOO SAH SAH needs; a newer "
+                                 "graphics driver may add it."
+                               : "No compatible Direct3D 12 device found on this system.";
+        }
         return false;
     }
     // Windows 11 supplies Device5. Require its removal path before creating any
@@ -216,6 +237,7 @@ bool D3D12Context::initialize(
     DXGI_ADAPTER_DESC1 adapterDesc{};
     chosenAdapter->GetDesc1(&adapterDesc);
     adapterName_ = w2u8(adapterDesc.Description);
+    vendorId_    = adapterDesc.VendorId;
     luidLow_     = static_cast<int32_t>(adapterDesc.AdapterLuid.LowPart);
     luidHigh_    = adapterDesc.AdapterLuid.HighPart;
 
@@ -477,7 +499,8 @@ bool D3D12Context::waitForGpu() noexcept {
             impl_->synchronizationFailed = true;
             return false;
         }
-        const ULONGLONG deadline = GetTickCount64() + kGpuWaitTimeoutMs;
+        const ULONGLONG deadline = GetTickCount64() +
+            (StartupProgress::instance().active() ? kStartupGpuWaitTimeoutMs : kGpuWaitTimeoutMs);
         for (;;) {
             const DWORD result = WaitForSingleObjectEx(impl_->fenceEvent, 100, FALSE);
             if (result == WAIT_OBJECT_0) break;
@@ -647,7 +670,13 @@ bool D3D12Context::beginFrame() {
             (void)WaitForSingleObjectEx(impl_->waitableHandle, 0, FALSE);
         } else {
             const DWORD waitRes = WaitForSingleObjectEx(impl_->waitableHandle, 1000, FALSE);
-            if (waitRes != WAIT_OBJECT_0) {
+            if (waitRes == WAIT_TIMEOUT) {
+                // A very slow frame. Carry on, paced by the frame fence below, rather than draw nothing and
+                // wait another second.
+                static bool reported = false;
+                if (!reported) BOO_LOG_WARN("D3D12", "Frame latency wait timed out; pacing slow frames on their fences.");
+                reported = true;
+            } else if (waitRes != WAIT_OBJECT_0) {
                 BOO_LOG_WARN("D3D12", "beginFrame waitableHandle wait returned " + std::to_string(waitRes));
                 return false;
             }
@@ -922,6 +951,13 @@ bool D3D12Context::checkDeviceHealthy(std::string* outReason) const {
         return false;
     }
     return true;
+}
+
+bool D3D12Context::integratedAdapter() const noexcept {
+    if (!impl_ || !impl_->device || isWarp_) return false;
+    D3D12_FEATURE_DATA_ARCHITECTURE architecture{};
+    return SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &architecture, sizeof(architecture))) &&
+           architecture.UMA != FALSE;
 }
 
 uint64_t D3D12Context::queryEstimatedAppVramBytes() const noexcept {

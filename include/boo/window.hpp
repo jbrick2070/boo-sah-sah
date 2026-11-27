@@ -5,8 +5,11 @@
 #include <cstdint>
 #include <deque>
 #include <string>
+#include <vector>
 
 struct HWND__;
+struct HDC__;
+struct tagRECT;
 using HWND = HWND__*;
 
 namespace boo {
@@ -105,6 +108,13 @@ struct WindowInputSnapshot {
     float sunElevKey  = 0.0f; // Shift+] (+1) / Shift+[ (-1)
 };
 
+// One line of the loading screen's list of start-up steps.
+struct LoadingLine {
+    std::wstring when, what, took;
+    bool running = false;
+    bool operator==(const LoadingLine&) const = default;
+};
+
 class AppWindow {
 public:
     AppWindow();
@@ -137,10 +147,16 @@ public:
     // GDI "Loading..." screen shown from window creation until the first frame is presented.
     void showLoading();
     void hideLoading() noexcept { loading_ = false; }
-    // The loading bar: how full it is (0..1) and the line of figures under it. Repaints at once,
-    // without pumping messages, so it can be called from the middle of start-up.
-    void setLoadingProgress(float fraction, std::wstring detail);
+    // The loading bar: how full it is (0..1), the line of figures under it, the time since start-up
+    // began, a notice (empty for none) and the list of steps. Repaints at once, without pumping
+    // messages, so it can be called from the middle of start-up.
+    void setLoadingProgress(float fraction, std::wstring detail, std::wstring clock = {}, std::wstring notice = {},
+                            std::vector<LoadingLine> lines = {});
     bool paintLoadingFromWndProc();
+    // Closed while loading: the window is hidden at once and start-up ends as soon as it can.
+    bool closeWhileLoadingFromWndProc() noexcept;
+    bool closeRequested() const noexcept { return closeRequested_; }
+    void paintLoadingList(::HDC__* dc, const ::tagRECT& client, int top, int dpi);
     void onDestroyedFromWndProc() noexcept { hwnd_ = nullptr; }
     void fitFullscreenToMonitor();
 
@@ -188,8 +204,12 @@ private:
     std::deque<std::wstring> droppedFiles_;
     std::wstring graphicsFailureText_;
     bool loading_ = false;
+    bool closeRequested_ = false;
     float loadingFraction_ = -1.0f; // below zero: no bar yet
     std::wstring loadingDetail_;
+    std::wstring loadingClock_;
+    std::wstring loadingNotice_;
+    std::vector<LoadingLine> loadingLines_;
 };
 
 } // namespace boo

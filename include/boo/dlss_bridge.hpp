@@ -17,6 +17,8 @@ class DlssBridge {
 public:
     DlssBridge();
     ~DlssBridge();
+    // Asks NVIDIA's runtime what this GPU supports. Done on the loading thread, so the first frame does not wait.
+    void warmUp(D3D12Context& context);
     bool prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible, bool requestRR, bool raytracing,
                  ID3D12Resource* fullColor, ID3D12Resource* fullDistance);
     void resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds);

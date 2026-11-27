@@ -49,6 +49,8 @@ public:
     bool activeEffectUsesEmbeddedFallbackShader() const noexcept;
 
     bool isUsingFallbackEffect() const noexcept { return usingFallback_; }
+    // Why the main effect was replaced (empty while it runs).
+    const std::string& primaryFailureReason() const noexcept { return primaryFailureReason_; }
     const char* activeEffectName() const noexcept;
     uint64_t faultCount() const noexcept { return faultCount_; }
     const std::vector<ToastNotification>& toasts() const noexcept { return toasts_; }
@@ -62,6 +64,7 @@ private:
     std::unique_ptr<IEffect> fallbackEffect_;
     bool usingFallback_ = false;
     bool primaryFaulted_ = false;
+    std::string primaryFailureReason_;
     uint64_t faultCount_ = 0;
     std::vector<ToastNotification> toasts_;
 };

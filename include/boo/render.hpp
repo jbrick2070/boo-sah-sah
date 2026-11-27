@@ -146,6 +146,15 @@ public:
 
     void shutdown() noexcept;
 
+    // The adapter shares the PC's memory (integrated graphics).
+    bool integratedAdapter() const noexcept;
+    // Off for a light start: no ray tracing pipelines, structures or denoisers are built, and the film
+    // draws with the raster substitutes. Set before the effects are created.
+    void setRayTracingAllowed(bool allowed) noexcept { rayTracingAllowed_ = allowed; }
+    bool rayTracingAllowed() const noexcept { return rayTracingAllowed_; }
+    // Diagnostics: initialize() takes the integrated (power-saving) adapter first, to try a weaker GPU.
+    void preferLowPowerAdapter(bool prefer) noexcept { lowPowerAdapter_ = prefer; }
+
     // Diagnostics: the driver ignores its shader caches for the rest of this run, so start-up compiles
     // every pipeline as it does on the first start after an update (the install folder changes with
     // each version). Windows allows it only in Developer Mode; returns false with the reason otherwise.
@@ -197,6 +206,7 @@ public:
     bool debugLayerActive() const noexcept;
 
     const std::string& adapterName() const noexcept { return adapterName_; }
+    uint32_t adapterVendorId() const noexcept { return vendorId_; } // PCI vendor; 0x10DE is NVIDIA
     int32_t adapterLuidLow() const noexcept { return luidLow_; }
     int32_t adapterLuidHigh() const noexcept { return luidHigh_; }
     bool isWarp() const noexcept { return isWarp_; }
@@ -211,7 +221,10 @@ private:
     std::string adapterName_;
     int32_t luidLow_ = 0;
     int32_t luidHigh_ = 0;
+    uint32_t vendorId_ = 0;
     bool isWarp_ = false;
+    bool lowPowerAdapter_ = false;
+    bool rayTracingAllowed_ = true;
     uint64_t presentCount_ = 0;
     uint64_t presentStallCount_ = 0;
 };

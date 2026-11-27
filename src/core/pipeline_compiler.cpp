@@ -38,10 +38,11 @@ PipelineCompiler::~PipelineCompiler() { state_->joinAll(); }
 
 void PipelineCompiler::start(std::string name, uint64_t shaderBytes, std::function<bool()> create) {
     StartupProgress::instance().shaderQueued(shaderBytes);
+    const uint32_t task = StartupProgress::instance().taskBegin(StartupWork::Shaders, name);
     State* s = state_.get();
     std::lock_guard<std::mutex> lock(s->mutex);
     ++s->pending;
-    s->threads.emplace_back([s, name = std::move(name), shaderBytes, create = std::move(create)] {
+    s->threads.emplace_back([s, task, name = std::move(name), shaderBytes, create = std::move(create)] {
         const auto t0 = std::chrono::steady_clock::now();
         bool ok = false;
         try {
@@ -56,6 +57,7 @@ void PipelineCompiler::start(std::string name, uint64_t shaderBytes, std::functi
         std::snprintf(line, sizeof(line), "Pipeline compiled in %.0f ms (%.0f KB of shader code): %s",
                       ms, static_cast<double>(shaderBytes) / 1024.0, name.c_str());
         BOO_LOG_DEBUG("Startup", line);
+        StartupProgress::instance().taskEnd(task);
         StartupProgress::instance().shaderCompiled(shaderBytes);
         std::lock_guard<std::mutex> lock(s->mutex);
         --s->pending;
@@ -80,6 +82,20 @@ bool PipelineCompiler::waitAll() {
     const bool ok = s.allSucceeded;
     s.allSucceeded = true;
     return ok;
+}
+
+long compileWhilePainting(std::string name, uint64_t shaderBytes, const std::function<long()>& create) {
+    auto& progress = StartupProgress::instance();
+    if (!progress.onLoadingThread()) return create();
+    progress.stageDone(); // the list now shows this compile, not the stage before it
+    long result = static_cast<long>(0x80004005L); // E_FAIL, if create throws
+    PipelineCompiler one;
+    one.start(std::move(name), shaderBytes, [&] {
+        result = create();
+        return result >= 0;
+    });
+    one.waitAll();
+    return result;
 }
 
 } // namespace boo

@@ -156,6 +156,96 @@ bool testStartupProgress() {
     progress.finish();
     BOO_CHECK(progress.waitForChecksums());
 
+    // The list of steps: each stage and compile is named while it runs, with its time, and the first start of
+    // a build says so. A slow compile on the loading thread runs beside it, and the screen keeps painting.
+    {
+        StartupProgress::Setup listed;
+        listed.memoryFile = root / "list.txt";
+        listed.assetFolders = {root / "assets"};
+        listed.buildId = "build-1";
+        std::vector<StartupProgressView> views;
+        listed.onChange = [&](const StartupProgressView& view) { views.push_back(view); };
+        int pumps = 0;
+        progress.begin(listed);
+        progress.setPump([&] { ++pumps; });
+        BOO_CHECK(progress.onLoadingThread() && progress.view().firstStart);
+        progress.stage(StartupWork::Files);
+        progress.reading(a);
+        progress.assetLoaded(a); // only a start that loaded something is remembered
+        BOO_CHECK(!views.empty() && views.back().tasks.size() == 1u && views.back().tasks[0].item == "a.bin" &&
+                  !views.back().tasks[0].done);
+        progress.stage(StartupWork::Scene); // the quick file stage leaves the list
+        BOO_CHECK(progress.view().tasks.size() == 1u && progress.view().tasks[0].work == StartupWork::Scene);
+        views.clear();
+        pumps = 0;
+        const std::thread::id loading = std::this_thread::get_id();
+        std::atomic<bool> beside{false};
+        const long result = compileWhilePainting("slow.cso", 100u, [&] {
+            beside = std::this_thread::get_id() != loading;
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            return 0L;
+        });
+        BOO_CHECK(result == 0L && beside.load() && pumps >= 3); // painted and answered while it compiled
+        bool sawRunning = false;
+        for (const auto& view : views) {
+            for (const auto& task : view.tasks) sawRunning |= task.item == "slow.cso" && !task.done && task.seconds > 0.2;
+        }
+        BOO_CHECK(sawRunning);
+        const auto after = progress.view().tasks;
+        BOO_CHECK(!after.empty() && after.back().item == "slow.cso" && after.back().done && after.back().seconds >= 0.35);
+        BOO_CHECK(compileWhilePainting("fails.cso", 1u, [] { return -1L; }) == -1L);
+        // Any other slow call likewise: a stage on a thread of its own, its failure passed back to the caller.
+        pumps = 0;
+        bool ran = false, threw = false;
+        runWhilePainting(StartupWork::Device, "slow check", [&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            ran = std::this_thread::get_id() != loading;
+        });
+        BOO_CHECK(ran && pumps >= 3 && progress.view().tasks.back().item == "slow check" && progress.view().tasks.back().done);
+        try {
+            runWhilePainting(StartupWork::Device, "broken", [] { throw std::runtime_error("broken"); });
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        BOO_CHECK(threw);
+        // The loader names its own stages, files and compiles; only the window's thread paints and pumps.
+        std::atomic<int> paintedElsewhere{0};
+        progress.setPump([&] {
+            ++pumps;
+            if (std::this_thread::get_id() != loading) ++paintedElsewhere;
+        });
+        pumps = 0;
+        bool loaderOk = false;
+        runWhilePainting(StartupWork::Scene, {}, [&] {
+            const bool here = progress.onLoadingThread() && !progress.onWindowThread();
+            progress.stage(StartupWork::Files);
+            progress.reading(b);
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            const auto reading = progress.view().tasks;
+            const long compiled = compileWhilePainting("inside.cso", 10u, [] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                return 0L;
+            });
+            const auto listed = progress.view().tasks;
+            loaderOk = here && compiled == 0L && !reading.empty() && reading.back().item == "b.bin" &&
+                       std::any_of(listed.begin(), listed.end(), [](const StartupTask& t) { return t.item == "inside.cso"; });
+        });
+        BOO_CHECK(loaderOk && pumps >= 5 && paintedElsewhere.load() == 0);
+        BOO_CHECK(progress.onWindowThread());
+        progress.finish();
+        BOO_CHECK(!progress.onLoadingThread());
+        BOO_CHECK(compileWhilePainting("later.cso", 1u, [&] { return std::this_thread::get_id() == loading ? 7L : -1L; }) == 7L);
+        BOO_CHECK(progress.waitForChecksums());
+        progress.begin(listed);
+        BOO_CHECK(!progress.view().firstStart); // the same build again
+        progress.finish();
+        listed.buildId = "build-2";
+        progress.begin(listed);
+        BOO_CHECK(progress.view().firstStart); // an update
+        progress.finish();
+        BOO_CHECK(progress.waitForChecksums());
+    }
+
     fs::remove_all(root, ec);
     return true;
 }

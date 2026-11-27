@@ -13,6 +13,13 @@ enum class UiText : uint32_t {
     GraphicsFailureBody,
     Loading,
     IndependentProduction,
+    LoadingDevice,     // the start-up list on the loading screen
+    LoadingFiles,
+    LoadingShaders,
+    LoadingScene,
+    LoadingFirstStart, // shown on the first start of a build
+    FallbackTitle,     // the message over the emergency test picture
+    FallbackBody,
     Count
 };
 

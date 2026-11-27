@@ -865,6 +865,7 @@ public:
 
         const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         didCoInit_ = (hrCo == S_OK || hrCo == S_FALSE);
+        comThread_ = GetCurrentThreadId();
         if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {
             if (didCoInit_) { CoUninitialize(); didCoInit_ = false; }
             return false;
@@ -1115,7 +1116,8 @@ public:
             mfStarted_ = false;
         }
         if (didCoInit_) {
-            CoUninitialize();
+            // Only the thread that initialised COM may undo it; start-up runs this on a loader thread.
+            if (comThread_ == GetCurrentThreadId()) CoUninitialize();
             didCoInit_ = false;
         }
     }
@@ -1534,6 +1536,7 @@ private:
     }
 
     bool didCoInit_ = false;
+    DWORD comThread_ = 0;
     bool mfStarted_ = false;
     bool ready_ = false;
     UINT32 encIsAsync_ = 0;

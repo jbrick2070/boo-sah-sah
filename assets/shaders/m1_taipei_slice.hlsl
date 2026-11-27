@@ -2996,9 +2996,18 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
             float msVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 18.0 * uiScale), 1.6 * uiScale, gGpuMs);
             sdr = hudOver(uiAlpha, sdr, colAmber, msLbl);
             sdr = hudOver(uiAlpha, sdr, colEnamel, msVal);
+            float rightBase = res.x - 245.0 * uiScale;
+            // The number is the graphics chip's time on each frame, in milliseconds: say so where there is room.
+            // The nearest button to its right: [< PRV] where the transport shows, else the Explore pill.
+            float nextButton = (rightBase - 272.0 * uiScale > statX + 82.0 * uiScale) ? rightBase - 272.0 * uiScale
+                                                                                  : rightBase - 86.0 * uiScale;
+            if (nextButton > statX + 108.0 * uiScale)
+            {
+                float msUnit = sampleWord4(px, float2(statX + 90.0 * uiScale, res.y - 18.0 * uiScale), 1.6 * uiScale, 77u, 83u, 32u, 32u); // MS
+                sdr = hudOver(uiAlpha, sdr, colAmber, msUnit);
+            }
 
             // 5 Clickable Hardware Engine SOLO / ISOLATE Pills on bottom-right ([RT] [TNSR] [NPU] [CUDA] [CODC])
-            float rightBase = res.x - 245.0 * uiScale;
             if (rightBase > statX + 90.0 * uiScale)
             {
                 [unroll]
@@ -4668,14 +4677,19 @@ float4 PSPresentLetterboxHud(VSOut pin) : SV_Target
     float3 sdr = film;
     float uiAlpha = filmAlpha;
     textBeginPixel();
-    [loop] for (uint textPass = 0u; textPass < TXT_MAX_PASSES; ++textPass)
+    // The first pass stands outside the loop, and almost every pixel needs no other. With the whole HUD
+    // inside the loop, Intel's compiler kept its state live across iterations and every pixel paid for it:
+    // 190 ms a frame at 1080p on integrated graphics, against 5 ms like this (NVIDIA is the same both ways).
+    textBeginPass();
+    presentHud(pin, sdr, uiAlpha);
+    bool again = textResolvePending(px);
+    [loop] for (uint textPass = 1u; again && textPass < TXT_MAX_PASSES; ++textPass)
     {
         sdr = film;
         uiAlpha = filmAlpha;
         textBeginPass();
         presentHud(pin, sdr, uiAlpha);
-        if (!textResolvePending(px))
-            break;
+        again = textResolvePending(px);
     }
 
     float maxQuant = (gSwapchainBits >= 10u) ? 1023.0 : 255.0;

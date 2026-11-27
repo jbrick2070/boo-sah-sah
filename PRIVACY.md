@@ -1,8 +1,8 @@
 # Boo Sah Sah — Privacy Policy
 
-Effective 15 November 2026. Publisher: Jeffrey A Brick.
+Effective 27 November 2026. Publisher: Jeffrey A Brick.
 
-Boo Sah Sah ("BOO SAH SAH — The Glass Orchid Protocol") is a short film that your PC renders live. This page says what the app does with information about you. The short version: it keeps nothing and sends nothing.
+Boo Sah Sah ("BOO SAH SAH — The Glass Orchid Protocol") is a short film that your PC renders live. This page says what the app does with information about you. The short version: it collects nothing about you and sends nothing. The few files it writes stay on your own PC and are listed below.
 
 ## What the app collects
 
@@ -13,15 +13,19 @@ Nothing. The app has no accounts, no sign-in, no advertising, no analytics and n
 The app has an optional effect that mixes a live camera picture into the film.
 
 - The camera is **off** unless you turn it on, by pressing `W` or by starting the app with the camera option.
-- While the camera is on, a red **LIVE CAMERA** indicator is shown at the top of the window. Press `W` again to turn it off at once.
-- Camera pictures are used only in your PC's memory to draw the effect on your screen. The app does not record them, does not save them to a file, and does not send them anywhere.
+- While the camera is on, a red **LIVE CAMERA** indicator is shown at the top of the window. Press `W` again to turn it off at once (in Explore, where `W` flies forward, press `F` to leave Explore first).
+- Camera pictures are used in your PC's memory to draw the effect on your screen. The app does not record them, save them to a file or send them anywhere.
 - Windows asks for your permission before any app can use the camera. You can withdraw that permission at any time in Windows Settings > Privacy & security > Camera.
+
+## What the app keeps on your PC
+
+When it has loaded, the app writes one small file, `startup-memory.txt`, in its local data folder: an identifier of the app's build, how much memory and shader code that start used, and the names and sizes of the app's own files it loaded. It describes the app, not you. It lets the next loading bar show real progress, and you can delete it at any time. NVIDIA's components that come with the app may keep their own small cache or log files in your local app data, and Windows and your graphics driver keep their own caches.
 
 ## Things the app does only when you ask
 
 These stay on your PC. None of them is sent to the publisher or to anyone else.
 
-- **Capture (`F12`)** saves a still picture of the current film frame, with a small text file describing it, to a folder on your PC. If the camera effect is on screen at that moment, the picture can include it.
+- **Capture (`F12`)** saves a still picture of the current film frame, with a small text file describing it, to a folder on your PC. The saved picture is the film itself: the camera layer is not part of it.
 - **Texture sharing (Spout)**, when you switch it on, makes the film picture available to other programs running on the same PC.
 - **Your own music or video file**, if you choose one, is read from your PC to play in the film. It is not copied or uploaded.
 - **Diagnostic logs and benchmark reports** are written to your PC only if you ask for them. They describe your graphics hardware and the app's performance.

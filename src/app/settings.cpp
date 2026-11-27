@@ -274,6 +274,7 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
                 if (outError) *outError = "Unknown quality preset: " + *v;
                 return false;
             }
+            ioSettings.presetFromCommandLine = true;
         } else if (a == "--effects-detail") {
             const auto* v = requireNext(i, a); if (!v) return false;
             if (!parseEffectsDetail(*v, ioSettings.effectsDetail)) {
@@ -371,6 +372,8 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
             ioSettings.disableNVENC = true;
         } else if (a == "--force-warp") {
             ioSettings.forceWarp = true;
+        } else if (a == "--low-power-gpu") {
+            ioSettings.lowPowerGpu = true;
         } else if (a == "--cold-shader-cache") {
             ioSettings.coldShaderCache = true;
         } else if (a == "--inject-mesh-fail") {
@@ -523,6 +526,7 @@ std::string buildCliHelpText() {
         "  --disable-nvenc             Disable NVENC codec\n"
         "  --enable-signal-hijack      Opt-in probe for Signal Hijack codec path\n"
         "  --force-warp                Force Microsoft Basic Render Driver (WARP)\n"
+        "  --low-power-gpu             Use the integrated (power-saving) graphics adapter\n"
         "  --cold-shader-cache         Start as after an update: the driver ignores its shader caches\n"
         "                              (needs Windows Developer Mode)\n"
         "  --inject-shader-fail        Force fallback to embedded precompiled safe shader\n"

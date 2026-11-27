@@ -82,6 +82,8 @@ struct AppSettings {
     bool disableNPU = false;
     bool disableNVENC = false;
     bool forceWarp = false;
+    bool lowPowerGpu = false; // diagnostics: run on the integrated (power-saving) adapter
+    bool presetFromCommandLine = false; // --preset was given: integrated graphics keep it too
     bool coldShaderCache = false; // diagnostics: the driver ignores its shader caches, as on a first start after an update
     bool injectMeshFail = false;
     bool injectShaderFail = false;

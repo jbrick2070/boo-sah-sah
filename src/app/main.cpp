@@ -38,6 +38,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #include <commdlg.h>
 #include <shlobj.h>
 #include <d3d12.h>
@@ -160,6 +161,68 @@ std::wstring loadingDetail(const boo::StartupProgressView& v) {
                             v.shaderBytesCompiled / kMb, v.shaderBytesTotal / kMb);
     }
     return std::wstring(text, static_cast<size_t>(std::max(at, 0)));
+}
+
+// Minutes and seconds since start-up began.
+std::wstring loadingClock(double seconds) {
+    const int whole = std::max(0, static_cast<int>(seconds));
+    wchar_t text[16]{};
+    std::swprintf(text, std::size(text), L"%d:%02d", whole / 60, whole % 60);
+    return text;
+}
+
+// The list under the bar: when each step began, what it is (in the Windows language, with the exact file
+// or pipeline name), and how long it has taken.
+std::vector<boo::LoadingLine> loadingLines(const boo::StartupProgressView& v) {
+    std::vector<boo::LoadingLine> lines;
+    lines.reserve(v.tasks.size());
+    for (const boo::StartupTask& task : v.tasks) {
+        constexpr boo::UiText kWords[] = {boo::UiText::LoadingDevice, boo::UiText::LoadingFiles,
+                                          boo::UiText::LoadingShaders, boo::UiText::LoadingScene};
+        boo::LoadingLine line;
+        line.when = loadingClock(task.startedAt);
+        line.what = boo::uiText(kWords[static_cast<size_t>(task.work)]);
+        if (!task.item.empty()) line.what += L"   " + std::wstring(task.item.begin(), task.item.end());
+        wchar_t took[24]{};
+        std::swprintf(took, std::size(took), task.done && task.seconds < 10.0 ? L"%.1f s" : L"%.0f s",
+                      task.done ? task.seconds : std::floor(task.seconds));
+        line.took = took;
+        line.running = !task.done;
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
+// Changes with every build, so the first start after an install or update can say why it takes longer.
+std::string startupBuildId() {
+    wchar_t path[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+    if (length == 0 || length >= std::size(path)) return {};
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) return {};
+    const auto written = std::filesystem::last_write_time(path, ec);
+    if (ec) return {};
+    return std::to_string(size) + "-" + std::to_string(written.time_since_epoch().count());
+}
+
+std::wstring wideFromUtf8(const std::string& text) {
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(std::max(length, 0)), L'\0');
+    if (length > 0) MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
+    return wide;
+}
+
+// Shown over the emergency test picture: what happened, this PC's graphics chip and the reason, and an offer to
+// open the project's report page. Nothing is sent: the page opens in the browser only if the viewer says yes.
+void offerFallbackReport(HWND owner, const std::string& adapter, const std::string& reason) {
+    const std::wstring page = L"https://github.com/jbrick2070/boo-sah-sah/issues";
+    std::wstring text = boo::uiText(boo::UiText::FallbackBody);
+    text += L"\n\n" + wideFromUtf8(adapter) + L"\n" + wideFromUtf8(reason.substr(0, 300)) + L"\n" + page;
+    const UINT reading = boo::uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u;
+    if (MessageBoxW(owner, text.c_str(), boo::uiText(boo::UiText::FallbackTitle), MB_ICONWARNING | MB_YESNO | reading) == IDYES) {
+        ShellExecuteW(owner, L"open", (page + L"/new").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
 }
 
 bool openNativeAudioFilePicker(void* hwndRaw, std::filesystem::path& outPath) {
@@ -1701,6 +1764,38 @@ int main(int argc, char** argv) {
                                std::to_string(manifest.assets.size()) + " tracked entries).");
     }
 
+    // The window and its loading screen come before anything slow, so a first launch never shows nothing.
+    // Start-up works for seconds at a time without reading its message queue; keep Windows from swapping
+    // in a frozen "Not Responding" copy of the window, which would hide the loading screen.
+    AppWindow window;
+    if (!settings.runBenchCliOnly && !settings.headlessProbeOnly) {
+        DisableProcessWindowsGhosting();
+        if (!window.create(settings.title, settings.width, settings.height, settings.fullscreen, settings.noActivateWindow)) {
+            BOO_LOG_ERROR("Window", "Failed to create Win32 application window.");
+            return 1;
+        }
+        window.showLoading();
+        (void)window.pumpMessages();
+
+        // A real loading bar. It counts bytes: every asset read into memory, each checked against its
+        // SHA-256 in the manifest, and GPU memory as it fills. Loaders and start-up stages report in.
+        StartupProgress::Setup progress;
+        progress.memoryFile = startupMemoryFile();
+        for (const char* folder : {"assets/meshes", "assets/textures", "assets/shaders", "assets/neural"}) {
+            progress.assetFolders.push_back(resolveResourcePath(folder));
+        }
+        for (const auto& asset : manifest.assets) progress.digests.emplace(asset.path, asset.sha256);
+        progress.buildId = startupBuildId();
+        progress.onChange = [&window](const StartupProgressView& v) {
+            window.setLoadingProgress(v.fraction, loadingDetail(v), loadingClock(v.seconds),
+                                      v.firstStart ? uiText(UiText::LoadingFirstStart) : L"", loadingLines(v));
+        };
+        StartupProgress::instance().begin(std::move(progress));
+        // While start-up waits on other threads, the window keeps answering (it can be moved or closed).
+        StartupProgress::instance().setPump([&window] { (void)window.pumpMessages(); });
+        startupCheckpoint();
+    }
+
     // 2. Probe GPU and optional accelerator capabilities without requiring optional SDKs
     ProbeFlags pflags{};
     pflags.disableRT = settings.disableRT;
@@ -1713,7 +1808,9 @@ int main(int argc, char** argv) {
 
     // Tensor-core neural rendering (ENABLE_LINALG_PREVIEW builds) must opt in before any device exists.
     enableNeuralPreviewFeatures();
-    const SystemCapabilities caps = probeSystemCapabilities(pflags);
+    SystemCapabilities probed{};
+    runWhilePainting(StartupWork::Device, "hardware check", [&] { probed = probeSystemCapabilities(pflags); });
+    const SystemCapabilities& caps = probed;
     FallbackOrchestrator orchestrator;
     for (size_t i = 0; i < kEngineKindCount; ++i) {
         orchestrator.registerEngineState(caps.engines[i]);
@@ -1722,6 +1819,7 @@ int main(int argc, char** argv) {
     // CLI-only ad-hoc numerical benchmark mode (--bench)
     if (settings.runBenchCliOnly) {
         D3D12Context headlessD3D;
+        headlessD3D.preferLowPowerAdapter(settings.lowPowerGpu);
         std::string d3dErr;
         if (!headlessD3D.initialize(nullptr, 1920, 1080, settings.forceWarp, settings.enableD3DDebug, &d3dErr)) {
             BOO_LOG_ERROR("Bench", "Unable to initialize D3D12 device for benchmark: " + d3dErr);
@@ -1786,6 +1884,7 @@ int main(int argc, char** argv) {
             "BOO SAH SAH requires a Direct3D 12 compatible graphics device on Windows 11.\n"
             "No usable D3D12 adapter was detected.";
         BOO_LOG_ERROR("D3D12", msg);
+        window.destroy();
         if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
             MessageBoxW(nullptr, uiText(UiText::UnsupportedGpuBody), uiText(UiText::UnsupportedGpuTitle),
                         MB_ICONERROR | MB_OK | (uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u));
@@ -1834,6 +1933,7 @@ int main(int argc, char** argv) {
         audio.setMuted(settings.mute);
         audio.setEdition(settings.edition);
         audio.setDurationSamples(cueSheet.durationSamples);
+        startupStage(StartupWork::Scene, "audio");
         audioClockReady = audio.initialize(settings.injectAudioFail);
         if (!audioClockReady) {
             BOO_LOG_WARN("Audio", audio.fallbackReason() + " -> Switching to monotonic silence clock.");
@@ -1900,7 +2000,7 @@ int main(int argc, char** argv) {
 
     // 3b. Launch non-blocking background OpenVINO NPU/CPU neural stage-director while D3D12 initializes
     QualityLadder qualityLadder(settings.qualityPreset, 60);
-    const QualityPresetSpec startupSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
+    QualityPresetSpec startupSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
     AsyncDirectorController asyncDirector;
     asyncDirector.start(
         cueSheet.seed,
@@ -1909,50 +2009,54 @@ int main(int argc, char** argv) {
         settings.injectNpuTimeout,
         !settings.forceWarp);
 
-    // Start-up works for seconds at a time without reading its message queue. Keep Windows from
-    // swapping in a frozen "Not Responding" copy of the window, which would hide the loading bar.
-    DisableProcessWindowsGhosting();
-
-    // 4. Create Win32 Window + Triple-Buffered D3D12 SwapChain
-    AppWindow window;
-    if (!window.create(settings.title, settings.width, settings.height, settings.fullscreen, settings.noActivateWindow)) {
-        BOO_LOG_ERROR("Window", "Failed to create Win32 application window.");
+    // 4. Triple-buffered D3D12 swap chain on the window created above
+    (void)window.pumpMessages();
+    if (window.closeRequested()) { // closed while loading
         asyncDirector.shutdown();
         audio.shutdown();
-        return 1;
-    }
-    window.showLoading();
-    (void)window.pumpMessages();
-
-    // A real loading bar. It counts bytes: every asset read into memory, each checked against its
-    // SHA-256 in the manifest, and GPU memory as it fills. Loaders and start-up stages report in.
-    {
-        StartupProgress::Setup progress;
-        progress.memoryFile = startupMemoryFile();
-        for (const char* folder : {"assets/meshes", "assets/textures", "assets/shaders", "assets/neural"}) {
-            progress.assetFolders.push_back(resolveResourcePath(folder));
-        }
-        for (const auto& asset : manifest.assets) progress.digests.emplace(asset.path, asset.sha256);
-        progress.onChange = [&window](const StartupProgressView& v) {
-            window.setLoadingProgress(v.fraction, loadingDetail(v));
-        };
-        StartupProgress::instance().begin(std::move(progress));
-        // While start-up waits on pipeline compiles, the window keeps answering (it can be moved or closed).
-        StartupProgress::instance().setPump([&window] { (void)window.pumpMessages(); });
-        startupCheckpoint();
+        return 0;
     }
 
+    // Graphics setup runs on a loader thread while this thread only paints and answers the window: no
+    // driver call, however long it takes, can make the window look frozen.
     D3D12Context d3d;
     std::string d3dInitErr;
-    if (!d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(),
-                        settings.forceWarp, settings.enableD3DDebug, &d3dInitErr)) {
+    d3d.preferLowPowerAdapter(settings.lowPowerGpu);
+    bool d3dReady = false;
+    // Read here: the window's thread may change these while the loader works.
+    const HWND hwnd = window.hwnd();
+    const uint32_t clientW = window.clientWidth(), clientH = window.clientHeight();
+    runWhilePainting(StartupWork::Device, "Direct3D 12", [&] {
+        d3dReady = d3d.initialize(hwnd, clientW, clientH, settings.forceWarp, settings.enableD3DDebug, &d3dInitErr);
+    });
+    if (window.closeRequested()) {
+        StartupProgress::instance().cancel();
+        asyncDirector.shutdown();
+        d3d.shutdown();
+        audio.shutdown();
+        return 0;
+    }
+    if (!d3dReady) {
         BOO_LOG_ERROR("D3D12", "D3D12 initialization failed: " + d3dInitErr);
+        StartupProgress::instance().cancel();
         asyncDirector.shutdown();
         window.destroy();
         audio.shutdown();
+        if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
+            MessageBoxW(nullptr, uiText(UiText::UnsupportedGpuBody), uiText(UiText::UnsupportedGpuTitle),
+                        MB_ICONERROR | MB_OK | (uiIsRightToLeft() ? (MB_RTLREADING | MB_RIGHT) : 0u));
+        }
         return 1;
     }
     StartupProgress::instance().setGpuProbe([&d3d] { return d3d.queryEstimatedAppVramBytes(); });
+    // Integrated graphics share the PC's memory and are many times slower. The standard preset runs them at a
+    // few frames a second and building ray tracing takes minutes on a first start, so they begin light.
+    if (d3d.integratedAdapter() && !settings.presetFromCommandLine) {
+        d3d.setRayTracingAllowed(false);
+        qualityLadder.setPreset(QualityPresetId::Safe);
+        startupSpec = findQualityPresetSpec(presets, QualityPresetId::Safe);
+        BOO_LOG_INFO("Render", "Integrated graphics: starting light (Safe preset, raster lighting).");
+    }
     if (settings.coldShaderCache) {
         std::string reason;
         if (d3d.bypassShaderCaches(&reason)) BOO_LOG_INFO("D3D12", "Shader caches bypassed: every pipeline compiles as on a first start.");
@@ -1978,28 +2082,31 @@ int main(int argc, char** argv) {
     startupStep("GPU sensors");
 
     // 5. Initialize cue-routed primary + embedded-safe-fallback visual effects
-    M1TaipeiSliceEffect* liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, startupSpec, orchestrator);
-    startupStep("show effects created");
-
-    startupCheckpoint();
-    (void)window.pumpMessages();
-    const HardwareResult visualInit = orchestrator.initializeEffects(false);
+    M1TaipeiSliceEffect* liveM1Ptr = nullptr;
+    HardwareResult visualInit{};
+    runWhilePainting(StartupWork::Scene, {}, [&] {
+        liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, startupSpec, orchestrator);
+        startupStep("show effects created");
+        startupCheckpoint();
+        visualInit = orchestrator.initializeEffects(false);
+    });
     startupStep("show effects initialised");
     startupCheckpoint();
     if (settings.physxRouteTest) physxRuntime.requestStart();
-    if (physxGenreInfo(settings.physxGenre).usesPhysxSdk || settings.physxRouteTest) {
+    if (!window.closeRequested() && (physxGenreInfo(settings.physxGenre).usesPhysxSdk || settings.physxRouteTest)) {
         // Opening on a PhysX genre: the runtime loaded alongside the scene; let it finish inside the
         // loading screen, so its libraries are on the bar and the first frame does not wait for them.
-        physxRuntime.waitUntilSettled(30000);
+        runWhilePainting(StartupWork::Scene, "PhysX", [&] { physxRuntime.waitUntilSettled(30000); });
         startupCheckpoint();
     }
+    startupStage(StartupWork::Scene); // runs until the first frame is on screen
     (void)window.pumpMessages();
     BOO_LOG_INFO("Render", std::string("Active visual backend: ") + orchestrator.activeEffectName() +
                            " [" + visualInit.diagnosticCode + "]");
     gpuSensors.resetSummary(); // Run statistics cover playback, not loading
 
     SpoutSender spoutSender;
-    if (settings.enableSpout) {
+    if (settings.enableSpout && !window.closeRequested()) {
         std::string spoutReason;
         const uint32_t spW = (liveM1Ptr && liveM1Ptr->canvasWidth() > 0) ? liveM1Ptr->canvasWidth() : startupSpec.renderWidth;
         const uint32_t spH = (liveM1Ptr && liveM1Ptr->canvasHeight() > 0) ? liveM1Ptr->canvasHeight() : startupSpec.renderHeight;
@@ -2013,7 +2120,9 @@ int main(int argc, char** argv) {
     // Opt-in Signal Hijack media / webcam ingest (SPEC_v4 Sections 5.1-5.3 & 11: strictly idle unless opted in)
     MediaIngestSource mediaIngest;
     std::vector<uint8_t> latestMediaNv12;
-    if (settings.enableCameraInput) {
+    if (window.closeRequested()) {
+        // Closed while loading: open no camera or file for a film nobody will see.
+    } else if (settings.enableCameraInput) {
         if (mediaIngest.openLiveCamera(settings.injectMediaFail)) {
             settings.enableSignalHijack = true;
             orchestrator.setCodecSignalHijackActive(true);
@@ -2064,7 +2173,8 @@ int main(int argc, char** argv) {
         const auto benchLuidLow = d3d.adapterLuidLow();
         const auto benchLuidHigh = d3d.adapterLuidHigh();
         const auto benchAdapter = d3d.adapterName();
-        benchThread = std::thread([&, benchSettings, benchDevice, benchLuidLow, benchLuidHigh, benchAdapter]() {
+        const bool rayTracingOff = !d3d.rayTracingAllowed(); // a light start measures without ray tracing too
+        benchThread = std::thread([&, benchSettings, benchDevice, benchLuidLow, benchLuidHigh, benchAdapter, rayTracingOff]() {
           try {
             auto* dev = benchDevice.Get();
             Microsoft::WRL::ComPtr<ID3D12CommandQueue> asyncQueue;
@@ -2077,7 +2187,7 @@ int main(int argc, char** argv) {
 
             BenchmarkConfig bcfg{};
             bcfg.timedIterations = benchSettings.benchIterations;
-            bcfg.disableRT = benchSettings.disableRT;
+            bcfg.disableRT = benchSettings.disableRT || rayTracingOff;
             bcfg.disableCUDA = benchSettings.disableCUDA;
             bcfg.disableTensor = benchSettings.disableTensor;
             bcfg.disableNVENC = benchSettings.disableNVENC;
@@ -2144,12 +2254,12 @@ int main(int argc, char** argv) {
     }
     clock.start(audioClockReady, settings.loop || isSoloOrLoopMode);
     if(settings.startSeconds>0) { clock.seekToSeconds(settings.startSeconds); if(audioClockReady)audio.resetPhase(static_cast<uint64_t>(clock.currentSample())); }
-    if (audioClockReady) audio.setPaused(false);
+    if (audioClockReady && !window.closeRequested()) audio.setPaused(false);
     const int64_t initialSample = clock.currentSample();
     size_t lastActIdx = SIZE_MAX;
     orchestrator.onSceneBoundary(0, clock.currentSeconds(), false);
 
-    if (settings.runBenchOnStart) {
+    if (settings.runBenchOnStart && !window.closeRequested()) {
         startBackgroundBenchSweep();
     }
 
@@ -2282,12 +2392,26 @@ int main(int argc, char** argv) {
         interactiveCtrl.hasPrevState = false;
     };
 
+    // Neural settings may ask for networks that were never built here (the command line, or a recovery onto a
+    // GPU without them): turn them off, so no heading or solo caption shows a suite that is not running.
+    const auto dropUnavailableNeural = [&] {
+        if ((settings.neural.enabled || settings.neural.solo != NeuralSolo::None) &&
+            !(liveM1Ptr && liveM1Ptr->neuralRenderingStats().available)) {
+            settings.neural.enabled = false;
+            settings.neural.solo = NeuralSolo::None;
+        }
+    };
+
     // One recovery policy covers loss during resize, fence waits, resource sync,
     // and Present. The 48 kHz transport is deliberately never stopped or rebased.
     auto recoverGraphics = [&](const std::string& cause) {
         const bool mayRecover = !recoveryAttempted;
         recoveryAttempted = true;
         BOO_LOG_WARN("D3D12", "Graphics lifecycle failure: " + cause);
+        // A loss before the first frame leaves the loading screen: recovery must neither pump window messages
+        // from inside pipeline builds nor leave the window in its loading state.
+        StartupProgress::instance().cancel();
+        window.hideLoading();
         benchCancel.store(true, std::memory_order_release);
         if (benchThread.joinable()) benchThread.join();
         benchCompleted.store(false, std::memory_order_release);
@@ -2311,6 +2435,7 @@ int main(int argc, char** argv) {
                 const auto result = orchestrator.initializeEffects(false);
                 if (result.status != BackendStatus::Faulted && result.status != BackendStatus::Unavailable &&
                     d3d.checkDeviceHealthy(&recoveryError)) {
+                    dropUnavailableNeural();
                     orchestrator.setAbCompareEngine(abCompareEngine);
                     orchestrator.setCodecSignalHijackActive(settings.enableSignalHijack);
                     orchestrator.resetTo(clock.currentSeconds());
@@ -2382,6 +2507,17 @@ int main(int argc, char** argv) {
         running = false;
     }
 
+    dropUnavailableNeural();
+    if (running && (visualInit.status == BackendStatus::Faulted || visualInit.status == BackendStatus::Unavailable)) {
+        // Neither the film nor the safe picture could be built: say so instead of presenting black frames.
+        graphicsUnavailable = true;
+        runtimeExitCode = 1;
+        BOO_LOG_ERROR("Render", "No visual effect could be built: " + visualInit.humanReadableReason);
+        StartupProgress::instance().cancel();
+        window.hideLoading();
+        window.showGraphicsFailure(visualInit.humanReadableReason);
+    }
+    bool fallbackReported = false;
     while (running && window.pumpMessages()) {
         const auto cpuFrameT0 = std::chrono::steady_clock::now();
         bool manualPresetChanged = false;
@@ -2456,6 +2592,18 @@ int main(int argc, char** argv) {
 
         TransportCommand cmd = TransportCommand::None;
         while (window.popCommand(cmd)) {
+            // The neural networks may not be built (a light start on integrated graphics, or a GPU without a
+            // feature they need): their controls then say why and change nothing, never showing the suite as on.
+            const bool neuralControl = cmd == TransportCommand::ToggleNeuralRendering ||
+                cmd == TransportCommand::ToggleNeuralTensorCores || cmd == TransportCommand::ToggleNeuralShading ||
+                cmd == TransportCommand::ToggleNeuralTextures || cmd == TransportCommand::ToggleNeuralCache ||
+                cmd == TransportCommand::SoloNeuralShading || cmd == TransportCommand::SoloNeuralTextures ||
+                cmd == TransportCommand::SoloNeuralCache;
+            if (neuralControl && !(liveM1Ptr && liveM1Ptr->neuralRenderingStats().available)) {
+                BOO_LOG_INFO("Neural", "Neural rendering is unavailable here. " +
+                    (liveM1Ptr ? liveM1Ptr->neuralRenderingStats().unavailableReason : std::string()));
+                continue;
+            }
             switch (cmd) {
                 case TransportCommand::StepBack:
                 case TransportCommand::StepForward:
@@ -3545,6 +3693,13 @@ int main(int argc, char** argv) {
                 if (presented) {
                     window.hideLoading();
                     StartupProgress::instance().finish(); // does nothing after the first frame
+                }
+                if (presented && !fallbackReported && orchestrator.isUsingFallbackEffect()) {
+                    // The emergency test picture explains itself instead of just pulsing.
+                    fallbackReported = true;
+                    if (!settings.noActivateWindow && settings.autoExitSeconds <= 0.0) {
+                        offerFallbackReport(window.hwnd(), d3d.adapterName(), orchestrator.primaryFailureReason());
+                    }
                 }
                 if (!presented || !published) {
                     recoverGraphics(presented ? "Spout GPU publication did not retire." : "Frame submission or Present failed.");

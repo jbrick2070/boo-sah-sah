@@ -63,6 +63,8 @@ public:
 
     // Loads the trained networks and builds the pipelines. False (with a reason) leaves the suite unavailable.
     bool initialize(std::string* error = nullptr);
+    // Leaves the suite unbuilt, shown as unavailable for this reason.
+    void skip(std::string reason);
     bool ready() const noexcept;
 
     // hdr (R16G16B16A16_FLOAT, UAV-capable) and depth (R32_FLOAT) must be in PIXEL_SHADER_RESOURCE on entry

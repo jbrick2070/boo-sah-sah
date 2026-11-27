@@ -86,6 +86,7 @@ bool loadBtex(const std::filesystem::path& path, Btex& output, std::string* erro
         if (error) *error = reason;
         return false;
     };
+    startupReading(path);
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return fail("Texture missing or unreadable");
     const auto fileSize = file.tellg();

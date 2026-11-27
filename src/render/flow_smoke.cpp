@@ -4,6 +4,7 @@
 #include "boo/m1_scene.hpp"
 #include "boo/render.hpp"
 #include "boo/startup_progress.hpp"
+#include "boo/pipeline_compiler.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -221,7 +222,9 @@ bool FlowSmoke::Impl::initializeD3D(std::string* error) {
     D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc{};
     psoDesc.pRootSignature = root.Get();
     psoDesc.CS = {code.data(), code.size()};
-    if (FAILED(device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pso)))) return fail("Smoke pipeline creation failed");
+    if (FAILED(compileWhilePainting("smoke renderer", code.size(), [&] {
+            return device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pso));
+        }))) return fail("Smoke pipeline creation failed");
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;

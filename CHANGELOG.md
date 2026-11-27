@@ -2,6 +2,20 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 1.1.13.0 — Never frozen, and the city on every GPU
+
+- Fixes the Store's two rejections. Version 1.1.10 appeared frozen at launch on an Intel UHD 620 laptop (10.1.2.10): it compiled two 1 MB dashboard shaders on the window's thread. On a cold start here its window did not answer for about five minutes.
+- **The city now draws on GPUs without double-precision math** (Intel Iris Xe, Intel Arc cards, Snapdragon laptops by published reports). `m2_mesh.hlsl` chose between plain numbers (`c ? 0.5 : 1.0`), which DXC types as double; those GPUs cannot build such a pipeline, so every version up to 1.1.12 dropped to the emergency test picture there. 106 literals are now typed float; the film's frames are unchanged pixel for pixel. A unit test (`ShadersRunOnEveryGpu`) fails if any shader needs double or 64-bit integer math.
+- All graphics start-up runs on a loader thread; the window's thread only paints and answers. The window opens before the hardware probe.
+- The loading screen shows each step as it runs, with its file and time, and says on a first start why it is the longest (25 languages).
+- Integrated graphics start light: the Safe preset, raster lighting, no ray tracing resources and no neural rendering suite. Cold first start on Intel Iris Xe: 6 s.
+- The dashboard shader's first text pass stands outside its loop: about 190 ms to 5 ms a frame on Intel integrated graphics, pixel-identical over 3,320 dashboard states; NVIDIA unchanged.
+- If the city still cannot be built, the built-in scene draws instead. If the emergency test picture appears, a message names the GPU and the reason and offers to open the report page.
+- Closing during loading hides the window at once. A frame that waits too long for the display is paced on its fence instead of being dropped. `--low-power-gpu` runs on the integrated adapter for testing.
+- Optional graphics abilities are checked before use. An adapter without Shader Model 6.0, or a graphics start that fails, ends with the unsupported-graphics message. The neural suite needs compute reads of 16-bit float and 8-bit images, and the ray-traced city needs wave operations; where the suite is not built, its controls stay off and the log says why.
+- The unit tests find the built shaders when CTest runs them. The privacy policy names the files the app keeps; the app's own captures never include the camera.
+- Closing during loading starts nothing more (no sound, camera or benchmark). A benchmark after a light start runs without ray tracing. NVIDIA's runtime starts only on NVIDIA graphics, on the loading thread. A ray-traced pipeline the driver cannot build now costs ray tracing, not the city. If no picture at all can be built, a message says so.
+
 ## 1.1.12.0 — No wait on the first start
 
 - The first start after an update no longer holds on the loading bar, and reaches the film in 27 s instead of 58 s on an RTX 5080 Laptop GPU (`--cold-shader-cache`). The two shaders that draw the HUD over the film took the driver 44 s each to compile (53 s alongside the rest): every text call (`sampleWord4/8`, the number and timecode helpers, the stroke font) was inlined at its call site, about 1,500 copies of the glyph code in 1.1 MB of DXIL. Now each text call is a *run*, and a pixel draws the HUD in passes: each pass draws with the coverage of the runs resolved so far and notes the first unresolved run whose box holds the pixel, and a single glyph evaluator rasterises it between passes. 97% of pixels need one pass, none needed more than six over 3,600 HUD states. The shaders are 191 KB and 199 KB (with frame-generation outputs) and compile cold in 1.5 s; DXC builds them in 2 s instead of 37.

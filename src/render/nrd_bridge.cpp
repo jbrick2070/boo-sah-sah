@@ -2,6 +2,7 @@
 #include "boo/api.hpp"
 #include "boo/logging.hpp"
 #include "boo/render.hpp"
+#include "boo/pipeline_compiler.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -393,7 +394,9 @@ bool NrdBridge::initialize(std::string* outReason) {
         D3D12_COMPUTE_PIPELINE_STATE_DESC cpsd{};
         cpsd.pRootSignature = pe.rootSig.Get();
         cpsd.CS = {pd.computeShaderDXIL.bytecode, static_cast<SIZE_T>(pd.computeShaderDXIL.size)};
-        if (FAILED(dev->CreateComputePipelineState(&cpsd, IID_PPV_ARGS(&pe.pso)))) {
+        if (FAILED(compileWhilePainting("NRD denoiser " + std::to_string(i + 1), pd.computeShaderDXIL.size, [&] {
+                return dev->CreateComputePipelineState(&cpsd, IID_PPV_ARGS(&pe.pso));
+            }))) {
             s.status = "NRD D3D12 ComputePSO creation failed";
             if (outReason) *outReason = s.status;
             shutdown();

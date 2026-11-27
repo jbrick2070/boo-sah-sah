@@ -7,32 +7,33 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-BOO SAH SAH is a real-time GPU demo for Windows 11. It is not a game: there is no gameplay, no score, no sign-in, no ads, no purchases and no network use. The app works fully offline.
+1.1.13 FIXES the launch freeze reported for 1.1.10 (10.1.2.10, Dell Inspiron 5379): startup compiles no longer block the window, and the loading screen shows each step as it runs, with its file and time. It also fixes a likely cause of 10.1.4.4: on GPUs without double-precision math (Intel Iris Xe, Snapdragon) earlier versions showed only circles instead of the city and its controls. The first launch is the longest, while the driver compiles shaders.
 
-To test:
-1. Turn the sound on and launch the app from the Start menu. The film starts by itself and plays in a window. Press F11 to toggle fullscreen and Esc at any time to exit.
-2. Space pauses and resumes. Left and Right arrows seek 2 seconds. N and P jump between acts. E switches between the Family and Midnight editions. Tab cycles the on-screen display (Clean Cinema hides it).
-3. The app picks the language of Windows; its captions and on-screen text exist in 25 languages. Everything works without any setting.
+BOO SAH SAH is an interactive real-time 3D show for Windows 11: a six-minute film through Shanghai, Shenzhen and Taipei with an original soundtrack, which you can step into at any moment. No account, ads or purchases; it works offline.
 
-Hardware: it needs a Direct3D 12 graphics device (any DirectX 12 GPU, discrete or integrated). Ray tracing, NVIDIA CUDA, the Intel NPU and hardware video encoding are optional and detected at launch; without them the app uses built-in substitutes, so it runs on any DirectX 12 PC. On a PC with no usable Direct3D 12 adapter the app shows a plain message that says so and closes; this is expected. A virtual machine may run it slowly.
+To try in the first two minutes (sound on; the film starts by itself):
+1. EXPLORE: press F to take the camera. W A S D fly, Q/E down/up, drag with the right mouse button to look, wheel to zoom, Alt+drag to move the sun, Y to drop physics marbles. F returns.
+2. BIRDS: Shift+Up / Shift+Down add or remove flocks of animated birds; Shift+F changes the formation (outside Explore).
+3. TIME: Space pauses; Left / Right seek; N / P jump between acts; R restarts. E switches the Family and Midnight editions (outside Explore).
+4. MUSIC: Z switches between the original tracks; you can drop in your own MP3, WAV or FLAC.
+5. SCREEN: Tab changes the panels; click a hardware row to compare it in split view; F12 saves a picture; F11 full screen; Esc leaves it, then exits.
+The interface is in 25 languages.
 
-Camera: declared only for an optional effect. The camera is OFF by default and nothing uses it unless the viewer presses W. While it is on, a red LIVE CAMERA label is always visible; W turns it off at once. Camera pictures stay in memory and are never saved or sent. Privacy policy: see the link in the listing.
+Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA, an NPU and video encoding are optional (built-in substitutes); integrated graphics use a lighter mode. A PC without a suitable adapter gets a plain message.
 
-F12 saves a still picture of the current frame to Pictures\BOO SAH SAH. The app writes nothing else unless the viewer asks for it.
-
-No account, login or special hardware is needed to test.
+Camera: off by default; W (outside Explore) or a launch option turns it on, with a red LIVE CAMERA label; nothing is recorded, saved or sent. F12 saves the film frame (never the camera) to Pictures\BOO SAH SAH. Web links open only when asked; the app makes no network connection.
 ```
 
 ## Restricted capability: runFullTrust (justification, 500 characters at most)
 
 ```
-BOO SAH SAH is a Win32 Direct3D 12 desktop app (C++). Full trust lets it use the GPU directly through D3D12 and DXGI, play audio through WASAPI, and load optional GPU helper libraries (NVIDIA denoiser, OpenVINO) from its own install folder at launch. It makes no internet connection, collects no data and does not change system settings.
+BOO SAH SAH is a Win32 Direct3D 12 desktop app (C++). Full trust lets it use the GPU directly through D3D12 and DXGI, play audio through WASAPI, and load optional GPU helper libraries (NVIDIA denoiser, DLSS and Streamline, OpenVINO) from its own install folder at launch. It makes no internet connection, collects no data and does not change system settings.
 ```
 
 ## Device capability: webcam
 
 ```
-Declared for one optional effect that mixes the live camera into the film. It is off by default and starts only when the viewer presses W. A red LIVE CAMERA indicator is always shown while it is on, and W turns it off immediately. Pictures stay in memory; nothing is recorded, saved or sent. Windows also asks for permission first.
+Declared for one optional effect that mixes the live camera into the film. Off by default; it starts only when the viewer presses W or uses the camera launch option. A red LIVE CAMERA label always shows while on, and W (outside Explore) turns it off. Pictures stay in memory; nothing is recorded, saved or sent, and the app's own F12 capture leaves the camera out. Windows also asks for permission first.
 ```
 
 ## Properties and policy fields
@@ -43,7 +44,7 @@ Declared for one optional effect that mixes the live camera into the film. It is
 | Privacy policy URL | `https://github.com/jbrick2070/boo-sah-sah/blob/main/PRIVACY.md` (required because of the camera capability) |
 | Website | `https://github.com/jbrick2070/boo-sah-sah` |
 | Support contact | `https://github.com/jbrick2070/boo-sah-sah/issues` (issues must be enabled on the repository) |
-| Minimum hardware | Windows 11 22H2 or newer, x64, Direct3D 12 GPU (Feature Level 11_0 or higher), stereo audio output |
+| Minimum hardware | Windows 11 22H2 or newer, x64, Direct3D 12 GPU (Feature Level 11_0 or higher with Shader Model 6.0), stereo audio output |
 | Recommended hardware | A ray-tracing GPU (NVIDIA RTX, AMD RDNA 2 or newer, Intel Arc) for the full image |
 | Copyright and trademark | (c) 2026 Jeffrey A Brick. Code MIT; soundtrack and cue sheets CC BY-NC 4.0. Scanned textures and models are CC0 (Poly Haven); see LICENSES.md |
 

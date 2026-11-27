@@ -1563,6 +1563,41 @@ bool testAudioReactiveFollowerBeatAndFlashSafety() {
     return true;
 }
 
+// Every shipped shader must run on every Direct3D 12 GPU the app supports. Intel Iris Xe graphics has no
+// double-precision or 64-bit integer math: a shader that asks for either cannot be built there, and the app
+// falls back to its test picture (Store versions 1.0.0 to 1.1.12 did). DXC types a choice between two plain
+// numbers (c ? 0.5 : 1.0) as double, so such literals need an f.
+bool testShadersRunOnEveryGpu() {
+    // Beside this executable, where the build puts them: from the source tree (as CTest runs it) the relative
+    // path finds only the .hlsl sources.
+    char* program = nullptr;
+    std::filesystem::path folder;
+    if (_get_pgmptr(&program) == 0 && program) folder = std::filesystem::path(program).parent_path() / "assets" / "shaders";
+    std::error_code ec;
+    if (!std::filesystem::exists(folder, ec)) folder = boo::resolveResourcePath("assets/shaders");
+    size_t checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+        if (entry.path().extension() != ".cso") continue;
+        std::ifstream file(entry.path(), std::ios::binary);
+        const std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
+        BOO_CHECK(bytes.size() > 32 && std::memcmp(bytes.data(), "DXBC", 4) == 0);
+        const auto read32 = [&](size_t at) { uint32_t v = 0; if (at + 4 <= bytes.size()) std::memcpy(&v, bytes.data() + at, 4); return v; };
+        uint64_t features = 0; // the container's SFI0 part: what the shader requires of the GPU
+        for (uint32_t part = 0, parts = read32(28); part < parts && part < 64; ++part) {
+            const size_t at = read32(32 + 4 * static_cast<size_t>(part));
+            if (at + 16 <= bytes.size() && std::memcmp(bytes.data() + at, "SFI0", 4) == 0) std::memcpy(&features, bytes.data() + at + 8, 8);
+        }
+        constexpr uint64_t kDoubles = 0x1, kDoubleExtensions = 0x20, kInt64 = 0x8000;
+        if ((features & (kDoubles | kDoubleExtensions | kInt64)) != 0) {
+            std::cout << "  " << entry.path().filename().string() << " needs double or 64-bit integer math" << std::endl;
+            BOO_CHECK(false);
+        }
+        ++checked;
+    }
+    BOO_CHECK(checked > 30);
+    return true;
+}
+
 bool testUiTextLanguages() {
     using boo::UiText;
     BOO_CHECK(boo::uiLanguageCount() == 25);
@@ -1570,9 +1605,12 @@ bool testUiTextLanguages() {
     for (size_t lang = 0; lang < boo::uiLanguageCount(); ++lang) {
         for (uint32_t id = 0; id < static_cast<uint32_t>(UiText::Count); ++id) {
             const std::wstring text = boo::uiTextAt(lang, static_cast<UiText>(id));
-            BOO_CHECK(text.size() > (id == static_cast<uint32_t>(UiText::Loading) ? 2u : 8u));
-            // Every translation of the first two strings keeps the product name; the box body keeps the API name.
-            if (id != static_cast<uint32_t>(UiText::GraphicsFailureBody) && id != static_cast<uint32_t>(UiText::Loading)) BOO_CHECK(text.find(L"BOO SAH SAH") != std::wstring::npos);
+            // The words of the start-up list are short in some scripts.
+            const bool stepWords = id >= static_cast<uint32_t>(UiText::LoadingDevice);
+            BOO_CHECK(text.size() > (id == static_cast<uint32_t>(UiText::Loading) || stepWords ? 2u : 8u));
+            // Every translation of the other strings keeps the product name; the box body keeps the API name.
+            if (!stepWords && id != static_cast<uint32_t>(UiText::GraphicsFailureBody) && id != static_cast<uint32_t>(UiText::Loading))
+                BOO_CHECK(text.find(L"BOO SAH SAH") != std::wstring::npos);
             if (id == static_cast<uint32_t>(UiText::UnsupportedGpuBody)) BOO_CHECK(text.find(L"Direct3D 12") != std::wstring::npos);
             if (lang > 0) BOO_CHECK(text != boo::uiTextAt(0, static_cast<UiText>(id)));
         }
@@ -1706,6 +1744,7 @@ int main() {
     runTest("FlockFormations", testFlockFormations);
     runTest("WorkoutGovernor", testWorkoutGovernor);
     runTest("StartupProgress", testStartupProgress);
+    runTest("ShadersRunOnEveryGpu", testShadersRunOnEveryGpu);
     runTest("PhysxSuite", testPhysxSuite);
     runTest("LastLight", testLastLight);
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
