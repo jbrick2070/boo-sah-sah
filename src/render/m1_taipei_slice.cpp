@@ -1359,6 +1359,7 @@ struct M1TaipeiSliceEffect::Impl {
 
     // Static 4-pillar GPU buffers & textures
     ComPtr<ID3D12Resource> tensorFieldTex;
+    bool tensorFieldIsSubstitute = false;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT tensorFootprint{};
     uint64_t tensorUploadBytes = 0;
     std::array<ComPtr<ID3D12Resource>, kTotalUploadSlots> tensorUploadBuf;
@@ -3067,6 +3068,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
         cmd->Dispatch(128u, 1u, 1u);
         transitionResource(cmd, impl_->particleGpuBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     });
+    impl_->tensorFieldIsSubstitute = true;
     startupStep("M1 first GPU work");
 
     impl_->ensureLiveAccelerators(
@@ -3861,6 +3863,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                 livePillars[2].throughput = 0.04f;
             }
         }
+        tensorFieldIsSubstitute = !uploadedHwTensor;
     }
 
     // 2. Pass 1: Primary 112-instance DXR 1.1 RayQuery scene OR SM 6.0 SDF/Analytic Raster substitute
@@ -3912,7 +3915,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             const float zeroJitter[2]{};
             const float* jitter = sr ? dlss.jitter() : (frameGeneration ? zeroJitter : nullptr);
             meshUsedRt = trilogyMesh->record(cmd,ctx,cam,sr ? dlss.color() : sceneHdr.Get(),sr ? dlss.distance() : sceneDepth.Get(),
-                dofActive ? (sr ? dlss.dofDistance() : sceneDofDepth.Get()) : nullptr, srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting || solo,jitter,sr && dlss.renderNoisyRays(),sr);
+                dofActive ? (sr ? dlss.dofDistance() : sceneDofDepth.Get()) : nullptr, srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting || solo,jitter,sr && dlss.renderNoisyRays(),sr,
+                d3d.integratedAdapter() && tensorFieldIsSubstitute);
             // Both views use the same spatial resolve throughout a solo. Keep evaluating
             // DLSS on canonical frames so its feature and temporal history stay warm.
             if (sr) dlss.resolve(cmd,*trilogyMesh,static_cast<float>(ctx.dtSeconds), solo, isCanonicalPass);

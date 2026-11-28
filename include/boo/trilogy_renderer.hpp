@@ -18,7 +18,7 @@ public:
                 void* hdr, void* distance, void* dofDistance, uint64_t tensorSrv, uint32_t width, uint32_t height,
                 uint32_t slot, bool raytracing, bool canonical, bool compareDirectorLighting = false,
                 const float* dlssJitterPixels = nullptr, bool rayReconstruction = false,
-                bool temporalSuperResolution = true);
+                bool temporalSuperResolution = true, bool integratedTensorSubstitute = false);
     void recordOrbital(void* commandList, const FrameContext& frame, void* hdr, void* distance,
                        uint32_t width, uint32_t height, uint32_t slot, bool canonical);
     // Guides describe the current canonical RR frame and remain compute-readable

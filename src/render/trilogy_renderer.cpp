@@ -2176,7 +2176,7 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
         s.readbacks[slot]->Unmap(0, &written);
     }
 }
-bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,void* dofRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting,const float* dlssJitterPixels,bool rayReconstruction,bool temporalSuperResolution) {
+bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,void* dofRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting,const float* dlssJitterPixels,bool rayReconstruction,bool temporalSuperResolution,bool integratedTensorSubstitute) {
     auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* dof=static_cast<ID3D12Resource*>(dofRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
@@ -2947,6 +2947,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     c.courierLamp=courierLamp;
     c.interFlags |= effectiveEffectsDetail(f) << 12u;
     if (f.qualityPreset == QualityPresetId::Lite) c.interFlags |= 1u << 20u;
+    if (integratedTensorSubstitute) c.interFlags |= 1u << 21u;
     if (canonical && s.context.benchmark()) c.interFlags |= 1u << 19u;
     if (traceIndirect) c.interFlags |= static_cast<uint32_t>(f.pathTracing) << 15u;
     if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
@@ -3029,7 +3030,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     if (s.context.benchmark() && s.context.benchmark()->mode == BenchmarkMode::PathTracing) {
         constexpr uint32_t openingFlags = (1u << 19u) | (static_cast<uint32_t>(PathTracingLevel::High) << 15u) | 16u;
         if (!useRt || c.time < 7.f || c.time >= 14.f || c.act != 2 || c.canonical != 1 ||
-            c.showFlags != 65 || packedAudio != 0 || c.interFlags != openingFlags || c.accumFrame != 0)
+            c.showFlags != 65 || packedAudio != 0 || (c.interFlags & ~(1u << 21u)) != openingFlags || c.accumFrame != 0)
             throw BenchmarkWorkloadChanged{};
     }
     (void)tensor;

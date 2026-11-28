@@ -3841,6 +3841,10 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float3 sirenB = tensorField.SampleLevel(linearClamp, mirrorField(ruv.yx * 1.37 - time * 0.03), 0.0).rgb;
         float velvetRim = pow(1.0 - ndotv, 2.4);
         float3 field = siren * 0.70 + sirenB * 0.30;
+        // The scalar substitute is deliberately dim for general scene lighting. Lift it
+        // only on integrated-GPU canopy ribbons so their silk retains a soft glow.
+        if ((interFlags & (1u << 21u)) != 0u && partId >= 216u && partId <= 219u)
+            field *= 10.0f;
         float fieldLuma = dot(field, float3(0.2126, 0.7152, 0.0722));
         float3 tone = ((showFlags & 2u) != 0u) ? float3(0.86, 0.42, 0.66) : float3(0.34, 0.72, 0.66);
         if ((interFlags & (1u << 19u)) != 0u && fieldLuma > 0.0f &&
