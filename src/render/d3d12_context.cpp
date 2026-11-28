@@ -493,9 +493,9 @@ bool D3D12Context::waitForGpu() noexcept {
     if (!impl_ || !impl_->commandQueue || !impl_->fence || !impl_->fenceEvent) return false;
     const auto failed = [this]() noexcept {
         impl_->synchronizationFailed = true;
-        // Callers may destroy resources immediately after a failed wait. On WARP,
-        // retire here as well as at shutdown so none can outlive an undrained wait.
-        if (isWarp_) retireGpuForShutdown();
+        // Teardown (retireGpuForShutdown) drains or, on WARP, refuses to free in-flight
+        // resources. Retiring here as well terminated the process while a queue that was
+        // only briefly blocked could still drain (the quarantine integration test).
         return false;
     };
     if (impl_->synchronizationFailed || impl_->injectedDeviceLost ||

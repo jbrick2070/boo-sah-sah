@@ -21,7 +21,8 @@ public:
     // Asks NVIDIA's runtime what this GPU supports. Done on the loading thread, so the first frame does not wait.
     void warmUp(D3D12Context& context);
     bool prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible, bool requestRR, bool raytracing,
-                 ID3D12Resource* fullColor, ID3D12Resource* fullDistance, ID3D12Resource* fullDofDistance = nullptr);
+                 ID3D12Resource* fullColor, ID3D12Resource* fullDistance, ID3D12Resource* fullDofDistance = nullptr,
+                 uint32_t spatialSample = 0);
     void resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds,
                  bool spatialOnly = false, bool evaluateDlss = true);
     void reset() noexcept;

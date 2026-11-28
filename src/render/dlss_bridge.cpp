@@ -331,7 +331,8 @@ void DlssBridge::warmUp(D3D12Context& context) {
 }
 
 bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible,
-                         bool requestRR, bool raytracing, ID3D12Resource* fullColor, ID3D12Resource* fullDistance, ID3D12Resource* fullDofDistance) {
+                         bool requestRR, bool raytracing, ID3D12Resource* fullColor, ID3D12Resource* fullDistance, ID3D12Resource* fullDofDistance,
+                         uint32_t spatialSample) {
 #ifdef BOO_HAS_DLSS
     auto& s = *impl_;
     warmUp(context);
@@ -375,12 +376,14 @@ bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, 
         }
         return false;
     }
-    const auto phase = ++s.sample;
+    ++s.sample;
+    // Spatial solo presentation must reproduce the same film sample on both renders.
+    const auto phase = spatialSample ? spatialSample : s.sample;
     s.pixelJitter[0] = halton(phase,2) - .5f;
     s.pixelJitter[1] = halton(phase,3) - .5f;
     return true;
 #else
-    (void)context; (void)cmd; (void)mode; (void)eligible; (void)requestRR; (void)raytracing; (void)fullColor; (void)fullDistance; (void)fullDofDistance;
+    (void)context; (void)cmd; (void)mode; (void)eligible; (void)requestRR; (void)raytracing; (void)fullColor; (void)fullDistance; (void)fullDofDistance; (void)spatialSample;
     return false;
 #endif
 }

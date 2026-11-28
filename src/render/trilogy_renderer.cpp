@@ -3001,7 +3001,10 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
 
     const size_t motionSlot=slot&3u;
     const size_t motionOffset=motionSlot*s.maxSceneInstances*sizeof(MotionRows);
-    if (writeMotion) {
+    // A solo comparison resolves both views at the same SR input size. Its
+    // non-canonical pass needs the same projection and sampling phase even
+    // though only the canonical pass writes motion and advances history.
+    if (dlssJitterPixels && (writeMotion || (temporalSuperResolution && compareDirectorLighting))) {
         // D3D screen Y points down, while the mesh projection's clip Y points up.
         c.jitter[0]=2.f*dlssJitterPixels[0]/width;c.jitter[1]=-2.f*dlssJitterPixels[1]/height;
         reblurJitterPx[0]=dlssJitterPixels[0];reblurJitterPx[1]=-dlssJitterPixels[1];
@@ -3014,6 +3017,8 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             c.accumFrame=iv.exploreActive ? static_cast<uint32_t>(s.dlssFrame) :
                 static_cast<uint32_t>((sample/rate)*60u + ((sample%rate)*60u)/rate);
         }
+    }
+    if (writeMotion) {
         const auto currentClip=cameraClipRows(c);
         const auto& previous=s.dlssReset ? currentClip : s.previousClip;
         upload(s.motionCamera.Get(),previous.data(),sizeof(MotionRows),256u*motionSlot);

@@ -1,4 +1,5 @@
 #include "boo/results_dialog.hpp"
+#include "boo/logging.hpp"
 #include "boo/results_card.hpp"
 #include "boo/results_export.hpp"
 #include "boo/results_worker.hpp"
@@ -192,6 +193,11 @@ struct Dialog {
         }
         closeViewer = context.closeOnly || last.reason == BenchmarkReason::GraphicsReset || last.reason == BenchmarkReason::TimeLimit;
         card = makeResultsCard(context,last);
+        // Full precision for the record (the card rounds to one decimal); used to measure the
+        // RTX 5080 reference for each build (docs/BENCHMARK_REFERENCE.md).
+        BOO_LOG_INFO("Results", std::format("Benchmark mode {} outcome {} input {}x{} output {}x{} warm-up {} samples {} median {:.4f} ms worst {:.4f} ms",
+            static_cast<int>(last.mode), static_cast<int>(last.outcome), last.inputWidth, last.inputHeight,
+            last.width, last.height, last.warmupCount, last.measuredCount, last.medianMs, last.worstMs));
         setPage(Page::Card);
         SetDlgItemTextW(window,IDC_RESULTS_TITLE,card.title.c_str());
         label(IDC_RESULTS_REPORT, T::Report);

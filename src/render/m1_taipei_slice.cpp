@@ -3884,8 +3884,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         const bool allowDlss = !d3d.benchmark() || d3d.benchmark()->mode == BenchmarkMode::DlssQuality;
         bool sr = false;
         if (isCanonicalPass) {
+            const uint64_t sample = static_cast<uint64_t>(std::max<int64_t>(ctx.samplePosition, 0));
+            const uint32_t rate = static_cast<uint32_t>(std::max(1, ctx.sampleRate));
+            const uint32_t spatialSample = solo ? 1u + static_cast<uint32_t>(((sample / rate) * 60u +
+                ((sample % rate) * 60u) / rate) % 1024u) : 0u;
             sr = dlss.prepare(d3d, cmd, ctx.dlssMode, eligible && allowDlss, ctx.rayReconstruction && !solo,
-                useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get(), dofActive ? sceneDofDepth.Get() : nullptr);
+                useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get(),
+                dofActive ? sceneDofDepth.Get() : nullptr, spatialSample);
             soloDlssPrepared = solo && sr;
         } else if (solo) {
             sr = soloDlssPrepared;
