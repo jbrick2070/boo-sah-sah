@@ -2,6 +2,7 @@
 #include "boo/audio.hpp"
 #include "boo/audio_reactive.hpp"
 #include "boo/bmesh.hpp"
+#include "boo/canopy_cloth.hpp"
 #include "boo/city_modules.hpp"
 #include <fstream>
 #include "boo/clock.hpp"
@@ -1079,6 +1080,32 @@ bool testDawnEgretFramingAndClearance() {
     std::string error;
     BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/dawn_alcove.bmesh"), alcove, &error));
     BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/taipei_101_hero.bmesh"), city, &error));
+    // Measure the actual localized end-card blocks with the same rasterizer and
+    // inputs as the renderer, including the pseudo-language used in layout QA.
+    UiTextLayer textLayer;
+    BOO_CHECK(textLayer.ready());
+    UiStrings strings;
+    const auto localeDir=resolveResourcePath("assets/strings");
+    auto languages=uiAvailableLanguages(localeDir);
+    languages.push_back("qps-ploc");
+    constexpr char endCard[]="A CELEBRATION OF ORAL CARE - NOT MEDICAL ADVICE.";
+    struct TextSize { float w=0.f, h=0.f; };
+    std::array<TextSize,2> localized{};
+    for (const auto& language:languages) {
+        BOO_CHECK(strings.load(localeDir,language));
+        if (!strings.active()) continue;
+        const auto* caption=strings.findCaption(endCard);
+        BOO_CHECK(caption);
+        for (size_t i=0; i<localized.size(); ++i) {
+            const float h=i==0?360.f:1080.f, lbW=h*16.f/9.f;
+            const float scale=std::clamp(h/285.f,1.f,6.f)*.90f;
+            const auto frame=textLayer.prepare(strings,uint32_t(std::clamp(std::floor(h/540.f),1.f,3.f)),
+                                               caption,7.6f*scale,lbW*.86f);
+            BOO_CHECK(frame.captionValid);
+            localized[i].w=std::max(localized[i].w,float(frame.captionWidth));
+            localized[i].h=std::max(localized[i].h,float(frame.captionHeight));
+        }
+    }
 
     // Trace to the actual glass, then reject sightlines blocked by the alcove's opaque triangles.
     const auto hitsWindow = [&](const Vec& eye, const Vec& point) {
@@ -1104,11 +1131,22 @@ bool testDawnEgretFramingAndClearance() {
         }
         return glassT<1.f && glassT<opaqueT;
     };
-    std::array<int, kDawnEgretCount> windowSamples{};
-    int titleWindowSamples=0;
+    std::array<int, kDawnEgretCount> visibleRun{}, longestRun{};
     constexpr float aspect=16.f/9.f;
     const int steps=int(std::lround((kDawnEgretEnd-kDawnEgretStart)/.05f));
-    static_assert(kDawnEgretEnd < 355.f);
+    // Projection is into the 16:9 letterbox, even when the output is wider.
+    for (uint32_t b=0; b<kDawnEgretCount; ++b) {
+        const auto p0=dawnEgretPose(kDawnEgretStart,b,1.f).center;
+        const auto p1=dawnEgretPose(350.f,b,1.f).center;
+        const auto p2=dawnEgretPose(kDawnEgretEnd,b,1.f).center;
+        for (int axis=0; axis<3; ++axis)
+            BOO_CHECK(std::abs((p1[axis]-p0[axis])/(350.f-kDawnEgretStart) -
+                               (p2[axis]-p1[axis])/(kDawnEgretEnd-350.f)) < 1.e-5f);
+        for (uint32_t other=0; other<b; ++other) {
+            const Vec d=sub(p0,dawnEgretPose(kDawnEgretStart,other,1.f).center);
+            BOO_CHECK(dot(d,d)>=9.f);
+        }
+    }
     for (int step=0; step<=steps; ++step) {
         const float time=std::min(kDawnEgretStart+.05f*step,kDawnEgretEnd);
         const auto cam=evaluateShowCamera(ShowVisualMode::FullFilm360s,
@@ -1134,7 +1172,7 @@ bool testDawnEgretFramingAndClearance() {
                               std::abs(y)-depth*tanY > radius*std::hypot(1.f,tanY));
                 }
             }
-            if (outside || depth<=radius) continue;
+            if (outside || depth<=radius) { visibleRun[b]=0; continue; }
             // Conservative projected sphere box in 1920x1080 normalized canvas coordinates.
             const float pxRadius=radius*std::hypot(depth,x)/(depth*(depth-radius)*tanX);
             const float pyRadius=radius*std::hypot(depth,y)/(depth*(depth-radius)*tanY);
@@ -1144,22 +1182,66 @@ bool testDawnEgretFramingAndClearance() {
             const auto separate=[&](float l,float t,float r,float bottom) {
                 return x1<l || x0>r || y1<t || y0>bottom;
             };
-            // The end-title glyphs and plate are active from 351 s. The overlay variant
-            // is moved into the upper right; this conservative box includes its scrim.
+            // Mirror the Pass-4 title and card geometry in m1_taipei_slice.hlsl.
+            // Check both ordinary and full-telemetry title placements, and both dock
+            // states, at small and large 16:9, 21:9, and 32:9 output sizes.
             if (time>=351.f) {
-                BOO_CHECK(separate(.075f,.105f,.37f,.41f));
-                BOO_CHECK(separate(.64f,.33f,.95f,.62f));
+                for (size_t sizeIndex=0; sizeIndex<localized.size(); ++sizeIndex) for (float outputAspect : {16.f/9.f,21.f/9.f,32.f/9.f}) {
+                    const float h=sizeIndex==0?360.f:1080.f;
+                    const float w=h*outputAspect, lbW=h*16.f/9.f, lbX=(w-lbW)*.5f;
+                    const auto rect=[&](float l,float t,float r,float bottom) {
+                        return separate((l-lbX)/lbW,t/h,(r-lbX)/lbW,bottom/h);
+                    };
+                    const float titleScale=std::clamp(h/115.f,2.f,18.f);
+                    const float ox=lbX+lbW*.075f, oy=h*.30f;
+                    // Glyph and motif envelopes (the scrim is intentionally excluded).
+                    BOO_CHECK(rect(ox,oy-22.f*titleScale,ox+55.f*titleScale,oy+16.f*titleScale));
+                    const float overlayScale=std::min(titleScale*.70f,lbW*.36f/55.f);
+                    const float uiScale=std::clamp(std::floor(h/540.f),1.f,3.f);
+                    const float top=std::max(h*.35f,148.f*uiScale);
+                    const float tx=lbX+lbW*.94f-58.5f*overlayScale, ty=top+24.f*overlayScale;
+                    BOO_CHECK(rect(tx-5.5f*overlayScale,ty-26.5f*overlayScale,
+                                   tx+59.5f*overlayScale,ty+19.f*overlayScale));
+                    const float capScale=std::clamp(h/285.f,1.f,6.f)*.90f;
+                    const float padX=12.f*capScale, padY=6.f*capScale;
+                    const float englishScale=std::max(1.f,std::min(capScale,lbW*.86f/(float(sizeof(endCard)-1)*5.f)));
+                    for (bool translated : {false,true}) for (bool overlay : {false,true}) for (bool dock : {false,true}) {
+                        const float sc=translated?capScale:englishScale;
+                        const float pxPad=translated?padX:12.f*sc, pyPad=translated?padY:6.f*sc;
+                        const float credit=std::max(1.f,.76f*sc);
+                        const float textW=translated?localized[sizeIndex].w:float((sizeof(endCard)-1)*5-1)*sc;
+                        const float textH=translated?localized[sizeIndex].h:6.f*sc;
+                        const float boxW=std::max(textW+2.f*pxPad,110.f*credit+2.f*pxPad);
+                        const float boxH=textH+2.f*pyPad+10.f*credit;
+                        const float reserve=overlay ? (dock?112.f:52.f)*uiScale
+                                                    : (dock?68.f*uiScale:16.f*sc);
+                        const float boxY=std::max(8.f,std::min(h*.78f-.5f*boxH,h-reserve-boxH));
+                        const float boxX=lbX+.5f*(lbW-boxW);
+                        BOO_CHECK(rect(boxX,boxY,boxX+boxW,boxY+boxH));
+                    }
+                }
             }
-            // Captions and the end-card plate occupy the lower canvas.
-            BOO_CHECK(y1 < .70f);
-            if (std::abs(x)<depth*tanX && std::abs(y)<depth*tanY && hitsWindow(eye,pose.center)) {
-                ++windowSamples[b];
-                if (time>=351.f) ++titleWindowSamples;
+            // Require a substantial body area through the glass, using a screen-aligned
+            // square inside the conservative wing sphere, as well as its center.
+            const float bodyRadius=radius*.20f;
+            bool throughWindow=x0>=0.f && x1<=1.f && y0>=0.f && y1<=1.f && hitsWindow(eye,pose.center);
+            for (int ix=-1; ix<=1 && throughWindow; ++ix) for (int iy=-1; iy<=1 && throughWindow; ++iy) {
+                if (!ix && !iy) continue;
+                Vec edge{};
+                for (int axis=0; axis<3; ++axis)
+                    edge[axis]=pose.center[axis]+bodyRadius*(float(ix)*right[axis]+float(iy)*up[axis]);
+                throughWindow=hitsWindow(eye,edge);
+            }
+            if (throughWindow && time>=349.f && time<=353.f) {
+                ++visibleRun[b];
+                longestRun[b]=std::max(longestRun[b],visibleRun[b]);
+            } else {
+                visibleRun[b]=0;
             }
         }
     }
-    for (int count : windowSamples) BOO_CHECK(count >= 5);
-    BOO_CHECK(titleWindowSamples >= 2);
+    // Twenty intervals at 50 ms establish at least one continuous second.
+    for (int count : longestRun) BOO_CHECK(count >= 21);
 
     // Triangle AABBs conservatively enclose actual building geometry. Each coordinate of
     // the route is monotonic, so each segment AABB encloses its whole continuous piece.
@@ -1173,7 +1255,6 @@ bool testDawnEgretFramingAndClearance() {
         for (int axis=0; axis<3; ++axis) { box.lo[axis]=std::min(a[axis],c[axis]); box.hi[axis]=std::max(a[axis],c[axis]); }
         route.push_back(box);
     }
-    const float clearance=kBirdBuildingClearance+halfSpan*1.08f;
     const auto boxDistance2=[](const Box& a,const Box& b) {
         float d2=0.f;
         for (int axis=0; axis<3; ++axis) {
@@ -1186,7 +1267,7 @@ bool testDawnEgretFramingAndClearance() {
         whole.lo[axis]=std::min(whole.lo[axis],segment.lo[axis]);
         whole.hi[axis]=std::max(whole.hi[axis],segment.hi[axis]);
     }
-    const auto checkMesh=[&](const Bmesh& mesh, const std::array<float,12>& transform) {
+    const auto checkMesh=[&](const Bmesh& mesh, const std::array<float,12>& transform, float clearance) {
         for (const auto& piece:mesh.submeshes) for (uint32_t i=0; i+2<piece.indexCount; i+=3) {
             Box tri{};
             for (int j=0; j<3; ++j) {
@@ -1203,11 +1284,14 @@ bool testDawnEgretFramingAndClearance() {
         }
         return true;
     };
-    BOO_CHECK(checkMesh(alcove,{1,0,0,0, 0,1,0,0, 0,0,1,0}));
+    // Surface-to-wing-sphere clearance: 5 m from the alcove and surrounding
+    // modules, 10 m from the Taipei hero. These are the margins of this route.
+    const float alcoveClearance=5.f+radius, cityClearance=10.f+radius, moduleClearance=5.f+radius;
+    BOO_CHECK(checkMesh(alcove,{1,0,0,0, 0,1,0,0, 0,0,1,0},alcoveClearance));
     CityModuleLayout modules;
     appendCityModules(modules,2,city);
     // At this cue the renderer moves/scales the entire Taipei kit to (33,-9.6,66), .064.
-    BOO_CHECK(checkMesh(city,{.064f,0,0,33.f, 0,.064f,0,-9.6f, 0,0,.064f,66.f}));
+    BOO_CHECK(checkMesh(city,{.064f,0,0,33.f, 0,.064f,0,-9.6f, 0,0,.064f,66.f},cityClearance));
     for (const auto& placement:modules.placements) {
         const Vec center{33.f+.064f*placement.center[0],-9.6f+.064f*placement.center[1],66.f+.064f*placement.center[2]};
         Box bounds{};
@@ -1215,13 +1299,102 @@ bool testDawnEgretFramingAndClearance() {
             bounds.lo[axis]=center[axis]-.064f*placement.radius;
             bounds.hi[axis]=center[axis]+.064f*placement.radius;
         }
-        if (boxDistance2(whole,bounds)>=clearance*clearance) continue;
+        if (boxDistance2(whole,bounds)>=moduleClearance*moduleClearance) continue;
         auto transform=placement.rows;
         for (int axis=0; axis<3; ++axis) {
             for (int col=0; col<4; ++col) transform[4*axis+col]*=.064f;
             transform[4*axis+3]+=(axis==0?33.f:axis==1?-9.6f:66.f);
         }
-        for (uint32_t module:placement.modules) BOO_CHECK(checkMesh(modules.modules[module],transform));
+        for (uint32_t module:placement.modules) BOO_CHECK(checkMesh(modules.modules[module],transform,moduleClearance));
+    }
+    return true;
+}
+
+bool testAuthoredFocusCues() {
+    using namespace boo;
+    const auto camera = [](float time) {
+        return evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(time * 48000), 48000, 0.5f, false, 1.0f);
+    };
+    for (const auto [time, ribbon] : {std::pair{134.5f, 0}, std::pair{137.5f, 3}}) {
+        const auto cam = camera(time);
+        const float u = std::clamp(cam.target[0] / 9.2f + 0.5f, 0.0f, 1.0f);
+        const auto point = canopyRibbonPoint(ribbon, u, 0.0f);
+        const float expected = std::hypot(point[0] - cam.eye[0], point[1] - cam.eye[1], point[2] - cam.eye[2]);
+        BOO_CHECK(std::abs(cam.focusDistance - expected) < 1e-4f);
+        BOO_CHECK(cam.focusWeight == 1.0f && cam.anamorphicWeight == 1.0f);
+    }
+    for (float time : {344.0f, 344.5f}) {
+        const auto cam = camera(time);
+        const float tower = std::hypot(33.0f - cam.eye[0], (-9.6f + 409.5f * 0.064f) - cam.eye[1], 66.0f - cam.eye[2]);
+        BOO_CHECK(std::abs(cam.focusDistance - tower) < 1e-4f);
+        BOO_CHECK(cam.focusWeight == 1.0f && cam.anamorphicWeight == 1.0f);
+    }
+    BOO_CHECK(camera(347.0f).anamorphicWeight == 0.0f);
+    BOO_CHECK(camera(260.0f).anamorphicWeight == 0.0f);
+    return true;
+}
+
+// Trace shipped triangles along the authored dawn focus line. The renderer
+// splits the damper from part 0 at load time; these are its rest vertices.
+bool testDawnFocusSightline() {
+    using namespace boo;
+    using Vec = std::array<float, 3>;
+    Bmesh alcove, city;
+    BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/dawn_alcove.bmesh"), alcove));
+    BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/taipei_101_hero.bmesh"), city));
+    const auto sub = [](Vec a, Vec b) -> Vec { return {a[0]-b[0], a[1]-b[1], a[2]-b[2]}; };
+    const auto dot = [](Vec a, Vec b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; };
+    const auto cross = [](Vec a, Vec b) -> Vec {
+        return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    };
+    for (float time : {344.0f, 344.5f}) {
+        const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s, int64_t(time*48000), 48000, 0.5f, false, 1.0f);
+        const Vec eye{cam.eye[0], cam.eye[1], cam.eye[2]};
+        const Vec damper{33.f, -9.6f + 409.5f*.064f, 66.f};
+        const Vec delta = sub(damper, eye);
+        const float distance = std::sqrt(dot(delta, delta));
+        const Vec ray{delta[0]/distance, delta[1]/distance, delta[2]/distance};
+        auto nearest = [&](const Bmesh& mesh, float scale, Vec offset, bool partZero) {
+            float closest = 1e6f;
+            uint32_t material = ~0u, part = ~0u;
+            for (const auto& piece : mesh.submeshes) {
+                if (partZero && piece.part != 0u) continue;
+                for (uint32_t n=0; n<piece.indexCount; n+=3) {
+                    Vec p[3];
+                    for (uint32_t j=0; j<3; ++j) {
+                        const auto& v = mesh.vertices[mesh.indices[piece.firstIndex+n+j]].positionMaterial;
+                        p[j] = {offset[0]+scale*v[0], offset[1]+scale*v[1], offset[2]+scale*v[2]};
+                    }
+                    const Vec e1 = sub(p[1],p[0]), e2 = sub(p[2],p[0]);
+                    const Vec h = cross(ray,e2);
+                    const float det = dot(e1,h);
+                    if (std::abs(det) < 1e-8f) continue;
+                    const Vec from = sub(eye,p[0]);
+                    const float u = dot(from,h)/det;
+                    const Vec q = cross(from,e1);
+                    const float v = dot(ray,q)/det, t = dot(e2,q)/det;
+                    if (u >= 0.f && v >= 0.f && u+v <= 1.f && t > 0.f && t < closest) {
+                        closest = t; material = piece.material; part = piece.part;
+                    }
+                }
+            }
+            return std::tuple{closest, material, part};
+        };
+        const auto [paneT, paneMat, panePart] = nearest(alcove, 1.f, {0.f,0.f,0.f}, false);
+        const auto [towerT, towerMat, towerPart] = nearest(city, .064f, {33.f,-9.6f,66.f}, true);
+        BOO_CHECK(paneMat == 40u && panePart == 237u && paneT > 2.f && paneT < 3.f);
+        BOO_CHECK(towerMat == 8u && towerPart == 0u && std::abs(towerT-distance) < .3f);
+        BOO_CHECK(std::abs(cam.focusDistance-towerT) < .3f);
+        Vec forward = sub({cam.target[0],cam.target[1],cam.target[2]},eye);
+        const float fwdLength = std::sqrt(dot(forward,forward));
+        for (float& c : forward) c /= fwdLength;
+        Vec right = cross({0.f,1.f,0.f},forward);
+        const float rightLength = std::sqrt(dot(right,right));
+        for (float& c : right) c /= rightLength;
+        const Vec up = cross(forward,right);
+        const float z = dot(ray,forward), halfHeight = std::tan(cam.fovYRadians*.5f);
+        BOO_CHECK(z > 0.f && std::abs(dot(ray,up)/z) < halfHeight);
+        BOO_CHECK(std::abs(dot(ray,right)/z) < halfHeight*(16.f/9.f));
     }
     return true;
 }
@@ -2221,6 +2394,8 @@ int main() {
     runTest("FilmOrbits", testFilmOrbits);
     runTest("MirrorWitnessFrustum", testMirrorWitnessFrustum);
     runTest("DawnEgretFramingAndClearance", testDawnEgretFramingAndClearance);
+    runTest("AuthoredFocusCues",testAuthoredFocusCues);
+    runTest("DawnFocusSightline",testDawnFocusSightline);
     runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);

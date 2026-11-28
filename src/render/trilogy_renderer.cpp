@@ -1812,7 +1812,9 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         pd.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;pd.SampleMask=UINT_MAX;
         pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;pd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;pd.RasterizerState.DepthClipEnable=TRUE;
         pd.DepthStencilState.DepthEnable=TRUE;pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_EQUAL;
-        pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;pd.NumRenderTargets=2;pd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
+        pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;pd.NumRenderTargets=8;pd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
+        pd.RTVFormats[2]=pd.RTVFormats[3]=pd.RTVFormats[4]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+        pd.RTVFormats[5]=DXGI_FORMAT_R32G32B32A32_UINT;pd.RTVFormats[6]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[7]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
         check(gfxPso("m2_mesh_ps.cso",pd,s.raster));
         const auto psGlass=shader("m2_mesh_glass_ps.cso"), psPane=shader("m2_mesh_pane_ps.cso"),
                    psPaneDistance=shader("m2_mesh_pane_distance_ps.cso");
@@ -1830,7 +1832,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         flat.PS={psPane.data(),psPane.size()};
         flat.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
         flat.NumRenderTargets=1;
-        flat.RTVFormats[1]=DXGI_FORMAT_UNKNOWN;
+        for (UINT i=1;i<8;++i) flat.RTVFormats[i]=DXGI_FORMAT_UNKNOWN;
         flat.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
         auto& blend=flat.BlendState.RenderTarget[0];
         blend.BlendEnable=TRUE;blend.SrcBlend=D3D12_BLEND_ONE;blend.DestBlend=D3D12_BLEND_SRC1_COLOR;
@@ -1860,7 +1862,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         // Declared before the compiler: on an early return its destructor waits for the compiles, which use these.
         if(s.rtReady) {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pdRt=pd;
-            pdRt.NumRenderTargets=7;
+            pdRt.NumRenderTargets=8;
             pdRt.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             pdRt.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
             pdRt.RTVFormats[2]=DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1899,6 +1901,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         }
         pd.VS={skyvs.data(),skyvs.size()};pd.PS={skyps.data(),skyps.size()};pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;check(gfxPso("m2_sky_ps.cso",pd,s.sky));
         auto orbital=pd;
+        orbital.NumRenderTargets=2; for (UINT i=2;i<8;++i) orbital.RTVFormats[i]=DXGI_FORMAT_UNKNOWN;
         orbital.DepthStencilState.DepthEnable=FALSE;
         orbital.DSVFormat=DXGI_FORMAT_UNKNOWN;
         check(gfxPso("m2_sky_ps.cso (orbit)",orbital,s.orbitalSky));
@@ -1956,7 +1959,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         }
         startupStep("trilogy accumulation and denoise pipelines (5)");
         startupStage(StartupWork::Scene);
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=10;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=16;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.rtv)));hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=1;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s.dsv)));
         s.zero=buffer(d,256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);std::array<uint32_t, 3> zeros{};upload(s.zero.Get(), zeros.data(), sizeof(zeros));
         for(uint32_t i=0;i<4;++i) {s.counters[i]=buffer(d,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);s.readbacks[i]=buffer(d,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);}
         if(s.rtReady) {
@@ -2206,8 +2209,8 @@ void TrilogyMeshRenderer::retire(uint32_t slot) {
         s.readbacks[slot]->Unmap(0, &written);
     }
 }
-bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting,const float* dlssJitterPixels,bool rayReconstruction,bool temporalSuperResolution) {
-    auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
+bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraState& camera,void* hdrRaw,void* distRaw,void* dofRaw,uint64_t tensor,uint32_t width,uint32_t height,uint32_t slot,bool raytracing,bool canonical,bool compareDirectorLighting,const float* dlssJitterPixels,bool rayReconstruction,bool temporalSuperResolution) {
+    auto& s=*impl_;auto* cmd=static_cast<ID3D12GraphicsCommandList*>(raw);auto* hdr=static_cast<ID3D12Resource*>(hdrRaw);auto* dist=static_cast<ID3D12Resource*>(distRaw);auto* dof=static_cast<ID3D12Resource*>(dofRaw);auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
     if(canonical)retire(slot);
     const bool useRt=raytracing&&s.rtReady&&(s.w==width&&s.h==height&&s.gbufNormRough!=nullptr);
     if (canonical) s.highPathExecuted = s.neuralMaterialDrawn = false;
@@ -2937,6 +2940,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     }
     cmd->CopyBufferRegion(s.counters[slot].Get(),0,s.zero.Get(),0,12);transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);transition(cmd,dist,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (dof) transition(cmd,dof,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     const UINT rtvInc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     const bool rr=rayReconstruction && useRt && writeMotion && !orbital && !iv.aovMode && rrGuidesReady();
     auto transitionGuides = [&](D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
@@ -2948,11 +2952,22 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         s.rrReadable=false;
     }
     auto handle=s.rtv->GetCPUDescriptorHandleForHeapStart();d->CreateRenderTargetView(hdr,nullptr,handle);auto second=handle;second.ptr+=rtvInc;d->CreateRenderTargetView(dist,nullptr,second);
+    auto atRtv=[&](UINT i){auto h=handle;h.ptr+=SIZE_T(i)*rtvInc;return h;};
+    D3D12_RENDER_TARGET_VIEW_DESC nullRtv{};nullRtv.ViewDimension=D3D12_RTV_DIMENSION_TEXTURE2D;
+    nullRtv.Format=DXGI_FORMAT_R32_FLOAT;d->CreateRenderTargetView(dof,dof?nullptr:&nullRtv,atRtv(10));
+    const DXGI_FORMAT nullFormats[5]={DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_UINT,DXGI_FORMAT_R16G16B16A16_FLOAT};
+    for(UINT i=0;i<5;++i){nullRtv.Format=nullFormats[i];d->CreateRenderTargetView(nullptr,&nullRtv,atRtv(11+i));}
+    auto depthHandle=s.dsv->GetCPUDescriptorHandleForHeapStart();
+    auto bindTargets=[&](bool guides){
+        D3D12_CPU_DESCRIPTOR_HANDLE targets[8]={atRtv(0),atRtv(1),atRtv(11),atRtv(12),atRtv(13),atRtv(14),atRtv(15),atRtv(10)};
+        if(guides) for(UINT i=2;i<7;++i) targets[i]=atRtv(i==6 && rr ? 9 : i);
+        cmd->OMSetRenderTargets(8,targets,FALSE,&depthHandle);
+    };
     if (s.dlssDepthReadable) {
         transition(cmd,s.depth.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
         s.dlssDepthReadable=false;
     }
-    auto depthHandle=s.dsv->GetCPUDescriptorHandleForHeapStart();cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
+    cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
     D3D12_VIEWPORT vp{0,0,float(width),float(height),0,1};D3D12_RECT sc{0,0,LONG(width),LONG(height)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
 
     SceneConstants c{};std::copy_n(camera.eye,3,c.eye);c.fov=camera.fovYRadians;c.aspect=float(width)/float(height);for(int i=0;i<3;++i)c.forward[i]=camera.target[i]-camera.eye[i];normalize(c.forward);cross(camera.up,c.forward,c.right);normalize(c.right);cross(c.forward,c.right,c.up);c.time=filmTime;c.reveal=camera.revealOpen01;c.width=width;c.height=height;c.act=act;c.canonical=canonical?1u:0u;
@@ -3097,13 +3112,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         drawBatches(s.depthOpaque.Get(),false);
         drawBatches(s.depthCutout.Get(),true);
     }
-    if (rr) {
-        D3D12_CPU_DESCRIPTOR_HANDLE targets[7]{};
-        for (UINT i=0;i<7;++i) targets[i].ptr=handle.ptr+SIZE_T(i==6 ? 9 : i)*rtvInc;
-        cmd->OMSetRenderTargets(7,targets,FALSE,&depthHandle);
-    } else {
-        cmd->OMSetRenderTargets(useRt?7u:2u,&handle,TRUE,&depthHandle);
-    }
+    bindTargets(useRt);
     drawBatches(rr?s.rrOpaque.Get():(useRt?s.rt.Get():s.raster.Get()),false);
     drawBatches(rr?s.rrCutout.Get():(useRt?s.rtCutout.Get():s.rasterCutout.Get()),true);
     // Sky last, at the far plane: only pixels the Z-prepass left at the cleared depth run the sky
@@ -3127,7 +3136,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         transition(cmd,dist,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         transition(cmd,s.glassColor.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         transition(cmd,s.glassDistance.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+        bindTargets(false);
         for (const auto& batch:s.glassBatches) {
             cmd->SetPipelineState(batch.twoSided ? s.rasterGlassTwoSided.Get() : s.rasterGlass.Get());
             cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
@@ -3143,7 +3152,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
                 cmd->DrawInstanced(batch.indexCount,batch.count,0,0);
             }
             transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+            bindTargets(false);
         }
     }
 
@@ -3175,7 +3184,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             }
             transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
-        cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+        bindTargets(false);
     }
 
     const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -3376,6 +3385,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         s.accumValid=false;
     }
     transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (dof) transition(cmd,dof,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
     if(canonical && (useRt || s.context.benchmark())) {cmd->CopyBufferRegion(s.readbacks[slot].Get(),0,s.counters[slot].Get(),0,12);s.pending[slot]=true;}
     transition(cmd,s.counters[slot].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);

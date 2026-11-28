@@ -138,33 +138,26 @@ inline constexpr std::array<FlockMember, kCityBirdCount> kCityFlock{{
 // independent film actors, not members of the workout flock or its camera focus.
 // The interval begins and ends beyond the frame, including the birds' wings.
 inline constexpr uint32_t kDawnEgretCount = 5;
-inline constexpr float kDawnEgretStart = 342.f, kDawnEgretEnd = 354.8f;
+inline constexpr float kDawnEgretStart = 340.f, kDawnEgretEnd = 357.f;
 inline BirdFlightPose dawnEgretPose(float filmTime, uint32_t bird, float motionScale) noexcept {
     constexpr std::array<FlockMember, kDawnEgretCount> formation{{
         { 0.f,  0.f,   0.f, 1.08f},
         {-2.6f,-1.8f, .35f, .98f},
         {-3.0f, 2.1f,-.25f, 1.04f},
-        {-6.2f, 4.2f, .15f, .95f},
-        {-9.4f, 6.3f,-.10f, 1.02f}
+        {-6.2f, 1.5f, .15f, .95f},
+        {-9.4f, 0.f, -.10f, 1.02f}
     }};
     const auto& member = formation[bird % kDawnEgretCount];
     const float dt = filmTime - kDawnEgretStart;
-    constexpr float vx = 4.2f, vy = .04f, vz = .3f;
-    // Accelerate smoothly after the window crossing begins, clearing the wide
-    // frame by the end while keeping the flight visible as the title arrives.
-    const float u = std::clamp((filmTime - 350.2f) / 4.6f, 0.f, 1.f);
-    const float advance = u*u*u*(u*(6.f*u - 15.f) + 10.f);
-    const float dx = vx + (9.66f / 4.6f) * 30.f*u*u*(1.f-u)*(1.f-u);
-    const float speed = std::hypot(dx, vz);
-    // Keep station in a fixed flight frame while the shared course accelerates.
-    const float routeSpeed = std::hypot(vx, vz);
-    const float tx = vx / routeSpeed, tz = vz / routeSpeed;
+    constexpr float vx = 5.2f, vy = .04f, vz = .3f;
+    const float speed = std::hypot(vx, vz);
+    const float tx = vx / speed, tz = vz / speed;
     const float motion = std::clamp(motionScale, 0.f, 1.f);
     const float stroke = 11.2f * dt - float(bird) * 1.1f;
-    return {{-24.66f + vx*dt + 9.66f*advance + member.trail*tx + member.lateral*tz,
+    return {{-43.6f + vx*dt + member.trail*tx + member.lateral*tz,
              8.3f + vy*dt + member.height,
-             24.f + vz*dt + member.trail*tz - member.lateral*tx},
-            std::atan2(dx, vz), -std::atan2(vy, speed), 0.f, member.size,
+             23.4f + vz*dt + member.trail*tz - member.lateral*tx},
+            std::atan2(vx, vz), -std::atan2(vy, speed), 0.f, member.size,
             .10f + .60f*motion*std::sin(stroke),
             -.10f - .35f*motion*std::cos(stroke)};
 }

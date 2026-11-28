@@ -12,7 +12,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "adb002f71b13124f556b5cd16116d58a3a6be53a4586885f699e7de7a9d11bf9"
+      "sha256": "0cae849d2739024d09bc0b1a7051fb959285a58336167d33146e9281ce753657"
     },
     {
       "id": "shader_neural_rendering",
@@ -67,7 +67,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "41d998ddb2ae8b3fd9c6b82ff40b2815ffe8c5a9329510eb10bcbc954d127f70"
+      "sha256": "79b394979c7b9a899bad95f54a25f181837e5023a56ab8c876a9de6c660cff27"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -158,7 +158,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "bb57f611afb2e5d2122f4557dccd5133d02fa61d52e5656c08683c26ffbdf5c2"
+      "sha256": "adacbf19b1c3f5050bdaef1832dedc65e62fef230fb1344d72b6a30ec71346e3"
     },
     {
       "id": "model_madame_n_director_xml",

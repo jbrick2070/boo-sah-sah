@@ -1604,7 +1604,8 @@ cbuffer M1PostCB : register(b0)
     float  gBloomIntensity;
     float  gFocusDistance;
     float  gFocusWeight;
-    float2 gPostPadding;
+    float  gAnamorphicWeight;
+    float  gPostPadding;
     float4 gGrade0; // slope.xyz, saturation
     float4 gGrade1; // offset.xyz, power.x
     float4 gGrade2; // power.yz, shadow.xy
@@ -1614,6 +1615,7 @@ cbuffer M1PostCB : register(b0)
 Texture2D<float>  gSceneDistTex : register(t0);
 Texture2D<float4> gSceneHdrTex  : register(t1);
 Texture2D<float4> gBloomMip0    : register(t2);
+Texture2D<float>  gDofDistTex   : register(t3);
 SamplerState      gLinearClamp  : register(s0);
 
 int2 canvasSizePx()
@@ -1624,6 +1626,11 @@ int2 canvasSizePx()
 float loadDistance(int2 p, int2 size)
 {
     return gSceneDistTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0));
+}
+
+float loadDofDistance(int2 p, int2 size)
+{
+    return gDofDistTex.Load(int3(clamp(p, int2(0, 0), size - 1), 0));
 }
 
 float3 loadHdr(int2 p, int2 size)
@@ -1681,14 +1688,23 @@ float3 bokehDepthOfField(float2 pxPos, int2 size, float3 centerColor, float cent
     float centerCoc = circleOfConfusionPx(centerD, focus, scale);
     float radius = 14.0 * scale;
     float rot = interleavedGradientNoise(pxPos, 0x5BD1E995u) * kTwoPi;
+    // Start with a vertical anamorphic oval, then compress its radial axis
+    // toward the frame edges. Work in pixel-aspect-correct screen coordinates.
+    float2 screen = ((pxPos + 0.5f) / float2(size) - 0.5f) * float2((float)size.x / (float)size.y, 1.0f);
+    float screenR2 = dot(screen, screen);
+    float2 radial = screen * rsqrt(max(screenR2, 1e-6f));
+    float pinch = gAnamorphicWeight * 0.55f * saturate(screenR2 * 1.35f);
+    float2 pinchRadial = radial * pinch;
     float3 acc = centerColor;
     float wsum = 1.0;
     [unroll] for (int k = 0; k < 24; ++k)
     {
         float r = sqrt(((float)k + 0.5) / 24.0) * radius;
         float th = (float)k * 2.39996323 + rot;
-        int2 tp = int2(pxPos + float2(cos(th), sin(th)) * r);
-        float td = loadDistance(tp, size);
+        float2 pupil = float2(lerp(1.0f, 0.58f, gAnamorphicWeight) * cos(th), sin(th));
+        pupil -= pinchRadial * dot(pupil, radial);
+        int2 tp = int2(pxPos + pupil * r);
+        float td = loadDofDistance(tp, size);
         float3 tc = loadHdr(tp, size);
         float tcoc = circleOfConfusionPx(td, focus, scale);
         // Background taps may not smear across a sharper foreground (no halo of the backdrop over the subject).
@@ -1762,7 +1778,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
                     ? rcp(lerp(rcp(max(autoFocus, 0.05)), rcp(max(gFocusDistance, 0.05)), gFocusWeight))
                     : autoFocus;
             }
-            float centerD = loadDistance(int2(pxPos), size);
+            float centerD = loadDofDistance(int2(pxPos), size);
             hdr = bokehDepthOfField(pxPos, size, min(hdrCenter, 64.0.xxx), centerD, focus, scale);
         }
 

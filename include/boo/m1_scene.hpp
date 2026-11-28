@@ -43,8 +43,10 @@ struct M1CameraState {
     float revealOpen01 = 0.0f;  // [0..1] enamel monolith / microcosm opening factor
     float emissivePulse = 0.0f; // Bounded flash-safe musical accent in [0.0, 0.06] (0.0 under --reduced-flash)
     uint32_t shotIndex = 0;     // Act / shot index
-    float focusDistance = 0.0f; // Camera-to-cockpit distance in the scene distance buffer's units
+    float focusDistance = 0.0f; // Authored focal distance in scene units
     float focusWeight = 0.0f;   // 0 selects the normal scene autofocus
+    float rasterFocusDistance = 0.0f; // Optional surface focus for a raster mirror substitute
+    float anamorphicWeight = 0.0f; // Authored cue pupil shape; zero keeps circular bokeh
     FilmCameraInsert insert = FilmCameraInsert::None;
 };
 

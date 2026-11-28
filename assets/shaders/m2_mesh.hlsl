@@ -958,19 +958,24 @@ float velvetFiligree(float2 p, float footprint, float3 neuralColor) {
     return pattern;
 }
 
+// Shared with the depth-of-field output so the brass is focused at the face.
+float stelaBrassWeight(float2 uv, float coverage) {
+    float across = abs(2.0f * uv.y - 1.0f);
+    float end = min(uv.x, 1.0f - uv.x);
+    float fan = abs(frac(5.0f * end - 0.36f * across + 0.50f) - 0.50f);
+    float aa = clamp(coverage * 5.4f, 0.002f, 0.22f);
+    float etched = (1.0f - smoothstep(0.011f, 0.018f + aa, fan))
+                 * (1.0f - smoothstep(0.13f, 0.29f, end)) * (1.0f - smoothstep(0.045f, 0.11f, coverage));
+    float edge = smoothstep(0.78f, 0.86f, across);
+    return max(etched, edge * 0.78f);
+}
+
 // The stelae and enamel columns have longitudinal, object-locked UVs. Retain
 // the same finish when the surface is seen in a mirror or through the flower.
 float3 cathedralFinish(uint material, uint part, float2 uv, float coverage,
                        inout float3 base, inout float rough, inout float metallic) {
     if (material == 12u && part >= 200u && part <= 207u) {
-        float across = abs(2.0 * uv.y - 1.0);
-        float end = min(uv.x, 1.0 - uv.x);
-        float fan = abs(frac(5.0 * end - 0.36 * across + 0.50) - 0.50);
-        float aa = clamp(coverage * 5.4, 0.002, 0.22);
-        float etched = (1.0 - smoothstep(0.011, 0.018 + aa, fan))
-                     * (1.0 - smoothstep(0.13, 0.29, end)) * (1.0 - smoothstep(0.045, 0.11, coverage));
-        float edge = smoothstep(0.78, 0.86, across);
-        float brass = max(etched, edge * 0.78);
+        float brass = stelaBrassWeight(uv, coverage);
         base = lerp(base, float3(0.51, 0.25, 0.082), brass);
         rough = lerp(0.048, 0.32, brass);
         metallic = lerp(metallic, 0.86, brass);
@@ -2007,7 +2012,7 @@ void traceBathroomGiRay(float3 origin, float3 direction, out float3 giRad, out f
     occWeight = 0.0;
 }
 
-bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT,
+bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, float coneTravel, bool traceSunShadow, out float3 color, out float outHitT,
                   out uint outHitMat, out float3 outHitPos, out float3 outHitGeomNormal, out float3 outHitNormal,
                   out float3 outMirrorIbl, out float3 outMirrorWeight) {
     outHitT = distance;
@@ -2064,7 +2069,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float3 p = origin + direction * hitT;
         bool inBath = isInsideDawnBathroom(p);
 
-        float mipLod = clamp(log2(max(coneSpread * hitT * 512.0, 1.0)), 0.0, 8.0);
+        float mipLod = clamp(log2(max(coneSpread * (coneTravel + hitT) * 512.0, 1.0)), 0.0, 8.0);
         float3 hCoord = float3(hitUv, (float)hm);
         float3 hBase  = gAlbedoAlphaTex.SampleLevel(anisoWrap, hCoord, mipLod).rgb;
         float2 hNorXY = gNormalTex.SampleLevel(anisoWrap, hCoord, mipLod).xy * 2.0 - 1.0;
@@ -2097,11 +2102,11 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float hRough = clamp(hOrm.y, 0.03, 0.98);
         if (hm == 1u) hRough = lerp(hRough, 0.08, wetP);
         float hMetal = saturate(hOrm.z);
-        float hitUvWidth = coneSpread * hitT / max(0.2, abs(dot(hitNGeom, direction)));
+        float hitUvWidth = coneSpread * (coneTravel + hitT) / max(0.2, abs(dot(hitNGeom, direction)));
         float3 stageTrim = cathedralFinish(hm, hitPart, hitUv, hitUvWidth, hBase, hRough, hMetal);
         if (act == 1u && hm == 11u && hitPart >= 100u && hitPart <= 115u) {
             float bodyY = v0.p.y + bary.x * (v1.p.y - v0.p.y) + bary.y * (v2.p.y - v0.p.y);
-            aircraftPaint(hitPart, bodyY, coneSpread * hitT * length(w2o[1]), hBase, hRough, hMetal);
+            aircraftPaint(hitPart, bodyY, coneSpread * (coneTravel + hitT) * length(w2o[1]), hBase, hRough, hMetal);
         }
         float hCoat  = clearcoatForMaterial(hm, hOrm.w, wetP);
         float hTrans = translucencyForMaterial(hm, hOrm.w);
@@ -2109,7 +2114,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float3 facadeLight = 0.0.xxx;
         float3 streetLight = 0.0.xxx;
         if (districtFacade) {
-            float hitWidth = coneSpread * hitT / max(abs(dot(hitNGeom, direction)), 0.18);
+            float hitWidth = coneSpread * (coneTravel + hitT) / max(abs(dot(hitNGeom, direction)), 0.18);
             float3 facadePos = p;
             if (act == 2u) {
                 facadePos = (p - taipeiKit.xyz) * taipeiKit.w;
@@ -2138,7 +2143,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             float2 road = avenueCoordinates(hitUv);
             float crossRoad = (hitPart == 7u ? objPos.z : objPos.x) * (act == 2u ? 0.08f : 1.0f);
             float viewAlong = (hitPart == 7u) ? -direction.x : -direction.z;
-            float rayWidth = coneSpread * hitT;
+            float rayWidth = coneSpread * (coneTravel + hitT);
             if (act == 2u) rayWidth *= 0.08 * length(w2o[0]);
             float2 roadWidth = rayWidth * (1.0 + abs(direction.xz) / max(abs(direction.y), 0.06));
             if (hitPart == 8u) roadWidth = roadWidth.yx;
@@ -2153,7 +2158,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         // Sharp mirrors/glass/water evaluate secondary sun shadow so reflected rooms display real window sunbeams!
         float sunVis2 = 1.0;
         float secShadowConeMax = (accumulating() && accumFrame >= 2u) ? 0.0035f : 0.065f;
-        if (coneSpread < secShadowConeMax && (dot(hitNGeom, sunDir) > 0.0 || hTrans > 0.2)) {
+        if ((traceSunShadow || coneSpread < secShadowConeMax) && (dot(hitNGeom, sunDir) > 0.0 || hTrans > 0.2)) {
             float3 shOrig = p + hitNGeom * 0.018 + ((hm == 29u || hm == 36u) ? sunDir * 0.020 : 0.0.xxx);
             sunVis2 = traceShadow(shOrig, sunDir, inBath ? 16.0f : 22.0f) ? 0.0f : 1.0f;
         }
@@ -2209,7 +2214,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             return true;
         }
 
-        float3 hitEmission = districtFacade ? facadeLight : emissive(hm, p, coneSpread * hitT);
+        float3 hitEmission = districtFacade ? facadeLight : emissive(hm, p, coneSpread * (coneTravel + hitT));
         if (hitPart >= 86u && hitPart <= 88u) hitEmission = relayLight(hitPart, hm, hitNGeom, -direction);
         if (hitPart == 172u) hitEmission = blimpEmission(hm);
         if (!hitGlows) hitEmission = 0.0.xxx;
@@ -2245,7 +2250,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
 bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT) {
     uint hitMat;
     float3 hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight;
-    return traceSceneEx(origin, direction, distance, mask, coneSpread, color, outHitT,
+    return traceSceneEx(origin, direction, distance, mask, coneSpread, 0.0f, false, color, outHitT,
                         hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
 }
 
@@ -2255,74 +2260,75 @@ bool traceScene(float3 origin, float3 direction, float distance, uint mask, floa
 }
 
 bool traceMirrorScene(float3 origin, float3 direction, bool stela, out float3 color, out uint extraQueries, out float firstHitDistance) {
-    extraQueries = 1u;
-    float opqT = 180.0;
-    uint hitMat;
-    float3 hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight;
-    bool hitOpq = traceSceneEx(origin, direction, 180.0, 0x01u, 0.0015, color, opqT,
-                               hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
-    firstHitDistance = hitOpq ? opqT : 65504.0;
-
-    // Check thin-glass sheets (shower partition, gallery frame glass, window panes) in front of the opaque hit!
-    RayDesc gRay;
-    gRay.Origin = origin;
-    gRay.Direction = direction;
-    gRay.TMin = 0.014;
-    gRay.TMax = max(opqT - 0.006, 0.015);
-    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> gq;
-    gq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02u, gRay);
-    while (gq.Proceed()) {}
-    ++extraQueries;
-
-    if (gq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-        firstHitDistance = gq.CommittedRayT();
-        uint gOff = triangleOffset(gq.CommittedInstanceID(), gq.CommittedPrimitiveIndex());
-        Vertex gv0 = vertices[indices[gOff]];
-        Vertex gv1 = vertices[indices[gOff + 1u]];
-        Vertex gv2 = vertices[indices[gOff + 2u]];
-        uint gm = min(sceneInstances[gq.CommittedInstanceID()].materialSlice, 41u);
-        float2 gb = gq.CommittedTriangleBarycentrics();
-        float3 gObjN = gv0.n.xyz + gb.x * (gv1.n.xyz - gv0.n.xyz) + gb.y * (gv2.n.xyz - gv0.n.xyz);
-        float3x3 gw2o = (float3x3)gq.CommittedWorldToObject3x4();
-        float3 gN = norm(mul(gObjN, gw2o));
-        if (dot(gN, direction) > 0.0) gN = -gN;
-
-        float gNv = saturate(dot(gN, -direction));
-        float gFres = clamp((0.04 + 0.96 * pow(1.0 - gNv, 5.0)) * 1.15, 0.035, 0.58);
-        float3 gTint = (gm == 35u) ? float3(0.68, 0.26, 0.05)
-                     : ((gm == 4u) ? float3(0.76, 0.94, 0.86) : float3(0.965, 0.988, 0.980));
-        bool mirBath = isInsideDawnBathroom(origin);
-        float3 gSpec = sampleIblEnv(reflect(direction, gN), 0.035, mirBath) * 0.45;
-        float3 sDir = sceneSunDir();
-        gSpec += pow(saturate(dot(gN, norm(-direction + sDir))), 180.0) * sceneSunRadiance() * 0.65;
-        color = lerp(color * gTint, gSpec, gFres);
-        return true;
-    }
-    // The primary surface has already applied its own Fresnel term. Each hit
-    // stela contributes its local lighting and reflects the remaining radiance.
+    extraQueries = 0u;
+    firstHitDistance = 65504.0f;
     uint maxBounces = effectsDetail() >= 2u ? 3u : (effectsDetail() == 1u ? 2u : 1u);
     float3 throughput = 1.0.xxx;
     float3 accumulated = 0.0.xxx;
+    float3 rayOrigin = origin;
     float3 rayDir = direction;
+    float traveled = 0.0f;
     [loop]
-    for (uint bounce = 1u; stela && hitOpq && hitMat == 12u && bounce < maxBounces; ++bounce) {
-        accumulated += throughput * (color - mirrorIbl);
-        throughput *= mirrorWeight * 0.88f;
-        if (max(throughput.r, max(throughput.g, throughput.b)) < 0.015f) {
-            color = 0.0.xxx;
+    for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
+        float opqT = 180.0f;
+        uint hitMat;
+        float3 hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight, segmentColor;
+        bool hitOpq = traceSceneEx(rayOrigin, rayDir, 180.0f, 0x01u,
+                                   0.0015f + (float)bounce * 0.002f, traveled, true,
+                                   segmentColor, opqT, hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
+        ++extraQueries;
+        if (bounce == 0u && hitOpq) firstHitDistance = opqT;
+
+        // Glass is an affine radiance layer in front of this segment's opaque hit.
+        RayDesc gRay;
+        gRay.Origin = rayOrigin;
+        gRay.Direction = rayDir;
+        gRay.TMin = 0.014f;
+        gRay.TMax = max(opqT - 0.006f, 0.015f);
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> gq;
+        gq.TraceRayInline(scene, RAY_FLAG_NONE, 0x02u, gRay);
+        while (gq.Proceed()) {}
+        ++extraQueries;
+        if (gq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            if (bounce == 0u) firstHitDistance = gq.CommittedRayT();
+            uint gOff = triangleOffset(gq.CommittedInstanceID(), gq.CommittedPrimitiveIndex());
+            Vertex gv0 = vertices[indices[gOff]];
+            Vertex gv1 = vertices[indices[gOff + 1u]];
+            Vertex gv2 = vertices[indices[gOff + 2u]];
+            uint gm = min(sceneInstances[gq.CommittedInstanceID()].materialSlice, 41u);
+            float2 gb = gq.CommittedTriangleBarycentrics();
+            float3 gObjN = gv0.n.xyz + gb.x * (gv1.n.xyz - gv0.n.xyz) + gb.y * (gv2.n.xyz - gv0.n.xyz);
+            float3x3 gw2o = (float3x3)gq.CommittedWorldToObject3x4();
+            float3 gN = norm(mul(gObjN, gw2o));
+            if (dot(gN, rayDir) > 0.0f) gN = -gN;
+
+            float gNv = saturate(dot(gN, -rayDir));
+            float gFres = clamp((0.04f + 0.96f * pow(1.0f - gNv, 5.0f)) * 1.15f, 0.035f, 0.58f);
+            float3 gTint = (gm == 35u) ? float3(0.68f, 0.26f, 0.05f)
+                         : ((gm == 4u) ? float3(0.76f, 0.94f, 0.86f) : float3(0.965f, 0.988f, 0.980f));
+            bool mirBath = isInsideDawnBathroom(rayOrigin);
+            float3 gSpec = sampleIblEnv(reflect(rayDir, gN), 0.035f, mirBath) * 0.45f;
+            float3 sDir = sceneSunDir();
+            gSpec += pow(saturate(dot(gN, norm(-rayDir + sDir))), 180.0f) * sceneSunRadiance() * 0.65f;
+            accumulated += throughput * gSpec * gFres;
+            throughput *= gTint * (1.0f - gFres);
+        }
+
+        if (!stela || !hitOpq || hitMat != 12u || bounce + 1u >= maxBounces) {
+            accumulated += throughput * segmentColor;
             break;
         }
+        // Replace the hit stela's IBL specular with the next segment.
+        accumulated += throughput * (segmentColor - mirrorIbl);
+        throughput *= mirrorWeight * 0.88f;
+        if (max(throughput.r, max(throughput.g, throughput.b)) < 0.015f) break;
         float3 nextDir = reflect(rayDir, hitNormal);
         if (dot(nextDir, hitGeomNormal) <= 0.0f) nextDir = reflect(rayDir, hitGeomNormal);
+        rayOrigin = hitPos + hitGeomNormal * 0.016f;
         rayDir = nextDir;
-        float nextT = 28.0f;
-        ++extraQueries;
-        hitOpq = traceSceneEx(hitPos + hitGeomNormal * 0.016f, rayDir, 28.0f, 0x01u,
-                              0.0015f + (float)bounce * 0.002f, color, nextT,
-                              hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
+        traveled += opqT;
     }
-    color = accumulated + throughput * color;
-    // The caller and ray reconstruction use only the first segment's result.
+    color = accumulated;
     return firstHitDistance < 65504.0f;
 }
 
@@ -2635,6 +2641,7 @@ struct Targets {
     float4 transmittance : SV_Target1;
 #else
     float distance : SV_Target1;
+    float dofDistance : SV_Target7;
 #endif
 #if defined(M2_RT)
     float4 normRough  : SV_Target2;
@@ -2920,6 +2927,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 #if defined(M2_RT)
     bool reflHit = false;
     bool refrHit = false;
+    float paneHitT = 180.0f;
     uint shadowHits = 0u;
     uint aoHits = 0u;
     uint queries = 0u;
@@ -2954,7 +2962,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 
         if (matId == 40u || isThinCrystalPetal || isCanopy) {
             float3 thinDir = (matId == 40u) ? -v : refrDir;
-            refrHit = traceScene(i.world - nGeom * 0.018, thinDir, 180.0, 0x01u, 0.003, transmitted);
+            refrHit = traceSceneEx(i.world - nGeom * 0.018f, thinDir, 180.0f, 0x01u, 0.003f, transmitted, paneHitT);
             glassThickness3D = isThinCrystalPetal ? 0.012f : 0.008f;
             queries += 2u;
         } else {
@@ -3737,6 +3745,24 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     o.transmittance = float4(paneTransmittance * transScale, 1.0f);
 #else
     o.distance = dist;
+    o.dofDistance = dist;
+#if defined(M2_RT)
+    // A traced miss is sky even when the reflected color uses an IBL fallback.
+    if (matId == 12u || matId == 34u) {
+        float virtualDistance = reflHit ? dist + rrHitDistance : kSceneFar;
+        float brass = (matId == 12u && partId >= 200u && partId <= 207u)
+            ? stelaBrassWeight(i.uv.xy, max(uvWidth.x, uvWidth.y)) : 0.0f;
+        o.dofDistance = lerp(virtualDistance, dist, brass);
+    } else if (matId == 40u) {
+        // The flat pane traces straight through; the eye-to-hit distance is physical.
+        o.dofDistance = refrHit ? length(i.world - nGeom * 0.018f - v * paneHitT - eye) : kSceneFar;
+    }
+#elif defined(BOO_GLASS_REFRACTION)
+    if (matId == 40u) {
+        float behind = gSceneDepthCopy.Load(int3(int2(i.pos.xy), 0));
+        o.dofDistance = behind >= dist ? behind : dist;
+    }
+#endif
 #endif
 
 #if defined(M2_RT)
@@ -4082,6 +4108,7 @@ Targets PSSky(SkyOut i) {
     o.transmittance = 0.0f.xxxx;
 #else
     o.distance = kSceneFar;
+    o.dofDistance = kSceneFar;
 #endif
 #if defined(M2_RT)
     o.normRough  = float4(0.0, 1.0, 0.0, 1.0);

@@ -33,7 +33,7 @@ struct DlssBridge::Impl {
 #endif
     RendererFeatureState rrStatus = RendererFeatureState::Unavailable;
     bool configuredRR = false;
-    ComPtr<ID3D12Resource> inputColor, inputDistance;
+    ComPtr<ID3D12Resource> inputColor, inputDistance, inputDofDistance;
     uint32_t inputW = 0, inputH = 0, sample = 0;
     float pixelJitter[2]{};
     bool historyReset = true;
@@ -50,7 +50,7 @@ struct DlssBridge::Impl {
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12Resource> exposure;
     ComPtr<ID3D12DescriptorHeap> exposureRtv;
-    ComPtr<ID3D12Resource> fullColor, fullDistance;
+    ComPtr<ID3D12Resource> fullColor, fullDistance, fullDofDistance;
     uint32_t requestedWidth = 0, requestedHeight = 0;
     bool noUpscale = false;
     DlssMode configured = DlssMode::Off;
@@ -62,7 +62,7 @@ struct DlssBridge::Impl {
     }
     bool probe();
     bool makeResolvePipeline();
-    bool configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, bool useRR, ID3D12Resource* color, ID3D12Resource* distance);
+    bool configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, bool useRR, ID3D12Resource* color, ID3D12Resource* distance, ID3D12Resource* dofDistance);
 #endif
 };
 
@@ -76,6 +76,7 @@ uint32_t DlssBridge::width() const noexcept { return impl_->inputW; }
 uint32_t DlssBridge::height() const noexcept { return impl_->inputH; }
 ID3D12Resource* DlssBridge::color() const noexcept { return impl_->inputColor.Get(); }
 ID3D12Resource* DlssBridge::distance() const noexcept { return impl_->inputDistance.Get(); }
+ID3D12Resource* DlssBridge::dofDistance() const noexcept { return impl_->inputDofDistance.Get(); }
 const float* DlssBridge::jitter() const noexcept { return impl_->pixelJitter; }
 void DlssBridge::reset() noexcept {
     impl_->historyReset = true;
@@ -185,12 +186,12 @@ bool DlssBridge::Impl::probe() {
 }
 
 bool DlssBridge::Impl::makeResolvePipeline() {
-    D3D12_DESCRIPTOR_RANGE ranges[2] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,0,0,0},{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,0,0,2}};
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0},{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,3,0,0,3}};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable = {2, ranges};
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants = {0,0,1};
+    parameters[1].Constants = {0,0,2};
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -213,14 +214,14 @@ bool DlssBridge::Impl::makeResolvePipeline() {
         }))) return false;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 4;
+    heap.NumDescriptors = 6;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     return SUCCEEDED(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&descriptors)));
 }
 
-bool DlssBridge::Impl::configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, bool useRR, ID3D12Resource* color, ID3D12Resource* distance) {
+bool DlssBridge::Impl::configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, bool useRR, ID3D12Resource* color, ID3D12Resource* distance, ID3D12Resource* dofDistance) {
     noUpscale = false;
-    if (feature && configured == mode && configuredRR == useRR && fullColor.Get() == color && fullDistance.Get() == distance) return true;
+    if (feature && configured == mode && configuredRR == useRR && fullColor.Get() == color && fullDistance.Get() == distance && fullDofDistance.Get() == dofDistance) return true;
     const auto output = color->GetDesc();
     if (output.Width < 32 || output.Height < 32) { noUpscale = true; return false; }
     const auto quality = mode == DlssMode::Performance ? NVSDK_NGX_PerfQuality_Value_MaxPerf :
@@ -267,6 +268,8 @@ bool DlssBridge::Impl::configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, 
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(input.ReleaseAndGetAddressOf())));
     };
     if (!makeInput(color, inputColor) || !makeInput(distance, inputDistance)) return false;
+    inputDofDistance.Reset();
+    if (dofDistance && !makeInput(dofDistance, inputDofDistance)) return false;
     constexpr int flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
     NVSDK_NGX_Result result;
 #ifdef BOO_HAS_DLSS_RR
@@ -293,16 +296,18 @@ bool DlssBridge::Impl::configure(ID3D12GraphicsCommandList* cmd, DlssMode mode, 
     }
     auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
     const UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    for (ID3D12Resource* input : {inputColor.Get(),inputDistance.Get()}) {
+    // Bind valid fallback descriptors when DoF is disabled; the resolve flag prevents any access.
+    for (ID3D12Resource* input : {inputColor.Get(),inputDistance.Get(),inputDofDistance ? inputDofDistance.Get() : inputDistance.Get()}) {
         device->CreateShaderResourceView(input,nullptr,handle);
         handle.ptr += stride;
     }
-    for (ID3D12Resource* out : {color,distance}) {
+    for (ID3D12Resource* out : {color,distance,dofDistance ? dofDistance : distance}) {
         device->CreateUnorderedAccessView(out,nullptr,nullptr,handle);
         handle.ptr += stride;
     }
     fullColor = color;
     fullDistance = distance;
+    fullDofDistance = dofDistance;
     configured = mode;
     configuredRR = useRR;
     inputW = w; inputH = h;
@@ -326,7 +331,7 @@ void DlssBridge::warmUp(D3D12Context& context) {
 }
 
 bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible,
-                         bool requestRR, bool raytracing, ID3D12Resource* fullColor, ID3D12Resource* fullDistance) {
+                         bool requestRR, bool raytracing, ID3D12Resource* fullColor, ID3D12Resource* fullDistance, ID3D12Resource* fullDofDistance) {
 #ifdef BOO_HAS_DLSS
     auto& s = *impl_;
     warmUp(context);
@@ -342,13 +347,20 @@ bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, 
     s.rrStatus = !s.supportsRR ? RendererFeatureState::Unavailable :
                  requestRR ? RendererFeatureState::Idle : RendererFeatureState::Off;
     s.status = mode == DlssMode::Off ? RendererFeatureState::Off : RendererFeatureState::Idle;
+    // Drop the optional target when DoF is switched off, including after a failed or idle DLSS frame.
+    if (!fullDofDistance && (s.inputDofDistance || s.fullDofDistance)) {
+        if (!context.waitForGpu()) return false;
+        s.inputDofDistance.Reset();
+        s.fullDofDistance.Reset();
+        s.configured = DlssMode::Off; // Rebuild the descriptors before the next dispatch.
+    }
     if (!eligible || mode == DlssMode::Off) { reset(); return false; }
     bool useRR = requestRR && raytracing && s.supportsRR;
     if (useRR) {
         if (s.failedRR == mode) {
             s.rrStatus = RendererFeatureState::Unavailable;
             useRR = false;
-        } else if (!s.configure(cmd, mode, true, fullColor, fullDistance)) {
+        } else if (!s.configure(cmd, mode, true, fullColor, fullDistance, fullDofDistance)) {
             if (!s.noUpscale) {
                 s.rrStatus = RendererFeatureState::Unavailable;
                 s.failedRR = mode;
@@ -356,7 +368,7 @@ bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, 
             useRR = false;
         }
     }
-    if (!useRR && (s.failed == mode || !s.configure(cmd, mode, false, fullColor, fullDistance))) {
+    if (!useRR && (s.failed == mode || !s.configure(cmd, mode, false, fullColor, fullDistance, fullDofDistance))) {
         if (s.failed == mode || !s.noUpscale) {
             s.status = RendererFeatureState::Unavailable;
             s.failed = mode;
@@ -368,7 +380,7 @@ bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, 
     s.pixelJitter[1] = halton(phase,3) - .5f;
     return true;
 #else
-    (void)context; (void)cmd; (void)mode; (void)eligible; (void)requestRR; (void)raytracing; (void)fullColor; (void)fullDistance;
+    (void)context; (void)cmd; (void)mode; (void)eligible; (void)requestRR; (void)raytracing; (void)fullColor; (void)fullDistance; (void)fullDofDistance;
     return false;
 #endif
 }
@@ -382,8 +394,10 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
     constexpr auto write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     transition(cmd,s.inputColor.Get(),pixel,read);
     transition(cmd,s.inputDistance.Get(),pixel,read);
+    if (s.inputDofDistance) transition(cmd,s.inputDofDistance.Get(),pixel,read);
     transition(cmd,s.fullColor.Get(),pixel,write);
     transition(cmd,s.fullDistance.Get(),pixel,write);
+    if (s.fullDofDistance) transition(cmd,s.fullDofDistance.Get(),pixel,write);
     auto* depth = static_cast<ID3D12Resource*>(scene.dlssDepthResource());
     auto* motion = static_cast<ID3D12Resource*>(scene.dlssMotionResource());
     const bool resetHistory = s.historyReset || scene.dlssHistoryReset();
@@ -455,11 +469,14 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
     cmd->SetComputeRootSignature(s.root.Get());
     cmd->SetComputeRootDescriptorTable(0,s.descriptors->GetGPUDescriptorHandleForHeapStart());
     cmd->SetComputeRoot32BitConstant(1,spatialColor ? 1u : 0u,0);
+    cmd->SetComputeRoot32BitConstant(1,s.fullDofDistance ? 1u : 0u,1);
     cmd->SetPipelineState(s.resolvePso.Get());
     const auto full = s.fullColor->GetDesc();
     cmd->Dispatch((static_cast<UINT>(full.Width)+7)/8,(full.Height+7)/8,1);
+    if (s.fullDofDistance) transition(cmd,s.fullDofDistance.Get(),write,pixel);
     transition(cmd,s.fullDistance.Get(),write,pixel);
     transition(cmd,s.fullColor.Get(),write,pixel);
+    if (s.inputDofDistance) transition(cmd,s.inputDofDistance.Get(),read,pixel);
     transition(cmd,s.inputDistance.Get(),read,pixel);
     transition(cmd,s.inputColor.Get(),read,pixel);
 #else

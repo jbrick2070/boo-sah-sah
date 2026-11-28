@@ -126,7 +126,8 @@ struct alignas(16) GpuM1PostConstants {
     float bloomIntensity = 0.22f;
     float focusDistance = 0.0f;
     float focusWeight = 0.0f;
-    float padding[2]{};
+    float anamorphicWeight = 0.0f;
+    float padding = 0.0f;
     // Four packed float4s; see M1PostCB in the composite shader.
     float grade[16]{};
 };
@@ -1328,12 +1329,13 @@ struct M1TaipeiSliceEffect::Impl {
     // Owned descriptor heaps:
     // rtvHeap (7 entries):
     //   [0]=sceneHdr, [1]=sceneDepth, [2..4]=bloomMips[0..2], [5]=canvasClean, [6]=canvasAbCompare
-    // srvUavHeap (18 entries):
+    // srvUavHeap (23 entries):
     //   [0]=UAV sceneHdr (u1), [1]=UAV sceneDepth (u2),
     //   [2]=SRV sceneDepth, [3]=SRV sceneHdr, [4..6]=SRV bloomMips[0..2], [7]=SRV tensorFieldTex,
     //   [8]=SRV canvasClean, [9]=SRV canvasAbCompare, [10]=SRV codecDecodedTex,
     //   [11]=UAV tensorFieldTex, [12]=RAW UAV nv12PackBuf, [13]=Structured UAV particleGpuBuf,
     //   [14..17]=present-pass table: SRV canvasClean, canvasAbCompare, codecDecodedTex, uiTextTex
+    //   [19..22]=composite table: physical distance, HDR, bloom, DoF distance
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
     ComPtr<ID3D12DescriptorHeap> srvUavHeap;
     uint32_t rtvDescSize = 0;
@@ -1347,6 +1349,7 @@ struct M1TaipeiSliceEffect::Impl {
     uint64_t currentCanvasBundleBytes = 0;
     ComPtr<ID3D12Resource> sceneHdr;
     ComPtr<ID3D12Resource> sceneDepth;
+    ComPtr<ID3D12Resource> sceneDofDepth;
     std::array<ComPtr<ID3D12Resource>, kNumBloomMips> bloomMips;
     std::array<uint32_t, kNumBloomMips> bloomW{0, 0, 0};
     std::array<uint32_t, kNumBloomMips> bloomH{0, 0, 0};
@@ -1949,6 +1952,7 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
         reqW, reqH, DXGI_FORMAT_R32_FLOAT,
         D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
+    const bool useDof = trilogy && preset != QualityPresetId::Lite && preset != QualityPresetId::Safe;
     const uint32_t bloomCount = preset == QualityPresetId::Lite ? 1u : kNumBloomMips;
     std::array<uint32_t, kNumBloomMips> mw{};
     std::array<uint32_t, kNumBloomMips> mh{};
@@ -1970,6 +1974,7 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
         singleResourceAllocBytes(dev, hdrDesc) +
         singleResourceAllocBytes(dev, depthDesc) +
         2ULL * singleResourceAllocBytes(dev, cleanDesc);
+    if (useDof) newBundleBytes += singleResourceAllocBytes(dev, depthDesc);
     for (uint32_t m = 0; m < bloomCount; ++m) {
         newBundleBytes += singleResourceAllocBytes(dev, mipDescs[m]);
     }
@@ -1992,6 +1997,7 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
 
     ComPtr<ID3D12Resource> newHdr;
     ComPtr<ID3D12Resource> newDepth;
+    ComPtr<ID3D12Resource> newDofDepth;
     std::array<ComPtr<ID3D12Resource>, kNumBloomMips> newMips;
     ComPtr<ID3D12Resource> newClean;
     ComPtr<ID3D12Resource> newAbCompare;
@@ -2004,6 +2010,9 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&newDepth)))) {
         return false;
     }
+    if (useDof && FAILED(dev->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &depthDesc,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&newDofDepth)))) return false;
     for (uint32_t m = 0; m < bloomCount; ++m) {
         if (FAILED(dev->CreateCommittedResource(
                 &defaultHeap, D3D12_HEAP_FLAG_NONE, &mipDescs[m],
@@ -2022,6 +2031,7 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
 
     sceneHdr = std::move(newHdr);
     sceneDepth = std::move(newDepth);
+    sceneDofDepth = std::move(newDofDepth);
     bloomMips = std::move(newMips);
     canvasClean = std::move(newClean);
     canvasAbCompare = std::move(newAbCompare);
@@ -2063,13 +2073,19 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
     srvDepth.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDepth.Texture2D.MipLevels = 1;
     dev->CreateShaderResourceView(sceneDepth.Get(), &srvDepth, srvCpuAt(2u));
+    // Dedicated contiguous composite table: physical distance, HDR, bloom, optical distance.
+    dev->CreateShaderResourceView(sceneDepth.Get(), &srvDepth, srvCpuAt(19u));
+    dev->CreateShaderResourceView(sceneDofDepth ? sceneDofDepth.Get() : sceneDepth.Get(), &srvDepth, srvCpuAt(22u));
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvHdr = srvDepth;
     srvHdr.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     dev->CreateShaderResourceView(sceneHdr.Get(), &srvHdr, srvCpuAt(3u));
+    dev->CreateShaderResourceView(sceneHdr.Get(), &srvHdr, srvCpuAt(20u));
     for (uint32_t m = 0; m < kNumBloomMips; ++m) {
         dev->CreateShaderResourceView(bloomMips[m].Get(), &srvHdr, srvCpuAt(4u + m));
     }
+
+    dev->CreateShaderResourceView(bloomMips[0].Get(), &srvHdr, srvCpuAt(21u));
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvClean = srvHdr;
     srvClean.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
@@ -2718,7 +2734,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     linClampPs.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // 1. Graphics root signature (Raster Scene, Bloom Down/Up): [0]=28 root constants (b0), [1]=1-SRV table (t0)
-    //    Composite gets its own 3-SRV root signature (1b) so Bloom Down/Up never bind an SRV range overlapping a bound RTV.
+    //    Composite gets its own 4-SRV root signature (1b) so Bloom Down/Up never bind an SRV range overlapping a bound RTV.
     auto buildPostRootSig = [&](uint32_t srvCount, ComPtr<ID3D12RootSignature>& outSig) -> bool {
         D3D12_DESCRIPTOR_RANGE srvRange{};
         srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2747,7 +2763,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
                SUCCEEDED(dev->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&outSig))) && outSig;
     };
     if (!buildPostRootSig(1u, impl_->gfxRootSig) ||
-        !buildPostRootSig(3u, impl_->compositeRootSig)) {
+        !buildPostRootSig(4u, impl_->compositeRootSig)) {
         res.status = BackendStatus::Faulted;
         res.health = HealthState::Faulted;
         res.diagnosticCode = "M1_GFX_ROOTSIG_FAILED";
@@ -2963,7 +2979,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
     rtvHd.NumDescriptors = 8;
     rtvHd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     D3D12_DESCRIPTOR_HEAP_DESC suHd{};
-    suHd.NumDescriptors = 19;
+    suHd.NumDescriptors = 23;
     suHd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     suHd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&rtvHd, IID_PPV_ARGS(&impl_->rtvHeap))) ||
@@ -3087,6 +3103,12 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             BOO_LOG_WARN("Render", "Full city unavailable on this graphics chip; drawing the built-in scene. " + error);
             impl_->trilogyMesh.reset();
             impl_->trilogy = false;
+            // The fallback scene has no depth-of-field pass.
+            if (impl_->sceneDofDepth) {
+                impl_->currentCanvasBundleBytes -= singleResourceAllocBytes(dev, impl_->sceneDofDepth->GetDesc());
+                impl_->sceneDofDepth.Reset();
+            }
+            dev->CreateShaderResourceView(impl_->sceneDepth.Get(), nullptr, impl_->srvCpuAt(22u));
         }
     }
     if(impl_->trilogyMesh && !impl_->trilogyMesh->resize(impl_->canvasW,impl_->canvasH)) throw std::runtime_error("M2 depth allocation failed");
@@ -3105,7 +3127,7 @@ HardwareResult M1TaipeiSliceEffect::probeAndInitialize() {
             cmd->SetDescriptorHeaps(1, heaps);
             impl_->trilogyMesh->record(
                 cmd, warmCtx, warmCam,
-                impl_->sceneHdr.Get(), impl_->sceneDepth.Get(),
+                impl_->sceneHdr.Get(), impl_->sceneDepth.Get(), nullptr,
                 impl_->srvGpuAt(7u).ptr, impl_->canvasW, impl_->canvasH,
                 kHeadlessSlot, true, true);
             cmd->SetDescriptorHeaps(1, heaps);
@@ -3186,7 +3208,8 @@ bool M1TaipeiSliceEffect::syncPresetBeforeFrame(const QualityPresetSpec& spec, b
     impl_->activeSpecForParticles = activeSpec_;
 
     const uint32_t reqBloomCount = spec.id == QualityPresetId::Lite ? 1u : kNumBloomMips;
-    if ((reqW != impl_->canvasW || reqH != impl_->canvasH || reqBloomCount != impl_->canvasBloomCount) && allowImmediateResize) {
+    const bool reqDof = impl_->trilogy && spec.id != QualityPresetId::Lite && spec.id != QualityPresetId::Safe;
+    if ((reqW != impl_->canvasW || reqH != impl_->canvasH || reqBloomCount != impl_->canvasBloomCount || reqDof != bool(impl_->sceneDofDepth)) && allowImmediateResize) {
         d3d_.waitForGpu();
         if (!d3d_.checkDeviceHealthy()) return false;
         if (!impl_->buildCanvasBundle(d3d_, reqW, reqH, spec.softVramLimitBytes, spec.id)) {
@@ -3196,7 +3219,7 @@ bool M1TaipeiSliceEffect::syncPresetBeforeFrame(const QualityPresetSpec& spec, b
                 return false;
             }
         }
-    } else if (reqW == impl_->canvasW && reqH == impl_->canvasH && reqBloomCount == impl_->canvasBloomCount) {
+    } else if (reqW == impl_->canvasW && reqH == impl_->canvasH && reqBloomCount == impl_->canvasBloomCount && reqDof == bool(impl_->sceneDofDepth)) {
         impl_->canvasPreset = spec.id;
     }
 
@@ -3497,6 +3520,7 @@ GpuM1SceneConstants M1TaipeiSliceEffect::Impl::buildSceneConstants(
     }
     const float wCam = std::clamp(ctx.interactive.blendWeight, 0.0f, 1.0f);
     outCam.focusWeight *= 1.0f - wCam;
+    outCam.anamorphicWeight *= 1.0f - wCam;
     if (wCam > 1e-4f) {
         if (wCam >= 0.9999f) {
             std::memcpy(outCam.eye, ctx.interactive.eye, sizeof(outCam.eye));
@@ -3666,12 +3690,14 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.scaleOrVignette = (curAov != 0u) ? 0.0f : 0.24f;
         // Bits 0..7 = AOV mode; bit8 = autofocus bokeh DoF (M2 linear scene distance), bit9 = lens ghosts + halo.
         pc.isFirstDownsample = curAov | (ctx.qualityPreset == QualityPresetId::Lite ? 0x400u :
-            (((trilogy && curAov == 0u) ? 0x100u : 0u) | ((ctx.reducedFlash || curAov != 0u) ? 0u : 0x200u)));
+            (((trilogy && curAov == 0u && ctx.qualityPreset != QualityPresetId::Safe) ? 0x100u : 0u) |
+             ((ctx.reducedFlash || curAov != 0u) ? 0u : 0x200u)));
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
         pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * cam.revealOpen01);
         pc.focusDistance = cam.focusDistance;
         pc.focusWeight = cam.focusWeight;
+        pc.anamorphicWeight = cam.anamorphicWeight;
         std::copy(grade.begin(), grade.end(), pc.grade);
         if (curAov == 0u &&
             (visualMode == ShowVisualMode::SoloNPU ||
@@ -3689,7 +3715,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         cmd->SetGraphicsRootSignature(compositeRootSig.Get());
         cmd->SetPipelineState(psoCompositeCanvas.Get());
         cmd->SetGraphicsRoot32BitConstants(0, sizeof(GpuM1PostConstants) / 4, &pc, 0);
-        cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(2u)); // [2]=sceneDistance (t0), [3]=sceneHdr (t1), [4]=bloomMip0 (t2)
+        cmd->SetGraphicsRootDescriptorTable(1, srvGpuAt(19u)); // physical distance, HDR, bloom, DoF distance
         cmd->DrawInstanced(3, 1, 0, 0);
     }
     transitionResource(cmd, targetCanvas, D3D12_RESOURCE_STATE_RENDER_TARGET, kCanvasReadState);
@@ -3831,6 +3857,10 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
 
     const bool orbital = trilogyMesh && isOrbitalCutaway(visualMode, ctx);
     if (isCanonicalPass) orbitalViewActive = orbital;
+    bool meshUsedRt = false;
+    const bool dofActive = sceneDofDepth && ctx.interactive.aovMode == 0u &&
+        ctx.qualityPreset != QualityPresetId::Lite && ctx.qualityPreset != QualityPresetId::Safe;
+    bool renderedOrbital = false;
     if(trilogyMesh) {
         const bool solo = ctx.playbackMode == PlaybackMode::SoloRT || ctx.playbackMode == PlaybackMode::SoloTensor ||
                           ctx.playbackMode == PlaybackMode::SoloNPU || ctx.playbackMode == PlaybackMode::SoloCUDA ||
@@ -3841,14 +3871,15 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         const bool allowDlss = !d3d.benchmark() || d3d.benchmark()->mode == BenchmarkMode::DlssQuality;
         bool sr = false;
         if (isCanonicalPass) {
-            sr = allowDlss && dlss.prepare(d3d, cmd, ctx.dlssMode, eligible, ctx.rayReconstruction && !solo,
-                useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get());
+            sr = dlss.prepare(d3d, cmd, ctx.dlssMode, eligible && allowDlss, ctx.rayReconstruction && !solo,
+                useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get(), dofActive ? sceneDofDepth.Get() : nullptr);
             soloDlssPrepared = solo && sr;
         } else if (solo) {
             sr = soloDlssPrepared;
         }
         if (orbital && ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate) {
             trilogyMesh->recordOrbital(cmd,ctx,sceneHdr.Get(),sceneDepth.Get(),canvasW,canvasH,slot,isCanonicalPass);
+            renderedOrbital = true;
         } else {
             if (sr && !trilogyMesh->resize(dlss.width(), dlss.height())) {
                 dlss.rejectInputSize();
@@ -3862,8 +3893,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                 d3d.frameGenerationInputsNeeded();
             const float zeroJitter[2]{};
             const float* jitter = sr ? dlss.jitter() : (frameGeneration ? zeroJitter : nullptr);
-            trilogyMesh->record(cmd,ctx,cam,sr ? dlss.color() : sceneHdr.Get(),sr ? dlss.distance() : sceneDepth.Get(),
-                srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting || solo,jitter,sr && dlss.renderNoisyRays(),sr);
+            meshUsedRt = trilogyMesh->record(cmd,ctx,cam,sr ? dlss.color() : sceneHdr.Get(),sr ? dlss.distance() : sceneDepth.Get(),
+                dofActive ? (sr ? dlss.dofDistance() : sceneDofDepth.Get()) : nullptr, srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting || solo,jitter,sr && dlss.renderNoisyRays(),sr);
             // Both views use the same spatial resolve throughout a solo. Keep evaluating
             // DLSS on canonical frames so its feature and temporal history stay warm.
             if (sr) dlss.resolve(cmd,*trilogyMesh,static_cast<float>(ctx.dtSeconds), solo, isCanonicalPass);
@@ -3982,6 +4013,14 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     }
 
     } // legacy M1 primary scene
+    // Screen-space orbital and legacy scenes have no optical surfaces: copy physical distance.
+    if (dofActive && (renderedOrbital || !trilogyMesh)) {
+        transitionResource(cmd, sceneDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transitionResource(cmd, sceneDofDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->CopyResource(sceneDofDepth.Get(), sceneDepth.Get());
+        transitionResource(cmd, sceneDofDepth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transitionResource(cmd, sceneDepth.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
     if (isCanonicalPass && rtTsHeap && rtTsReadback) {
         cmd->EndQuery(rtTsHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2u + 1u);
         cmd->ResolveQueryData(
@@ -4144,10 +4183,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         d3d.writePassTimestamp(1);
     }
 
+    M1CameraState compositeCam = cam;
+    if (!meshUsedRt && compositeCam.rasterFocusDistance > 0.0f)
+        compositeCam.focusDistance = compositeCam.rasterFocusDistance;
     recordBloomAndCompositeToTarget(
         cmd,
         ctx,
-        cam,
+        compositeCam,
         grade,
         targetCanvas,
         targetRtvIndex,

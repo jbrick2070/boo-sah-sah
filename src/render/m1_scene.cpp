@@ -1,5 +1,6 @@
 #include "boo/m1_scene.hpp"
 #include "boo/bmesh.hpp"
+#include "boo/canopy_cloth.hpp"
 #include "boo/city_modules.hpp"
 #include "boo/last_light.hpp"
 #include "bird_flight.hpp"
@@ -882,6 +883,63 @@ M1CameraState evaluateShowCamera(
             }
             c.revealOpen01 = 1.0f;
         }
+        // Film-time focus cues. Distances follow the evaluated camera and the same
+        // scene poses used by the geometry; smooth envelopes hand back to autofocus.
+        const auto distanceTo = [&](float x, float y, float z) {
+            return std::hypot(x - c.eye[0], y - c.eye[1], z - c.eye[2]);
+        };
+        const auto rack = [](float a, float b, double u) {
+            const float w = static_cast<float>(smootherstep01(u));
+            return 1.0f / std::lerp(1.0f / std::max(a, 0.05f), 1.0f / std::max(b, 0.05f), w);
+        };
+        const auto envelope = [](double time, double in, double full, double out, double end) {
+            return static_cast<float>(smootherstep01((time - in) / (full - in)) *
+                (1.0 - smootherstep01((time - out) / (end - out))));
+        };
+        if (t >= 57.5 && t < 63.5) {
+            // The witness exists only at full motion. Reflect its actual flight
+            // position in stela 205's plane to locate the virtual image.
+            constexpr float angle = 1.08f, radius = 4.43f;
+            const float nx = std::sin(angle), nz = std::cos(angle);
+            const float sx = radius * nx, sz = 5.50f + radius * nz;
+            const auto bird = mirrorWitnessPose(static_cast<float>(t), motionScale).center;
+            const float plane = (bird[0] - sx) * nx + (bird[2] - sz) * nz;
+            const float frame = distanceTo(sx, 7.20f, sz);
+            const float witness = distanceTo(bird[0] - 2.0f * plane * nx, bird[1], bird[2] - 2.0f * plane * nz);
+            c.focusDistance = rack(frame, witness, (t - 58.5) / 1.0);
+            c.rasterFocusDistance = frame;
+            c.focusWeight = motionScale >= 1.0f ? envelope(t, 57.5, 58.5, 61.5, 63.5) : 0.0f;
+        } else if (t >= 130.5 && t < 139.5) {
+            // Parts 216 and 219 are the front and rear woven lamellae.
+            const float u = std::clamp(c.target[0] / 9.2f + 0.5f, 0.0f, 1.0f);
+            const auto ribbonDistance = [&](int i) {
+                const auto point = canopyRibbonPoint(i, u, 0.0f);
+                return distanceTo(point[0], point[1], point[2]);
+            };
+            c.focusDistance = rack(ribbonDistance(0), ribbonDistance(3), (t - 134.5) / 2.5);
+            c.focusWeight = envelope(t, 130.5, 132.0, 137.5, 139.5);
+        } else if (t >= 167.5 && t < 178.5) {
+            // Hold the delivered case in focus; its fitting and payout line
+            // are too close in depth for the proposed rack to be visible.
+            const float motion = std::clamp(motionScale, 0.0f, reducedFlash ? 0.45f : 1.0f);
+            const auto parcel = sanctuaryParcelPose(static_cast<float>(t), motion);
+            c.focusDistance = distanceTo(parcel.center[0], parcel.center[1] + 0.24f, parcel.center[2]);
+            c.focusWeight = envelope(t, 167.5, 169.0, 176.5, 178.5);
+        } else if (t >= 334.5 && t < 346.5) {
+            // The large terrace flower becomes the small flower in the vase.
+            const float care = static_cast<float>(smootherstep01((t - 335.5) / 6.0));
+            const float flower = distanceTo(0.402f * care, 5.85f - 2.113f * care, 5.50f + 0.735f * care);
+            // Taipei 101 damper centre, transformed by the dawn city scale.
+            const float tower = distanceTo(18.5f + 14.5f * care,
+                -9.6f * care + 409.5f * (0.080f - 0.016f * care), 60.0f + 6.0f * care);
+            c.focusDistance = rack(flower, tower, (t - 341.5) / 2.5);
+            c.focusWeight = envelope(t, 334.5, 335.5, 344.5, 346.5);
+        }
+        if ((t >= 130.5 && t < 139.5) || (t >= 167.5 && t < 178.5) || (t >= 334.5 && t < 346.5))
+            c.focusWeight *= static_cast<float>(mScale);
+        if ((t >= 57.5 && t < 63.5) || (t >= 130.5 && t < 139.5) ||
+            (t >= 167.5 && t < 178.5) || (t >= 334.5 && t < 346.5))
+            c.anamorphicWeight = c.focusWeight;
         return c;
     };
 
@@ -900,6 +958,7 @@ M1CameraState evaluateShowCamera(
             }
             out.fovYRadians = lerpF(out.fovYRadians, next.fovYRadians, w);
             out.focusWeight *= static_cast<float>(1.0 - w);
+            out.anamorphicWeight *= static_cast<float>(1.0 - w);
             break;
         }
     }
