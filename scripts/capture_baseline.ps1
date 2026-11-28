@@ -16,6 +16,10 @@ runs are marked volatile and never fail a comparison. Then compare later runs ag
   ./scripts/capture_baseline.ps1 -Capture -Out diagnostics/golden/after
   ./scripts/capture_baseline.ps1 -Compare -Run diagnostics/golden/after -Baseline diagnostics/golden/baseline.json
 
+For cross-GPU comparisons, compare pixels against a reference capture folder instead:
+
+  ./scripts/capture_baseline.ps1 -CompareTolerant -Run diagnostics/golden/after -Ref diagnostics/golden/run-a -Baseline diagnostics/golden/baseline.json -Heatmaps
+
 Compare exits 1 when a stable file changed or is missing. Hashes are only comparable on the same GPU
 and driver, so the baseline records both, plus a fingerprint of the source tree it was made from.
 
@@ -28,15 +32,28 @@ param(
     [Parameter(ParameterSetName = 'Capture', Mandatory = $true)][string]$Out,
     [Parameter(ParameterSetName = 'Capture')][string[]]$Suites = @('film', 'interactive', 'effects'),
     [Parameter(ParameterSetName = 'Capture')][string]$Exe = 'build\x64-release\boo_integration_tests.exe',
+    [Parameter(ParameterSetName = 'Capture')][switch]$LowPowerGpu,
 
     [Parameter(ParameterSetName = 'Record', Mandatory = $true)][switch]$Record,
     [Parameter(ParameterSetName = 'Record', Mandatory = $true)][string[]]$Runs,
 
     [Parameter(ParameterSetName = 'Compare', Mandatory = $true)][switch]$Compare,
-    [Parameter(ParameterSetName = 'Compare', Mandatory = $true)][string]$Run,
+    [Parameter(ParameterSetName = 'CompareTolerant', Mandatory = $true)][switch]$CompareTolerant,
+    [Parameter(ParameterSetName = 'Compare', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'CompareTolerant', Mandatory = $true)][string]$Run,
+    [Parameter(ParameterSetName = 'CompareTolerant', Mandatory = $true)][string]$Ref,
+    [Parameter(ParameterSetName = 'CompareTolerant')][double]$MaxMean,
+    [Parameter(ParameterSetName = 'CompareTolerant')][double]$MaxOver8,
+    [Parameter(ParameterSetName = 'CompareTolerant')][double]$MaxOver64,
+    [Parameter(ParameterSetName = 'CompareTolerant')][string]$Json,
+    [Parameter(ParameterSetName = 'CompareTolerant')][string[]]$Only,
+    [Parameter(ParameterSetName = 'CompareTolerant')][string[]]$Map,
+    [Parameter(ParameterSetName = 'CompareTolerant')][string[]]$Reject,
+    [Parameter(ParameterSetName = 'CompareTolerant')][switch]$Heatmaps,
 
     [Parameter(ParameterSetName = 'Record', Mandatory = $true)]
-    [Parameter(ParameterSetName = 'Compare', Mandatory = $true)][string]$Baseline
+    [Parameter(ParameterSetName = 'Compare', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'CompareTolerant')][AllowEmptyString()][string]$Baseline
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,7 +84,12 @@ function Get-CaptureHashes([string]$dir) {
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw "Capture folder not found: $full" }
     $root = (Resolve-Path -LiteralPath $full).Path.TrimEnd('\') + '\'
     $map = @{}
-    Get-ChildItem -LiteralPath $full -Recurse -File |
+    $captureFiles = @(Get-ChildItem -LiteralPath $full -File) + @(
+        Get-ChildItem -LiteralPath $full -Directory |
+            Where-Object { $_.Name -ne '_diff' } |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File }
+    )
+    $captureFiles |
         Where-Object { $_.Extension -eq '.png' -or $_.Extension -eq '.bmp' } |
         ForEach-Object {
             $relative = $_.FullName.Substring($root.Length).Replace('\', '/')
@@ -119,6 +141,73 @@ function Get-SourceFingerprint {
     }
 }
 
+if ($CompareTolerant) {
+    foreach ($name in @('Baseline', 'Json')) {
+        if ($PSBoundParameters.ContainsKey($name) -and [string]::IsNullOrWhiteSpace([string]$PSBoundParameters[$name])) {
+            [Console]::Error.WriteLine("-$name must be a non-empty file path.")
+            exit 2
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('Reject')) {
+        if (-not $Reject -or @($Reject | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count) {
+            [Console]::Error.WriteLine('-Reject must contain non-empty file paths.')
+            exit 2
+        }
+    }
+    $Only = Split-List $Only
+    $Map = Split-List $Map
+
+    $candidates = @()
+    $venvPython = Join-Path $repo '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        $candidates += @{ Path = $venvPython; Prefix = @() }
+    }
+    foreach ($command in @(Get-Command python -CommandType Application -All -ErrorAction SilentlyContinue)) {
+        if ($command.Source -notmatch '(?i)[\\/]Microsoft[\\/]WindowsApps[\\/]') {
+            $candidates += @{ Path = $command.Source; Prefix = @() }
+        }
+    }
+    foreach ($command in @(Get-Command py -CommandType Application -All -ErrorAction SilentlyContinue)) {
+        if ($command.Source -notmatch '(?i)[\\/]Microsoft[\\/]WindowsApps[\\/]') {
+            $candidates += @{ Path = $command.Source; Prefix = @('-3') }
+        }
+    }
+    $python = $null
+    foreach ($candidate in $candidates) {
+        try {
+            $previousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $version = & $candidate.Path @($candidate.Prefix) --version 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$version" -match '^Python 3\.') { $python = $candidate; break }
+        } catch { } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+    }
+    if (-not $python) {
+        [Console]::Error.WriteLine('No working Python 3 interpreter found in .venv, on PATH, or via py -3; -CompareTolerant requires Python 3.')
+        exit 2
+    }
+    $arguments = @((Join-Path $repo 'tools/compare_captures.py'), '--run', (Resolve-RepoPath $Run), '--ref', (Resolve-RepoPath $Ref))
+    if ($PSBoundParameters.ContainsKey('Baseline')) { $arguments += @('--baseline', (Resolve-RepoPath $Baseline)) }
+    if ($PSBoundParameters.ContainsKey('MaxMean')) { $arguments += @('--max-mean', $MaxMean.ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
+    if ($PSBoundParameters.ContainsKey('MaxOver8')) { $arguments += @('--max-over8', $MaxOver8.ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
+    if ($PSBoundParameters.ContainsKey('MaxOver64')) { $arguments += @('--max-over64', $MaxOver64.ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
+    if ($PSBoundParameters.ContainsKey('Json')) { $arguments += @('--json', (Resolve-RepoPath $Json)) }
+    foreach ($pattern in $Only) { $arguments += @('--only', $pattern) }
+    foreach ($mapping in $Map) { $arguments += @('--map', $mapping) }
+    foreach ($image in $Reject) { $arguments += @('--reject', (Resolve-RepoPath $image)) }
+    if ($Heatmaps) { $arguments += '--heatmaps' }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $python.Path @($python.Prefix) @arguments
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    exit $code
+}
+
 if ($Capture) {
     $exePath = Resolve-RepoPath $Exe
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { throw "Not found: $exePath (build Release first)" }
@@ -133,7 +222,9 @@ if ($Capture) {
         $start = Get-Date
         Push-Location $repo
         try {
-            & $exePath $flag --no-activate --capture-dir $dir | Out-Host
+            $captureArgs = @($flag, '--no-activate', '--capture-dir', $dir)
+            if ($LowPowerGpu) { $captureArgs += '--low-power-gpu' }
+            & $exePath @captureArgs | Out-Host
             $code = $LASTEXITCODE
         } finally { Pop-Location }
         Write-Host ('    exit {0} after {1:n0} s' -f $code, ((Get-Date) - $start).TotalSeconds)

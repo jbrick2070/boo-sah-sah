@@ -1,11 +1,46 @@
 param(
     [string]$Preset = "x64-base-release",
     [double]$SmokeDurationSeconds = 3.5,
-    [switch]$SkipBenchmarks
+    [switch]$SkipBenchmarks,
+    [switch]$LowPowerGpu,
+    [string]$CompareRef,
+    [double]$CompareMaxMean,
+    [string[]]$CompareMap,
+    [string]$CompareBaseline
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# Validate comparison inputs before starting the build or any captures.
+$hasCompareRef = $PSBoundParameters.ContainsKey('CompareRef')
+if (-not $hasCompareRef) {
+    foreach ($name in @('CompareMaxMean', 'CompareMap', 'CompareBaseline')) {
+        if ($PSBoundParameters.ContainsKey($name)) { throw "-$name requires -CompareRef." }
+    }
+}
+function Resolve-SmokeInputPath([string]$path, [string]$label, [string]$pathType) {
+    if ([string]::IsNullOrWhiteSpace($path)) { throw "-$label must be a non-empty path." }
+    $full = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $RepoRoot $path }
+    if (-not (Test-Path -LiteralPath $full -PathType $pathType)) { throw "-$label not found: $full" }
+    $resolved = (Resolve-Path -LiteralPath $full).Path
+    # Preserve a volume root such as C:\, but remove a trailing slash from other paths.
+    if ($resolved.Length -gt [System.IO.Path]::GetPathRoot($resolved).Length) {
+        $resolved = $resolved.TrimEnd('\')
+    }
+    return $resolved
+}
+if ($hasCompareRef) {
+    $CompareRef = Resolve-SmokeInputPath $CompareRef 'CompareRef' 'Container'
+    if ($PSBoundParameters.ContainsKey('CompareBaseline')) {
+        $CompareBaseline = Resolve-SmokeInputPath $CompareBaseline 'CompareBaseline' 'Leaf'
+    } else {
+        $defaultBaseline = Join-Path $RepoRoot 'diagnostics\golden\baseline.json'
+        if (Test-Path -LiteralPath $defaultBaseline -PathType Leaf) {
+            $CompareBaseline = Resolve-SmokeInputPath $defaultBaseline 'CompareBaseline' 'Leaf'
+        }
+    }
+}
 $BuildDir = if ($Preset -eq "x64-base-debug") { Join-Path $RepoRoot "build\x64-debug" } else { Join-Path $RepoRoot "build\x64-release" }
 
 # Surface local OpenVINO C runtime + Intel NPU plugin if installed in project .venv
@@ -29,6 +64,51 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "CTest suite reported failures." }
 } finally {
     Pop-Location
+}
+
+if ($hasCompareRef) {
+    # Match capture_baseline.ps1's default suite names and directory layout.
+    $captureRoot = Join-Path $DiagDir ("smoke_captures_" + [Guid]::NewGuid().ToString('N'))
+    $integrationExe = Join-Path $BuildDir "boo_integration_tests.exe"
+    $captureSuites = [ordered]@{
+        film = '--film-captures'
+        interactive = '--interactive-captures'
+        effects = '--effects-captures'
+    }
+    Push-Location $RepoRoot
+    try {
+        foreach ($suite in $captureSuites.Keys) {
+            $captureDir = Join-Path $captureRoot $suite
+            New-Item -ItemType Directory -Force -Path $captureDir | Out-Null
+            Write-Host "`n==> Capturing $suite to $captureDir" -ForegroundColor Cyan
+            $captureArgs = @($captureSuites[$suite], '--no-activate', '--capture-dir', $captureDir)
+            if ($LowPowerGpu) { $captureArgs += '--low-power-gpu' }
+            & $integrationExe @captureArgs | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "The $suite capture suite failed with exit code $LASTEXITCODE" }
+        }
+    } finally {
+        Pop-Location
+    }
+
+    Write-Host "`n==> Comparing smoke captures with $CompareRef" -ForegroundColor Cyan
+    $compareParams = @{
+        CompareTolerant = $true
+        Run = $captureRoot
+        Ref = $CompareRef
+        Heatmaps = $true
+    }
+    if ($PSBoundParameters.ContainsKey('CompareMaxMean')) { $compareParams.MaxMean = $CompareMaxMean }
+    if ($PSBoundParameters.ContainsKey('CompareMap')) { $compareParams.Map = $CompareMap }
+    if ($CompareBaseline) { $compareParams.Baseline = $CompareBaseline }
+    try {
+        & (Join-Path $PSScriptRoot 'capture_baseline.ps1') @compareParams
+        $compareExitCode = $LASTEXITCODE
+        if ($compareExitCode -ne 0) { throw "Capture comparison failed with exit code $compareExitCode" }
+        Write-Host "[PASS] Capture comparison passed. Capture folder: $captureRoot" -ForegroundColor Green
+    } catch {
+        Write-Host "[FAIL] Capture comparison failed. Capture folder: $captureRoot" -ForegroundColor Red
+        throw
+    }
 }
 
 Write-Host "`n==> [2/8] Auditing PE Import Table (Zero Optional SDK Dependency Gate)" -ForegroundColor Cyan

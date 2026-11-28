@@ -18,6 +18,7 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <dxcore.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -43,6 +44,46 @@ namespace {
 
 int gTestsRun = 0;
 int gTestsFailed = 0;
+bool gLowPowerGpu = false;
+
+bool initializeTestD3D(boo::D3D12Context& d3d, HWND hwnd, uint32_t width, uint32_t height,
+                       bool forceWarp, bool enableDebugLayer, std::string* error = nullptr) {
+    d3d.preferLowPowerAdapter(gLowPowerGpu);
+    if (!d3d.initialize(hwnd, width, height, forceWarp, enableDebugLayer, error)) return false;
+    static bool reported = false;
+    if (!forceWarp && !reported) {
+        std::cout << "Integration adapter: " << d3d.adapterName() << "\n" << std::flush;
+        reported = true;
+    }
+    return true;
+}
+
+std::string captureDriverVersion(const boo::D3D12Context& d3d) {
+    HMODULE module = LoadLibraryExW(L"dxcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) return "unknown";
+    uint64_t version = 0;
+    {
+        using CreateFactory = HRESULT (WINAPI*)(REFIID, void**);
+        const auto create = reinterpret_cast<CreateFactory>(GetProcAddress(module, "DXCoreCreateAdapterFactory"));
+        Microsoft::WRL::ComPtr<IDXCoreAdapterFactory> factory;
+        Microsoft::WRL::ComPtr<IDXCoreAdapter> adapter;
+        LUID luid{};
+        luid.LowPart = static_cast<DWORD>(d3d.adapterLuidLow());
+        luid.HighPart = d3d.adapterLuidHigh();
+        if (create && SUCCEEDED(create(IID_PPV_ARGS(&factory))) &&
+            SUCCEEDED(factory->GetAdapterByLuid(luid, IID_PPV_ARGS(&adapter)))) {
+            if (FAILED(adapter->GetProperty(DXCoreAdapterProperty::DriverVersion, &version))) {
+                version = 0;
+            }
+        }
+    }
+    FreeLibrary(module);
+    if (version == 0) return "unknown";
+    return std::to_string((version >> 48) & 0xffff) + "." +
+           std::to_string((version >> 32) & 0xffff) + "." +
+           std::to_string((version >> 16) & 0xffff) + "." +
+           std::to_string(version & 0xffff);
+}
 
 #define BOO_CHECK(cond)                                                                                  \
     do {                                                                                                 \
@@ -109,7 +150,7 @@ bool testD3D12HeadlessAndShaderFallback() {
     using namespace boo;
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 1280, 720, false, false, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 1280, 720, false, false, &err));
     BOO_CHECK(d3d.checkDeviceHealthy());
 
     // Normal shader initialization + injected shader failure fallback verification
@@ -193,7 +234,7 @@ bool testAdHocNumericalBenchmarksVerification() {
     const auto caps = probeSystemCapabilities(pf);
 
     D3D12Context d3d;
-    BOO_CHECK(d3d.initialize(nullptr, 1920, 1080, false, false));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 1920, 1080, false, false));
 
     BenchmarkConfig cfg{};
     cfg.warmupIterations = 2;
@@ -309,7 +350,7 @@ bool testM1HeadlessDeterminismAndDxrVerification() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 1280, 720, false, false, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 1280, 720, false, false, &err));
 
     QualityPresetSpec safeSpec{};
     safeSpec.id = QualityPresetId::Safe;
@@ -457,7 +498,7 @@ bool testNativeCanvasModesAndCapture() {
     using namespace boo;
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 640, 360, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 640, 360, false, true, &error));
     auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     M1TaipeiSliceEffect fx(d3d, spec, false);
@@ -555,7 +596,7 @@ bool testNoActivateWindowTransitions() {
     }
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &error));
     QualityPresetSpec spec;
     spec.renderWidth = 640; spec.renderHeight = 360;
     M1TaipeiSliceEffect fx(d3d, spec, false);
@@ -660,7 +701,7 @@ bool testLiveFourPillarHardwareAttributionAndAbSplits() {
     using namespace boo;
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
 
     ProbeFlags pf{};
     const auto caps = probeSystemCapabilities(pf);
@@ -802,7 +843,7 @@ bool testLiveNoActivateSwapchainDeterminism() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &err));
 
     CueSheet cueSheet{};
     ValidationReport rep{};
@@ -924,7 +965,7 @@ bool testM2LiveNoActivateSwapchainDeterminism() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &err));
     freezeDriverProfilingForTest(d3d);
 
     CueSheet cueSheet{};
@@ -1045,7 +1086,7 @@ bool testM2LiveNoActivateSwapchainDeterminism() {
 
 bool testM2CapturesAndDeterminism() {
     using namespace boo; D3D12Context d3d;std::string err;
-    BOO_CHECK(d3d.initialize(nullptr,2560,1440,false,true,&err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr,2560,1440,false,true,&err));
     freezeDriverProfilingForTest(d3d);
     auto presets=loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     auto spec=findQualityPresetSpec(presets,QualityPresetId::Showcase);
@@ -1091,7 +1132,7 @@ bool testStandaloneHardwareSolosRtCudaTensor() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
     freezeDriverProfilingForTest(d3d);
 
     ProbeFlags pf{};
@@ -1448,7 +1489,7 @@ bool testMadameNNpuOpenVinoAndSoloNpuFailover() {
     {
         D3D12Context d3d;
         std::string err;
-        BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+        BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
         auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
         QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
         spec.renderWidth = 960;
@@ -1518,7 +1559,7 @@ bool testFullFilm360sRevealsEditionsAndM7CombinedFailover() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
     freezeDriverProfilingForTest(d3d);
 
     auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
@@ -1721,7 +1762,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     {
         D3D12Context warpD3d;
         std::string wErr;
-        if (warpD3d.initialize(nullptr, 640, 360, true, false, &wErr)) {
+        if (initializeTestD3D(warpD3d, nullptr, 640, 360, true, false, &wErr)) {
             SpoutSender warpSpout;
             std::string wReason;
             BOO_CHECK(!warpSpout.initialize(warpD3d, "BooSahSah_WarpSkip", 640, 360, &wReason));
@@ -1733,7 +1774,7 @@ bool testSpout2CleanSenderAndLiveD3d11Receiver() {
     // 2. Live hardware D3D12 -> Spout2 shared texture -> independent D3D11 Spout2 receiver verification
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
     freezeDriverProfilingForTest(d3d);
     if (d3d.isWarp()) {
         d3d.shutdown();
@@ -2066,7 +2107,7 @@ bool testSignalHijackMediaIngestCameraPrivacyAndFallback() {
     //    plus "LIVE CAMERA" privacy indicator on Pass 4 swapchain (even with HUD overlay hidden) while CanvasClean stays clean!
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
     freezeDriverProfilingForTest(d3d);
 
     auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
@@ -2197,7 +2238,7 @@ bool testInteractiveExploreLightingAndNrdConvergence() {
 
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
 
     CueSheet cue;
     ValidationReport validation;
@@ -2457,7 +2498,7 @@ bool testAudioReactiveDriveReachesCanvasDeterministically() {
     using namespace boo;
     D3D12Context d3d;
     std::string err;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, true, &err));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, true, &err));
     freezeDriverProfilingForTest(d3d);
     auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     QualityPresetSpec spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
@@ -2522,7 +2563,7 @@ bool testDirectorComparisonCaptures() {
     std::cout << "  " << backend.humanReadableReason << "\n";
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 960, 540, false, false, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 960, 540, false, false, &error));
     auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     spec.renderWidth = 960;
@@ -2593,7 +2634,7 @@ bool testQuarantinedGpuRetirement() {
     using Microsoft::WRL::ComPtr;
     boo::D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 64, 64, true, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 64, 64, true, true, &error));
     auto* device = static_cast<ID3D12Device*>(d3d.deviceRaw());
     auto* queue = static_cast<ID3D12CommandQueue*>(d3d.commandQueueRaw());
     ComPtr<ID3D12Fence> gate, marker;
@@ -2627,6 +2668,22 @@ int main(int argc, char** argv) {
     for (int arg = 1; arg < argc; ++arg) {
         const std::string option = argv[arg];
         if (option == "--no-activate") noActivate = true;
+        else if (option == "--low-power-gpu") gLowPowerGpu = true;
+        else if (option == "--help") {
+            std::cout << "Usage: boo_integration_tests.exe [options]\n"
+                      << "  --low-power-gpu              Prefer the low-power adapter\n"
+                      << "  --no-activate                Run window tests without activation\n"
+                      << "  --require-debug-layer        Require the D3D12 debug layer\n"
+                      << "  --trilogy-captures | --film-captures | --hero-video-capture\n"
+                      << "  --interactive-captures | --validation-captures | --director-captures\n"
+                      << "  --effects-captures | --film-stress | --lifecycle-tests\n"
+                      << "  --city-baseline | --city-baseline-raster | --room-baseline\n"
+                      << "  --room-baseline-raster | --show-baseline | --show-baseline-raster\n"
+                      << "  --graphics-features | --require-ngx | --baseline-4k\n"
+                      << "  --capture-dir <folder> | --film-capture-seconds <seconds>\n"
+                      << "  --capture-start-seconds <seconds> | --stress-iterations <count>\n";
+            return 0;
+        }
         else if (option == "--require-debug-layer") gRequireDebugLayer = true;
         else if (option == "--trilogy-captures") trilogyCaptures = true;
         else if (option == "--city-baseline") cityBaseline = true;

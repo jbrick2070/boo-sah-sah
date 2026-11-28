@@ -544,6 +544,17 @@
   ],
   "source_tools": [
     {
+      "id": "tool_compare_captures",
+      "path": "tools/compare_captures.py",
+      "kind": "tool",
+      "provenance": "First-party capture comparison tool",
+      "source_url": "https://github.com/jbrick2070/boo-sah-sah/blob/main/tools/compare_captures.py",
+      "author": "Jeffrey A Brick",
+      "license": "MIT",
+      "attribution_required": true,
+      "sha256": "1e9f18bd1dddcc72d531d51eebfcd2cd0f41fbee72a83608d3cd82001a5c56c9"
+    },
+    {
       "id": "tool_fetch_streamline",
       "path": "tools/fetch_streamline.py",
       "kind": "tool",

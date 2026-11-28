@@ -38,7 +38,7 @@ bool testFilmStressGate() {
     AppWindow window;
     BOO_CHECK(window.create("BOO film stress gate (non-activating)", 960, 540, false, true));
     D3D12Context d3d; std::string error;
-    BOO_CHECK(d3d.initialize(window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd(), window.clientWidth(), window.clientHeight(), false, true, &error));
     BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
     const bool debugActive = d3d.debugLayerActive();
     report["adapter"] = d3d.adapterName(); report["debug_layer_active"] = debugActive;
@@ -216,7 +216,7 @@ bool testFilmStressGate() {
     const auto recoveryStart = std::chrono::steady_clock::now();
     BOO_CHECK(d3d.injectDeviceLostForTest()); BOO_CHECK(!d3d.beginFrame());
     fx->shutdown(); fx.reset(); d3d.shutdown();
-    BOO_CHECK(d3d.initialize(window.hwnd(), 960, 540, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd(), 960, 540, false, true, &error));
     BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
     fx = std::make_unique<M1TaipeiSliceEffect>(d3d, safe, true, false, true, true, true,
                                              false, false, false, ShowVisualMode::FullFilm360s);

@@ -733,6 +733,14 @@ if(BOO_BUILD_TESTS)
     add_test(NAME BooUnitTests COMMAND boo_unit_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(BooUnitTests PROPERTIES LABELS "unit")
 
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME BooCompareCapturesTool
+            COMMAND "${Python3_EXECUTABLE}" tests/tools/test_compare_captures.py -v
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(BooCompareCapturesTool PROPERTIES LABELS "unit")
+    endif()
+
     add_test(NAME BooCueValidation COMMAND boo_cue_validate WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(BooCueValidation PROPERTIES LABELS "unit;validation")
     add_test(NAME BooWarpPlayback

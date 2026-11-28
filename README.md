@@ -53,6 +53,14 @@ All automated GUI launches must pass `--no-activate` so test windows never steal
 
 The capture gate writes 68 clean/narrative PNGs, two additional full-stats layout PNGs, four labeled montages, and `manifest.json`; the stress gate writes `stress.json` under its `--capture-dir`. These are opt-in hardware gates, separate from the short smoke suite. Capture checks cover repeatable seeks, finite HDR output, verified RT status, and clean-feed isolation. The capture director is sample-derived `ScriptedDirector`, so these images do not establish NPU execution.
 
+Capture on each GPU with `./scripts/capture_baseline.ps1 -Capture -Out <dir>`; add `-LowPowerGpu` for the integrated GPU. Compare each run with:
+
+```powershell
+./scripts/capture_baseline.ps1 -CompareTolerant -Run <dir> -Ref <reference dir> -Baseline diagnostics/golden/baseline.json
+```
+
+For a GPU without hardware RT, add `-Map '_preferred.png=_raster.png'`; RT and raster frames differ by about mean 12. To capture and compare as part of smoke testing, run `./scripts/run_smoke.ps1 -CompareRef <reference dir>`.
+
 Debug-layer absence is recorded as unavailable, never as proof of zero warnings. The current RTX 5080 Laptop GPU / Intel AI Boost host lacks Windows Graphics Tools; strict debug validation requires another run with that component installed. See the [Film Quality & Robustness Report](docs/quality_upgrade_report.md) for measured results and remaining limits.
 
 ---

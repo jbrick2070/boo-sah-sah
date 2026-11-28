@@ -285,11 +285,12 @@ bool testCityBaseline() {
     BOO_CHECK(window.hwnd && !IsWindowVisible(window.hwnd));
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(window.hwnd, spec.renderWidth, spec.renderHeight, false, gRequireDebugLayer, &error));
+    BOO_CHECK(initializeTestD3D(d3d, window.hwnd, spec.renderWidth, spec.renderHeight, false, gRequireDebugLayer, &error));
     BOO_CHECK(!d3d.isWarp() && (!gRequireDebugLayer || d3d.debugLayerActive()));
 
     report["driver_profiling_frozen"] = freezeDriverProfilingForTest(d3d);
     report["adapter"] = d3d.adapterName();
+    report["driver_version"] = captureDriverVersion(d3d);
     report["debug_layer"] = d3d.debugLayerActive();
     report["preset"] = gBaseline4K ? "4K Experimental" : "Showcase";
     report["edition"] = "Family";

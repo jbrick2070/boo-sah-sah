@@ -160,7 +160,7 @@ bool testFullFilmCaptureGate() {
     BOO_CHECK(SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE);
     std::error_code ec; std::filesystem::create_directories(gFilmCaptureDirectory, ec); BOO_CHECK(!ec);
     D3D12Context d3d; std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 2560, 1440, false, true, &error));
     BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
     const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
@@ -169,6 +169,7 @@ bool testFullFilmCaptureGate() {
     report["driver_profiling_frozen"] = freezeDriverProfilingForTest(d3d);
     report["schema"] = 1; report["complete"] = false; report["width"] = 2560; report["height"] = 1440;
     report["sample_rate"] = 48000; report["adapter"] = d3d.adapterName();
+    report["driver_version"] = captureDriverVersion(d3d);
     report["director"] = "sample-derived ScriptedDirector; no NPU execution claim";
     report["clean_bits"] = 10; report["png_bits"] = 8;
     report["pixel_hash"] = "FNV-1a64 over little-endian RGB10A2; regression identity, not cryptographic integrity";
@@ -344,7 +345,7 @@ bool testHeroVideoCaptureGate() {
 
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 2560, 1440, false, true, &error));
     const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
@@ -407,7 +408,7 @@ bool testInteractiveShowcaseCaptureGate() {
 
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 2560, 1440, false, true, &error));
     const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     BOO_CHECK(spec.renderWidth == 2560 && spec.renderHeight == 1440);
@@ -444,6 +445,7 @@ bool testInteractiveShowcaseCaptureGate() {
     report["width"] = 2560;
     report["height"] = 1440;
     report["adapter"] = d3d.adapterName();
+    report["driver_version"] = captureDriverVersion(d3d);
     report["frames"] = JsonValue::Array{};
 
     auto renderConvergedView = [&](FrameContext ctx, uint32_t targetSpp, std::vector<uint8_t>& outClean, uint32_t& outW, uint32_t& outH) -> bool {
@@ -788,7 +790,7 @@ bool testValidationShowcaseCaptures() {
 
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 2560, 1440, false, true, &error));
     BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
 
     const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
@@ -802,6 +804,7 @@ bool testValidationShowcaseCaptures() {
     report["height"] = 1440;
     report["sample_rate"] = 48000;
     report["adapter"] = d3d.adapterName();
+    report["driver_version"] = captureDriverVersion(d3d);
     report["frames"] = JsonValue::Array{};
 
     struct ValSet {
@@ -939,12 +942,13 @@ bool testEffectsDetailCaptures() {
     BOO_CHECK(!ec);
     D3D12Context d3d;
     std::string error;
-    BOO_CHECK(d3d.initialize(nullptr, 2560, 1440, false, true, &error));
+    BOO_CHECK(initializeTestD3D(d3d, nullptr, 2560, 1440, false, true, &error));
     BOO_CHECK(!gRequireDebugLayer || d3d.debugLayerActive());
     const auto presets = loadQualityPresets(resolveResourcePath("config/quality_presets.json"));
     const auto spec = findQualityPresetSpec(presets, QualityPresetId::Showcase);
     JsonValue manifest(JsonValue::Object{});
     manifest["adapter"] = d3d.adapterName();
+    manifest["driver_version"] = captureDriverVersion(d3d);
     manifest["director"] = "sample-derived ScriptedDirector";
     manifest["frames"] = JsonValue::Array{};
     manifest["complete"] = false;
