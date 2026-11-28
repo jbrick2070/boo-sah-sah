@@ -1366,6 +1366,8 @@ struct M1TaipeiSliceEffect::Impl {
 
     ComPtr<ID3D12Resource> particleGpuBuf;
     uint32_t particleCapacity = 0;
+    uint32_t particleBufferCount = LiveAcceleratorOrchestra::kSubParticleCount;
+    bool particleBufferIsSubstitute = true;
     std::array<ComPtr<ID3D12Resource>, kTotalUploadSlots> particleUploadBuf;
 
     ComPtr<ID3D12Resource> nv12PackBuf;
@@ -3791,7 +3793,9 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     // reuse frame 0's GPU-resident Tensor caustic texture & CUDA particle buffer without CPU/CUDA sync stalls.
     if (isCanonicalPass && ctx.interactive.accumulate && ctx.interactive.accumFrame > 0u) {
         skipSharedTensorUpdate = true;
-        skipSharedCudaUpdate = true;
+        // A CUDA comparison may have replaced the shared buffer with SUB after
+        // the previous canonical draw. Restore CUDA before reusing it.
+        skipSharedCudaUpdate = !(useCuda && livePillars[1].hardwareVerified && particleBufferIsSubstitute);
     }
 
     // 1. Update 320x180 RGBA16F Tensor Core neural caustic / spectral field (or scalar HLSL substitute)
@@ -4091,6 +4095,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                     transitionResource(cmd, particleGpuBuf.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
                     activeParticleCount = reqCudaParticles;
+                    particleBufferIsSubstitute = false;
                     uploadedHwParticles = true;
                     if (isCanonicalPass) {
                         livePillars[1] = cTel;
@@ -4107,6 +4112,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             cmd->Dispatch((subParticleCount + 63u) / 64u, 1u, 1u);
             transitionResource(cmd, particleGpuBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             activeParticleCount = subParticleCount;
+            particleBufferIsSubstitute = true;
             if (isCanonicalPass) {
                 livePillars[1] = LivePillarTelemetry{};
                 livePillars[1].status = BackendStatus::Substituted;
@@ -4118,12 +4124,13 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                 livePillars[1].throughput = (static_cast<float>(subParticleCount) * 2.0f) / (0.08f * 1000.0f);
             }
         }
+        particleBufferCount = activeParticleCount;
     } else {
-        activeParticleCount = livePillars[1].hardwareVerified
-                                  ? (std::min)(particleCapacity, std::max(LiveAcceleratorOrchestra::kCudaParticleCount,
-                                                                          livePillars[1].workloadItems))
-                                  : subParticleCount;
+        activeParticleCount = particleBufferCount;
     }
+    // This describes the buffer actually drawn, including a reused buffer and
+    // the non-canonical CUDA comparison pass (whose telemetry stays canonical).
+    if (particleBufferIsSubstitute) sc.sceneFlags |= 1024u;
 
     if (ctx.interactive.aovMode == 0u && !orbital && shanghaiRiverSample(visualMode, ctx) < 0) {
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);

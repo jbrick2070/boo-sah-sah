@@ -4950,15 +4950,30 @@ void CSLiveParticlesSub(uint3 dtid : SV_DispatchThreadID)
 
     if (isMutinySub)
     {
-        // Honest 8,192-particle 2-step linear sanctuary ring substitute when CUDA is disabled/unavailable in SoloCUDA / Act 4
-        float age = frac(r3 + gFilmTime * 0.22);
-        float ang = r0 * kTwoPi + gFilmTime * 0.48;
-        float rad = 2.25 + r1 * 2.55;
-        float px = cos(ang) * rad;
-        float py = 3.10 + r2 * 4.60 + age * 0.65;
-        float pz = 5.50 + sin(ang) * rad;
-        outP.posAndAge  = float4(px, py, pz, age);
-        outP.velAndKind = float4(-sin(ang) * 0.85, 0.45, cos(ang) * 0.85, isSanctuaryMote ? 0.82 : 0.28);
+        // Match the CUDA formation's two helices and thin torus without its 16 curl steps.
+        float age = frac(r0 + gFilmTime * 0.04f);
+        float theta = age * (2.0f * kTwoPi) + ((idx & 4u) != 0u ? 3.14159265f : 0.0f) + gFilmTime * 0.24f;
+        float phi = r1 * kTwoPi;
+        float disk = 0.24f * sqrt(r2);
+        float helixRadius = 2.90f + disk * cos(phi);
+        float helixY = 2.95f + 6.20f * age + disk * sin(phi);
+        phi += gFilmTime * 0.72f;
+        float minor = 0.78f + 0.12f * r3;
+        float ringRadius = 3.75f + minor * cos(phi);
+        float ringY = 5.55f + minor * sin(phi);
+        float weight = 0.5f - 0.5f * cos(gFilmTime * 0.35f);
+        float weightRate = 0.175f * sin(gFilmTime * 0.35f);
+        float radius = lerp(helixRadius, ringRadius, weight);
+        float y = lerp(helixY, ringY, weight);
+        float radialRate = weightRate * (ringRadius - helixRadius) - weight * minor * 0.72f * sin(phi);
+        float azimuthRate = 2.0f * kTwoPi * 0.04f + 0.24f;
+        float vy = (1.0f - weight) * 0.248f + weightRate * (ringY - helixY) + weight * minor * 0.72f * cos(phi);
+        float cs = cos(theta);
+        float sn = sin(theta);
+        outP.posAndAge  = float4(radius * cs, y, 5.50f + radius * sn, age);
+        outP.velAndKind = float4(radialRate * cs - radius * azimuthRate * sn, vy,
+                                 radialRate * sn + radius * azimuthRate * cs,
+                                 isSanctuaryMote ? 0.55f + 0.45f * r3 : 0.32f);
     }
     else if (!isSanctuaryMote)
     {
@@ -5135,9 +5150,10 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     bool isMutiny = (gSceneFlags & 16u) != 0u;
     bool isShow3D = (gSceneFlags & 32u) != 0u;
     uint detail = (gSceneFlags >> 8u) & 3u;
+    bool isSubstitute = (gSceneFlags & 1024u) != 0u;
     // Keep the full simulation workload, but draw a stable sparse subset so
     // the velocity field frames the hero instead of veiling its silhouette.
-    if (isMutiny) {
+    if (isMutiny && !isSubstitute) {
         uint stride = (detail == 0u) ? 9u : ((detail == 1u) ? 5u : 2u);
         if (((instId ^ (instId >> 3u)) % stride) != 0u) return vout;
     }
@@ -5185,7 +5201,10 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     }
     float3 relCenter = center - gCamEye;
     float zCenter = dot(relCenter, gCamForward);
-    if (zCenter <= 0.18 || zCenter >= 52.0)
+    // The distant rooftop view needs a longer range for the substitute. The
+    // pixel shader still rejects particles occluded by the scene distance buffer.
+    float farCull = (isMutiny && isSubstitute) ? 256.0f : 52.0f;
+    if (zCenter <= 0.18f || zCenter >= farCull)
         return vout;
 
     static const float2 kCorners[6] = {
@@ -5218,6 +5237,8 @@ VSParticleOut VSLiveParticles(uint vertId : SV_VertexID, uint instId : SV_Instan
     if (isMutiny)
     {
         energy *= lerp(.48, detail > 0u ? .95 : .72, grain);
+        // Far subpixel motes need more energy at substitute densities.
+        if (isSubstitute) energy *= 3.0f;
         tracer = isMote && detail > 0u && (instId & 3u) == 1u;
     }
 
