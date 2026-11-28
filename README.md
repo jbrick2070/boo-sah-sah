@@ -135,6 +135,8 @@ Graphics failure triggers at most one teardown/recreation attempt while preservi
 ./build/x64-release/boo_sah_sah.exe --bench --no-activate --bench-iterations 30 --export-bench diagnostics/bench.json --export-bench-csv diagnostics/bench.csv
 ```
 
+If a WARP device cannot retire its GPU queue safely, the application logs the device removal reason, writes a best-effort startup diagnostics snapshot when `--export-diagnostics` is set, and terminates with exit code 4319.
+
 ---
 
 ## Documentation
