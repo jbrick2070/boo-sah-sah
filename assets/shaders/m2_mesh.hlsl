@@ -58,6 +58,11 @@ Texture2DArray<float4> gEnvHdrTex      : register(t7);
 
 Texture2DArray<float4> roomFaces : register(t10);
 
+#if defined(BOO_GLASS_REFRACTION)
+Texture2D<float4> gSceneColorCopy : register(t13);
+Texture2D<float> gSceneDepthCopy : register(t14);
+#endif
+
 SamplerState linearClamp     : register(s0);
 SamplerState anisoWrap       : register(s1);
 SamplerState equirectSampler : register(s2);
@@ -2560,9 +2565,19 @@ float2 PSSceneMotion(MotionVertex i) : SV_Target0 {
     return pixelMotion(ndc, i.prevClip);
 }
 
+// Match the camera-to-surface distance written by PSMain for flat panes.
+[earlydepthstencil]
+float PSPaneDistance(VOut i) : SV_Target0 {
+    return length(i.world - eye);
+}
+
 struct Targets {
     float4 color   : SV_Target0;
+#if defined(BOO_GLASS_PANE)
+    float4 transmittance : SV_Target1;
+#else
     float distance : SV_Target1;
+#endif
 #if defined(M2_RT)
     float4 normRough  : SV_Target2;
     float4 diffRadHit : SV_Target3;
@@ -2595,6 +2610,65 @@ void PSDepthCutout(VOut i) {
     }
 }
 #else
+#if defined(BOO_GLASS_REFRACTION)
+// The copied distance is linear camera-to-surface distance, like dist below.
+// Check all four texels used by the bilinear color lookup so foreground
+// silhouettes cannot bleed into an otherwise valid background sample.
+bool glassSceneSample(float2 uv, float glassDist, float bias, out float3 color) {
+    color = 0.0f.xxx;
+    if (any(uv < 0.0f) || any(uv >= 1.0f)) return false;
+    float4 depths = gSceneDepthCopy.GatherRed(linearClamp, uv);
+    if (any(depths < glassDist - bias)) return false;
+    color = gSceneColorCopy.SampleLevel(linearClamp, uv, 0.0f).rgb;
+    return true;
+}
+
+// Returns false only when neither refracted nor unshifted scene pixels are usable.
+// The caller then evaluates the environment fallback, avoiding sky work on a hit.
+bool glassSceneRefraction(VOut i, float dist, float ndotv, uint matId,
+                          float refrBend, bool isCanopy, bool isThinPetal,
+                          float3 refrDir, out float3 result,
+                          out float3 dispersionRed, out float3 dispersionBlue) {
+    int2 dims = int2(max(width, 1u), max(height, 1u));
+    float2 baseUv = i.pos.xy / float2(dims);
+    float bias = max(0.015f, dist * 0.0025f);
+    float3 baseColor;
+    bool baseValid = glassSceneSample(baseUv, dist, bias, baseColor);
+    result = baseColor;
+    dispersionRed = baseColor;
+    dispersionBlue = baseColor;
+    if (refrBend <= 0.0001f) return baseValid;
+
+    float thick = clamp(i.uv.z, (matId == 35u) ? 0.028f : 0.008f, 0.12f) / max(ndotv, 0.28f);
+    float travelScale = isThinPetal ? 2.5f : (isCanopy ? 1.2f : 1.0f);
+    float3 d = i.world + refrDir * (thick * travelScale) - eye;
+    float z = dot(d, forward);
+    if (z <= 0.12f) return baseValid;
+    float fy = 1.0f / tan(fov * 0.5f);
+    float2 ndc = float2(dot(d, right) * fy / aspect, dot(d, up) * fy) / z + jitterNdc;
+    float2 delta = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y) - baseUv;
+    float deltaLength = length(delta * float2(aspect, 1.0f));
+    if (deltaLength > 0.10f) delta *= 0.10f / deltaLength;
+    float2 refrUv = baseUv + delta;
+    float3 refrColor;
+    bool refrValid = glassSceneSample(refrUv, dist, bias, refrColor);
+    if (!refrValid) return baseValid;
+    float2 edge = min(refrUv, 1.0f - refrUv);
+    float fade = smoothstep(0.0f, 0.035f, min(edge.x, edge.y));
+    result = baseValid ? lerp(baseColor, refrColor, fade) : refrColor;
+    dispersionRed = result;
+    dispersionBlue = result;
+    if (!liteMode() && effectsDetail() > 0u && !isCanopy && (matId == 3u || matId == 4u)) {
+        float3 sampleColor;
+        if (glassSceneSample(baseUv + delta * 0.88f, dist, bias, sampleColor))
+            dispersionRed = baseValid ? lerp(baseColor, sampleColor, fade) : sampleColor;
+        if (glassSceneSample(baseUv + delta * 1.14f, dist, bias, sampleColor))
+            dispersionBlue = baseValid ? lerp(baseColor, sampleColor, fade) : sampleColor;
+    }
+    return true;
+}
+#endif
+
 [earlydepthstencil]
 Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     uint matId = min(i.mat, 41u);
@@ -2756,8 +2830,23 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float rtContactAO = 1.0;
     float3 reflected = sampleIblEnv(reflect(-v, n), rough, inBath);
     float3 transmitted = 0.0f.xxx;
+#if defined(BOO_GLASS_REFRACTION)
+    float3 ssrRed = 0.0f.xxx;
+    float3 ssrBlue = 0.0f.xxx;
+    bool sceneHit = isGlass && glassSceneRefraction(i, dist, ndotv, matId, refrBend,
+        isCanopy, isThinCrystalPetal, refrDir, transmitted, ssrRed, ssrBlue);
+    [branch] if (!sceneHit && (!liteMode() || isGlass)) {
+        if (matId == 18u)
+            transmitted = float3(0.043f, 0.070f, 0.085f) * (0.65f + 0.35f * daylight);
+        else
+            transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06f, true) : skyImpl(refrDir, i.world, !liteMode());
+        ssrRed = transmitted;
+        ssrBlue = transmitted;
+    }
+#elif !defined(BOO_GLASS_PANE)
     if (!liteMode() || isGlass)
         transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06f, true) : skyImpl(refrDir, i.world, !liteMode());
+#endif
     bool hasTracedReflection = false;
     bool hasTracedBathGi = false;
     float3 tracedBathGi = (float3)0.0;
@@ -3354,6 +3443,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     float3 color = nonIndirectColor + indirectColor;
+#if defined(BOO_GLASS_PANE)
+    float3 paneTransmittance = 0.0f.xxx;
+#endif
 
     // 5. Solid 2-Interface & Thin-Walled Dielectric Glass: Crystal (3), Celadon (4), Smoked Canopy (18), Amber Bottle (35), Float Glass (40), Droplets & Marbles
     if (isGlass) {
@@ -3366,7 +3458,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 
         if (matId == 18u) {
             float3 cabin = transmitted;
-#if !defined(M2_RT)
+#if !defined(M2_RT) && !defined(BOO_GLASS_REFRACTION)
             // Raster has no refraction hit behind an opaque draw. Keep the
             // smoked interior dark, preserving the reflected skyline at grazing.
             cabin = float3(0.043, 0.070, 0.085) * (0.65 + 0.35 * daylight);
@@ -3392,8 +3484,16 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float thickPane = clamp(i.uv.z, 0.008, 0.04) / max(ndotv, 0.28);
             float3 beerLowIron = exp(-float3(0.28, 0.10, 0.14) * thickPane * 1.8);
             float paneReflMix = clamp(0.018 + 0.54 * fres, 0.018, 0.60);
+#if defined(BOO_GLASS_PANE)
+            // The blend lets the real scene through (destination times paneTransmittance), so the pane
+            // adds only its reflection and highlight. Adding the environment's guess at what is behind
+            // the glass as well laid a blurred copy of the sky over the sharp skyline.
+            paneTransmittance = beerLowIron * (1.0f - paneReflMix);
+            color = specRadiance * 0.88f * paneReflMix + specKey * sunRad * 0.95f;
+#else
             color = lerp(transmitted * beerLowIron, specRadiance * 0.88, paneReflMix)
                   + specKey * sunRad * 0.95;
+#endif
         } else if (isWaterDroplet) {
             float dropReflMix = clamp(0.026 + 0.88 * fres, 0.026, 0.88);
             color = lerp(transmitted * float3(0.98, 0.99, 1.0) * tirBoost, specRadiance, dropReflMix)
@@ -3427,8 +3527,13 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 
             float3 dispersion = 0.0f.xxx;
             if (!liteMode()) {
+#if defined(BOO_GLASS_REFRACTION)
+                float3 redSky = ssrRed;
+                float3 blueSky = ssrBlue;
+#else
                 float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0f / 1.488f), 0.08f, true) : sky(norm(refract(-v, n, 1.0f / 1.488f)));
                 float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0f / 1.512f), 0.08f, true) : sky(norm(refract(-v, n, 1.0f / 1.512f)));
+#endif
                 dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.07 * edgeRim);
             }
             float3 glassTrans = max(transmitted * tirBoost + dispersion, 0.0.xxx) * beer + bodyScatter * (1.0 - beer) + nectarGlow;
@@ -3568,7 +3673,13 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     Targets o;
+#if defined(BOO_GLASS_PANE)
+    // Debug AOVs replace the underlying image, except the glass-color AOV.
+    if (curAov != 0u && curAov != 6u) paneTransmittance = 0.0f.xxx;
+    o.transmittance = float4(paneTransmittance * transScale, 1.0f);
+#else
     o.distance = dist;
+#endif
 
 #if defined(M2_RT)
     bool isDenoisable = !isGlass &&
@@ -3909,7 +4020,11 @@ Targets PSSky(SkyOut i) {
 #endif
     Targets o;
     o.color = float4(skyCol, 1.0);
+#if defined(BOO_GLASS_PANE)
+    o.transmittance = 0.0f.xxxx;
+#else
     o.distance = kSceneFar;
+#endif
 #if defined(M2_RT)
     o.normRough  = float4(0.0, 1.0, 0.0, 1.0);
     o.diffRadHit = float4(0.0, 0.0, 0.0, 0.0);

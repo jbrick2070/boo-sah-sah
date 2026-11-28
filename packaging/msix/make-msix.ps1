@@ -55,10 +55,20 @@ function Assert-StorePackage([string]$path) {
       'LICENSE', 'LICENSE-ASSETS.md', 'LICENSES.md',
       'config/quality_presets.json', 'assets/cues/film_360s.json', 'assets/models/madame_n_director.xml',
       'assets/models/madame_n_director.bin', 'assets/meshes/shenzhen_evtol.bmesh', 'assets/meshes/taipei_basin_relief.bmesh',
-      'assets/shaders/m1_present_hud.cso', 'assets/shaders/m1_present_clean.cso', 'assets/shaders/m1_composite.cso',
-      'assets/shaders/m1_particles_vs.cso',
-      'assets/shaders/m1_particles_ps.cso', 'assets/shaders/m2_mesh_vs.cso', 'assets/shaders/m2_mesh_ps.cso',
-      'assets/shaders/m2_mesh_rt_ps.cso', 'assets/shaders/m1_nv12_pack_cs.cso'
+      # Required by M1 and trilogy initialization, including the RT-capable hardware paths.
+      'assets/shaders/m0_test_vs.cso', 'assets/shaders/m1_dxr_scene.cso', 'assets/shaders/m1_raster_scene.cso',
+      'assets/shaders/m1_bloom_down.cso', 'assets/shaders/m1_bloom_up.cso', 'assets/shaders/m1_composite.cso',
+      'assets/shaders/m1_present_hud.cso', 'assets/shaders/m1_present_clean.cso',
+      'assets/shaders/m1_hud_cache.cso', 'assets/shaders/m1_hud_cache_clean.cso', 'assets/shaders/m1_present_cached.cso',
+      'assets/shaders/m1_particles_sub_cs.cso', 'assets/shaders/m1_particles_vs.cso', 'assets/shaders/m1_particles_ps.cso',
+      'assets/shaders/m1_tensor_sub_cs.cso', 'assets/shaders/m1_nv12_pack_cs.cso',
+      'assets/shaders/m2_mesh_vs.cso', 'assets/shaders/m2_depth_cutout_ps.cso', 'assets/shaders/m2_mesh_ps.cso',
+      'assets/shaders/m2_mesh_glass_ps.cso', 'assets/shaders/m2_mesh_pane_ps.cso', 'assets/shaders/m2_mesh_cutout_ps.cso',
+      'assets/shaders/m2_mesh_pane_distance_ps.cso',
+      'assets/shaders/m2_sky_vs.cso', 'assets/shaders/m2_sky_ps.cso',
+      'assets/shaders/m2_mesh_rt_ps.cso', 'assets/shaders/m2_mesh_rt_cutout_ps.cso', 'assets/shaders/m2_sky_rt_ps.cso',
+      'assets/shaders/m2_accum_vs.cso', 'assets/shaders/m2_accum_blend_ps.cso', 'assets/shaders/m2_accum_resolve_ps.cso',
+      'assets/shaders/m2_denoise_resolve_ps.cso', 'assets/shaders/m2_nrd_unpack_ps.cso', 'assets/shaders/m2_nrd_pack_cs.cso'
     )
     if ($RequireHardwareSidecars) {
       $required += @('openvino/openvino.dll', 'openvino/openvino_c.dll', 'openvino/openvino_ir_frontend.dll',
@@ -71,6 +81,7 @@ function Assert-StorePackage([string]$path) {
                      'streamline/license.txt', 'streamline/3rd-party-licenses.md', 'streamline/nvngx_dlss.license.txt',
                      'streamline/reflex.license.txt', 'assets/shaders/dlss_resolve.cso',
                      'assets/shaders/m1_present_frame_generation.cso', 'assets/shaders/m1_present_clean_frame_generation.cso',
+                     'assets/shaders/m1_present_cached_frame_generation.cso',
                      'assets/shaders/m2_motion_vs.cso',
                      'assets/shaders/m2_motion_ps.cso', 'assets/shaders/m2_motion_cutout_ps.cso',
                      'assets/shaders/m2_sky_motion_ps.cso',

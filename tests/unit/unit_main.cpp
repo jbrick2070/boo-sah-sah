@@ -1843,7 +1843,8 @@ bool testShadersRunOnEveryGpu() {
         "m1_present_clean_frame_generation.cso", "m1_particles_sub_cs.cso",
         "m1_particles_vs.cso", "m1_particles_ps.cso", "m1_tensor_sub_cs.cso",
         "m1_nv12_pack_cs.cso", "m2_mesh_vs.cso", "m2_depth_cutout_ps.cso",
-        "m2_mesh_ps.cso", "m2_mesh_cutout_ps.cso", "m2_sky_vs.cso", "m2_sky_ps.cso",
+        "m2_mesh_ps.cso", "m2_mesh_glass_ps.cso", "m2_mesh_pane_ps.cso", "m2_mesh_pane_distance_ps.cso",
+        "m2_mesh_cutout_ps.cso", "m2_sky_vs.cso", "m2_sky_ps.cso",
         "m2_accum_vs.cso", "m2_accum_blend_ps.cso", "m2_accum_resolve_ps.cso",
         "m2_motion_vs.cso", "m2_motion_ps.cso", "m2_motion_cutout_ps.cso", "m2_sky_motion_ps.cso"
     };

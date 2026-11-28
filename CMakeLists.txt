@@ -288,6 +288,15 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain  -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_glass_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain -DBOO_GLASS_REFRACTION=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_glass_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain -DBOO_GLASS_PANE=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
+add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_distance_ps.cso"
+ COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSPaneDistance -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_distance_ps.cso"
+ DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
 add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
  COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSMain -DBOO_ALPHA_CUTOUT=1 -Ges -WX -O3 "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" -Fo "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
  DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/m2_mesh.hlsl" VERBATIM)
@@ -415,6 +424,9 @@ add_custom_target(boo_shaders DEPENDS ${BOO_VARIANT_SHADER_OUTPUTS}
     "${BOO_OUT_SHADER_DIR}/m2_mesh_vs.cso"
     "${BOO_OUT_SHADER_DIR}/m2_depth_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_glass_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_ps.cso"
+    "${BOO_OUT_SHADER_DIR}/m2_mesh_pane_distance_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_cutout_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_ps.cso"
     "${BOO_OUT_SHADER_DIR}/m2_mesh_rt_cutout_ps.cso"

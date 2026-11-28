@@ -281,6 +281,7 @@ static_assert(kSceneDwords == 40, "Must match m2_mesh.hlsl cbuffer Scene");
 void normalize(float v[3]) {float l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(int c=0;c<3;++c)v[c]/=std::max(l,1e-6f);}
 void cross(const float a[3],const float b[3],float r[3]) {r[0]=a[1]*b[2]-a[2]*b[1];r[1]=a[2]*b[0]-a[0]*b[2];r[2]=a[0]*b[1]-a[1]*b[0];}
 bool isCutoutMaterial(uint32_t m) noexcept { return m == 29u || m == 36u; }
+bool isGlassMaterial(uint32_t m) noexcept { return m == 3u || m == 4u || m == 18u || m == 35u || m == 40u; }
 
 uint16_t floatToHalfBits(float val) noexcept {
     if (!std::isfinite(val)) return 0u;
@@ -472,6 +473,10 @@ struct TrilogyMeshRenderer::Impl {
         uint32_t meshId=0;
         D3D12_GPU_VIRTUAL_ADDRESS compactBlas=0;
         std::array<float,3> detailCenter{};
+        std::array<float,3> glassBoundsMin{}, glassBoundsMax{};
+        bool glassBoundsValid=false;
+        struct PaneSurface { uint32_t firstVertex=0, vertexCount=0; std::array<float,3> center{}; };
+        std::vector<PaneSurface> paneSurfaces;
     };
     std::vector<Part> parts;
     std::array<std::vector<Part>,3> birdTemplates;
@@ -489,14 +494,14 @@ struct TrilogyMeshRenderer::Impl {
         std::vector<SelectedPlacement> visible;
         std::vector<SelectedPlacement> rayOnly;
     };
-    struct DrawBatch { uint32_t first, count, indexCount, meshId; bool cutout; };
+    struct DrawBatch { uint32_t first, count, indexCount, meshId; bool cutout; bool twoSided=false; float sortDepth=0.f; uint32_t firstVertex=0; };
     CityModuleLayout city;
     std::vector<Chunk> chunks;
     std::vector<std::vector<Part>> moduleParts;
     std::vector<ModuleSelection> selectedModules;
     std::vector<InstanceData> frameInstances;
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> rayInstances;
-    std::vector<DrawBatch> batches, liftGlazing;
+    std::vector<DrawBatch> batches, glassBatches, paneBatches;
     ComPtr<ID3D12Resource> instanceBuffer, meshOffsets, compactBlasPool;
     size_t maxSceneInstances = 0;
     uint64_t blasBytes = 0, tlasBytes = 0;
@@ -515,7 +520,10 @@ struct TrilogyMeshRenderer::Impl {
     ComPtr<ID3D12Resource> rrHitDistance;
     bool rrReadable=false;
     float rrWorldToView[16]{}, rrViewToClip[16]{};
-    ComPtr<ID3D12PipelineState> rasterLiftGlazing;
+    ComPtr<ID3D12PipelineState> rasterGlass, rasterGlassTwoSided, rasterPane, rasterPaneDistance, motionGlass, motionGlassTwoSided, motionPane;
+    ComPtr<ID3D12Resource> glassColor, glassDistance, glassPlaceholder;
+    uint32_t glassWidth=0, glassHeight=0;
+    bool glassAllocationFailed=false;
     ComPtr<ID3D12PipelineState> motionOpaque,motionCutout,motionSky;
     ComPtr<ID3D12Resource> dlssMotion,previousTransforms,motionCamera;
     struct PreviousInstance { MotionRows rows{}; uint64_t frame=0; };
@@ -1545,6 +1553,45 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         for (auto* part : geometriesById) {
             part->meshId = static_cast<uint32_t>(firstIndices.size());
             firstIndices.push_back(part->sub.firstIndex);
+            if (isGlassMaterial(part->sub.material) && part->sub.indexCount) {
+                part->glassBoundsMin.fill(std::numeric_limits<float>::max());
+                part->glassBoundsMax.fill(std::numeric_limits<float>::lowest());
+                for (uint32_t i=0; i<part->sub.indexCount; ++i) {
+                    const auto& pos=vertices[indices[part->sub.firstIndex+i]].positionMaterial;
+                    for (int axis=0; axis<3; ++axis) {
+                        part->glassBoundsMin[axis]=std::min(part->glassBoundsMin[axis],pos[axis]);
+                        part->glassBoundsMax[axis]=std::max(part->glassBoundsMax[axis],pos[axis]);
+                    }
+                }
+                part->glassBoundsValid=true;
+                // A material-40 submesh can contain several panes. Split consecutive
+                // coplanar triangles into surfaces so each can be sorted independently.
+                if (part->sub.material==40u) {
+                    float normal[3]{}, plane=0.f;
+                    std::array<float,3> lo{}, hi{};
+                    for (uint32_t i=0; i+2<part->sub.indexCount; i+=3) {
+                        const auto& a=vertices[indices[part->sub.firstIndex+i]].positionMaterial;
+                        const auto& b=vertices[indices[part->sub.firstIndex+i+1]].positionMaterial;
+                        const auto& c=vertices[indices[part->sub.firstIndex+i+2]].positionMaterial;
+                        const float ab[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]};
+                        const float ac[3]={c[0]-a[0],c[1]-a[1],c[2]-a[2]};
+                        float n[3];cross(ab,ac,n);normalize(n);
+                        const float planeDistance=n[0]*a[0]+n[1]*a[1]+n[2]*a[2];
+                        const float alignment=n[0]*normal[0]+n[1]*normal[1]+n[2]*normal[2];
+                        if (part->paneSurfaces.empty() || std::abs(alignment)<.9999f || std::abs(planeDistance-alignment*plane)>.001f) {
+                            part->paneSurfaces.push_back({i,0,{}});
+                            std::copy_n(n,3,normal);plane=planeDistance;
+                            lo.fill(std::numeric_limits<float>::max());hi.fill(std::numeric_limits<float>::lowest());
+                        }
+                        auto& surface=part->paneSurfaces.back();surface.vertexCount+=3;
+                        for (int axis=0; axis<3; ++axis) {
+                            lo[axis]=std::min({lo[axis],a[axis],b[axis],c[axis]});
+                            hi[axis]=std::max({hi[axis],a[axis],b[axis],c[axis]});
+                            surface.center[axis]=(lo[axis]+hi[axis])*.5f;
+                        }
+                    }
+                }
+            }
         }
         s.meshOffsets = buffer(d, firstIndices.size()*sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         upload(s.meshOffsets.Get(),firstIndices.data(),firstIndices.size()*sizeof(uint32_t));
@@ -1636,6 +1683,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         srvT3.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvT3.Texture2D.MipLevels = 1;
         d->CreateShaderResourceView(tensorRes, &srvT3, srvAt(0u));
+        s.glassPlaceholder=tensorRes;
 
         auto bindArraySrv = [&](UINT idx, ID3D12Resource* res, const Btex& bt) {
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -1656,7 +1704,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         // Five static SRVs and four 20-descriptor frame regions precede the room array.
         constexpr UINT roomIndex = 5u + 4u * 20u;
         bindArraySrv(roomIndex, s.roomTex.Get(), rooms);
-        D3D12_DESCRIPTOR_RANGE ranges[2]{};
+        // The table is bound on every path, including frames before glass is allocated.
+        d->CreateShaderResourceView(s.glassPlaceholder.Get(), &srvT3, srvAt(roomIndex+1u));
+        d->CreateShaderResourceView(s.glassPlaceholder.Get(), &srvT3, srvAt(roomIndex+2u));
+        D3D12_DESCRIPTOR_RANGE ranges[3]{};
         ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         ranges[0].NumDescriptors = 5;
         ranges[0].BaseShaderRegister = 3;
@@ -1664,10 +1715,14 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         ranges[1].NumDescriptors = 1;
         ranges[1].BaseShaderRegister = 10;
         ranges[1].OffsetInDescriptorsFromTableStart = roomIndex;
+        ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[2].NumDescriptors = 2;
+        ranges[2].BaseShaderRegister = 13;
+        ranges[2].OffsetInDescriptorsFromTableStart = roomIndex+1u;
         D3D12_ROOT_PARAMETER params[12]{};
         for(UINT i=0;i<2;++i) {params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[i].Constants.ShaderRegister=i;params[i].Constants.Num32BitValues=i?5:kSceneDwords;}
         for(UINT i=0;i<3;++i) {params[2+i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[2+i].Descriptor.ShaderRegister=i;}
-        params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={2,ranges};
+        params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[5].DescriptorTable={3,ranges};
         params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;params[6].Descriptor.ShaderRegister=0;
         params[7].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[7].Descriptor.ShaderRegister=8;
         params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[8].Descriptor.ShaderRegister=9;
@@ -1734,6 +1789,14 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             md.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
             md.VS={mvVs.data(),mvVs.size()};md.PS={mvPs.data(),mvPs.size()};
             check(gfxPso("m2_motion_ps.cso",md,s.motionOpaque));
+            auto glassMotion=md;
+            glassMotion.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+            glassMotion.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_EQUAL;
+            check(gfxPso("m2_motion_ps.cso (two-sided glass)",glassMotion,s.motionGlassTwoSided));
+            glassMotion.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
+            check(gfxPso("m2_motion_ps.cso (glass)",glassMotion,s.motionGlass));
+            glassMotion.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            check(gfxPso("m2_motion_ps.cso (pane)",glassMotion,s.motionPane));
             md.PS={mvCut.data(),mvCut.size()};
             check(gfxPso("m2_motion_cutout_ps.cso",md,s.motionCutout));
             md.VS={skyvs.data(),skyvs.size()};md.PS={mvSky.data(),mvSky.size()};
@@ -1751,22 +1814,39 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         pd.DepthStencilState.DepthEnable=TRUE;pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_EQUAL;
         pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;pd.NumRenderTargets=2;pd.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
         check(gfxPso("m2_mesh_ps.cso",pd,s.raster));
-        // Without ray transmission, layer a faint glass reflection over the
-        // gallery or cab interior after opaque depth and sky are complete.
+        const auto psGlass=shader("m2_mesh_glass_ps.cso"), psPane=shader("m2_mesh_pane_ps.cso"),
+                   psPaneDistance=shader("m2_mesh_pane_distance_ps.cso");
+        std::vector<uint8_t> rps,rpsCut,skyRtPs;
+        std::atomic<bool> rrSkyOk{false},rrOpaqueOk{false}, glassPipelinesOk{false};
+        PipelineCompiler rtCompiler;
         auto pane=pd;
+        pane.PS={psGlass.data(),psGlass.size()};
+        pane.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
+        pane.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
         pane.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        pane.BlendState.IndependentBlendEnable=TRUE;
-        auto& glassColor=pane.BlendState.RenderTarget[0];
-        glassColor.BlendEnable=TRUE;
-        glassColor.SrcBlend=D3D12_BLEND_BLEND_FACTOR;
-        glassColor.DestBlend=D3D12_BLEND_INV_BLEND_FACTOR;
-        glassColor.BlendOp=D3D12_BLEND_OP_ADD;
-        glassColor.SrcBlendAlpha=D3D12_BLEND_ONE;
-        glassColor.DestBlendAlpha=D3D12_BLEND_ZERO;
-        glassColor.BlendOpAlpha=D3D12_BLEND_OP_ADD;
-        pane.BlendState.RenderTarget[1].RenderTargetWriteMask=0;
-        check(gfxPso("m2_mesh_ps.cso (glazing)",pane,s.rasterLiftGlazing));
-        s.liftGlazing.reserve(4);
+        check(gfxPso("m2_mesh_glass_ps.cso",pane,s.rasterGlass));
+        pane.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+        auto flat=pane;
+        flat.PS={psPane.data(),psPane.size()};
+        flat.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
+        flat.NumRenderTargets=1;
+        flat.RTVFormats[1]=DXGI_FORMAT_UNKNOWN;
+        flat.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
+        auto& blend=flat.BlendState.RenderTarget[0];
+        blend.BlendEnable=TRUE;blend.SrcBlend=D3D12_BLEND_ONE;blend.DestBlend=D3D12_BLEND_SRC1_COLOR;
+        blend.BlendOp=D3D12_BLEND_OP_ADD;blend.SrcBlendAlpha=D3D12_BLEND_ONE;
+        blend.DestBlendAlpha=D3D12_BLEND_ZERO;blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
+        auto paneDistance=flat;
+        paneDistance.PS={psPaneDistance.data(),psPaneDistance.size()};
+        paneDistance.RTVFormats[0]=DXGI_FORMAT_R32_FLOAT;
+        paneDistance.BlendState=pd.BlendState;
+        rtCompiler.start("M2 glass variants",vs.size()+psGlass.size()+psPane.size()+psPaneDistance.size(),[&s,d,pane,flat,paneDistance,&glassPipelinesOk] {
+            if (FAILED(d->CreateGraphicsPipelineState(&pane,IID_PPV_ARGS(&s.rasterGlassTwoSided)))) return true;
+            if (FAILED(d->CreateGraphicsPipelineState(&flat,IID_PPV_ARGS(&s.rasterPane)))) return true;
+            glassPipelinesOk=SUCCEEDED(d->CreateGraphicsPipelineState(&paneDistance,IID_PPV_ARGS(&s.rasterPaneDistance)));
+            return true;
+        });
+        s.glassBatches.reserve(128);
         pd.PS={psCut.data(),psCut.size()};check(gfxPso("m2_mesh_cutout_ps.cso",pd,s.rasterCutout));
         startupStep("trilogy raster pipelines (3)");
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};ComPtr<ID3D12Device5> d5;
@@ -1778,9 +1858,6 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         // differs only in one target format and follows its base pipeline on the same thread, where the
         // driver reuses the shader it has just compiled.
         // Declared before the compiler: on an early return its destructor waits for the compiles, which use these.
-        std::vector<uint8_t> rps,rpsCut,skyRtPs;
-        std::atomic<bool> rrSkyOk{false},rrOpaqueOk{false};
-        PipelineCompiler rtCompiler;
         if(s.rtReady) {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pdRt=pd;
             pdRt.NumRenderTargets=7;
@@ -2024,6 +2101,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             s.rtReady=false;
             s.rt.Reset();s.rtCutout.Reset();s.skyRt.Reset();s.rrSky.Reset();s.rrOpaque.Reset();s.rrCutout.Reset();
         }
+        if (!glassPipelinesOk) throw std::runtime_error("Could not create raster glass variants");
         // As before: ray reconstruction needs all three of its pipelines, built in order sky, opaque, cutout.
         else if(!rrSkyOk){s.rrSky.Reset();s.rrOpaque.Reset();s.rrCutout.Reset();}
         else if(!rrOpaqueOk){s.rrOpaque.Reset();s.rrCutout.Reset();}
@@ -2042,6 +2120,19 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
     if(!s.context.waitForGpu()||!s.context.checkDeviceHealthy())return false;
     try {
         auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=width;rd.Height=height;rd.DepthOrArraySize=1;rd.MipLevels=1;rd.Format=DXGI_FORMAT_D32_FLOAT;rd.SampleDesc.Count=1;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        if (s.glassColor) {
+            const UINT inc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            auto dest=s.srvHeap->GetCPUDescriptorHandleForHeapStart();
+            dest.ptr+=SIZE_T(86)*inc;
+            D3D12_SHADER_RESOURCE_VIEW_DESC placeholder{};
+            placeholder.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            placeholder.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            placeholder.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;placeholder.Texture2D.MipLevels=1;
+            d->CreateShaderResourceView(s.glassPlaceholder.Get(),&placeholder,dest);
+            dest.ptr+=inc;
+            d->CreateShaderResourceView(s.glassPlaceholder.Get(),&placeholder,dest);
+            s.glassColor.Reset();s.glassDistance.Reset();s.glassWidth=0;s.glassHeight=0;
+        }
         rd.Format=DXGI_FORMAT_R32_TYPELESS;
         D3D12_CLEAR_VALUE clear{};clear.Format=DXGI_FORMAT_D32_FLOAT;clear.DepthStencil.Depth=1;ComPtr<ID3D12Resource> depth;
         check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_DEPTH_WRITE,&clear,IID_PPV_ARGS(&depth)));s.depth=std::move(depth);
@@ -2208,11 +2299,86 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
 
     s.frameInstances.clear();
     s.batches.clear();
-    s.liftGlazing.clear();
+    s.glassBatches.clear();
+    s.paneBatches.clear();
     auto& inst = s.rayInstances;
     inst.clear();
     CityDrawStats stats{};
     stats.templateBlases=s.templateBlases; stats.blasBytes=s.blasBytes; stats.tlasBytes=s.tlasBytes;
+    // The copy is needed only for glass that can reach the viewport. Transform
+    // each local box by the actual instance pose and reject only when all eight
+    // corners lie outside one clip plane. The margin covers temporal jitter.
+    float glassForward[3],glassRight[3],glassUp[3];
+    for (int axis=0; axis<3; ++axis) glassForward[axis]=camera.target[axis]-camera.eye[axis];
+    normalize(glassForward);cross(camera.up,glassForward,glassRight);normalize(glassRight);cross(glassForward,glassRight,glassUp);
+    const float glassTanY=std::tan(camera.fovYRadians*.5f)*(1.f+4.f/float(std::max(height,1u)));
+    const float glassTanX=std::tan(camera.fovYRadians*.5f)*(float(width)/float(std::max(height,1u)))*(1.f+4.f/float(std::max(width,1u)));
+    auto glassInFrustum = [&](const Impl::Part& part,const float* rows) {
+        if (!part.glassBoundsValid) return true;
+        bool outside[6]={true,true,true,true,true,true};
+        for (unsigned corner=0; corner<8; ++corner) {
+            const float p[4]={
+                (corner&1u) ? part.glassBoundsMax[0] : part.glassBoundsMin[0],
+                (corner&2u) ? part.glassBoundsMax[1] : part.glassBoundsMin[1],
+                (corner&4u) ? part.glassBoundsMax[2] : part.glassBoundsMin[2],1.f};
+            float d[3];
+            for (int axis=0; axis<3; ++axis)
+                d[axis]=rows[axis*4]*p[0]+rows[axis*4+1]*p[1]+rows[axis*4+2]*p[2]+rows[axis*4+3]-camera.eye[axis];
+            auto project=[&](const float* v) { return d[0]*v[0]+d[1]*v[1]+d[2]*v[2]; };
+            const float x=project(glassRight),y=project(glassUp),z=project(glassForward);
+            outside[0] &= z<.1f; outside[1] &= z>3200.f;
+            outside[2] &= x < -z*glassTanX; outside[3] &= x > z*glassTanX;
+            outside[4] &= y < -z*glassTanY; outside[5] &= y > z*glassTanY;
+        }
+        return !std::any_of(std::begin(outside),std::end(outside),[](bool v){return v;});
+    };
+    // Decide before routing any glass away from opaque draws. A failed snapshot
+    // allocation disables raster glass for this renderer and leaves every pane opaque.
+    auto ensureGlassSnapshots = [&]() -> bool {
+        if (s.glassAllocationFailed) return false;
+        if (s.glassColor && s.glassWidth==width && s.glassHeight==height) return true;
+        try {
+            if (!s.context.waitForGpu()) throw std::runtime_error("Could not wait for glass snapshot descriptors");
+            D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC td{};td.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width=width;td.Height=height;td.DepthOrArraySize=1;td.MipLevels=1;td.SampleDesc.Count=1;
+            ComPtr<ID3D12Resource> colorCopy, distanceCopy;
+            td.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&colorCopy)));
+            td.Format=DXGI_FORMAT_R32_FLOAT;
+            check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&distanceCopy)));
+            const UINT inc=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            auto handle=s.srvHeap->GetCPUDescriptorHandleForHeapStart();handle.ptr+=SIZE_T(86)*inc;
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Texture2D.MipLevels=1;
+            view.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d->CreateShaderResourceView(colorCopy.Get(),&view,handle);
+            handle.ptr+=inc;view.Format=DXGI_FORMAT_R32_FLOAT;d->CreateShaderResourceView(distanceCopy.Get(),&view,handle);
+            s.glassColor=std::move(colorCopy);s.glassDistance=std::move(distanceCopy);
+            s.glassWidth=width;s.glassHeight=height;
+            return true;
+        } catch (const std::exception& e) {
+            s.glassAllocationFailed=true;
+            BOO_LOG_WARN("M2Mesh",std::string("Raster glass snapshots unavailable; drawing opaque: ")+e.what());
+            return false;
+        }
+    };
+    auto glassSortDepth = [&](const Impl::Part& part,const float* rows,const std::array<float,3>* center=nullptr) {
+        float local[3]{};
+        if (center) std::copy_n(center->data(),3,local);
+        else if (part.glassBoundsValid)
+            for (int axis=0; axis<3; ++axis) local[axis]=(part.glassBoundsMin[axis]+part.glassBoundsMax[axis])*.5f;
+        float depth=0.f;
+        for (int axis=0; axis<3; ++axis)
+            depth+=(rows[axis*4]*local[0]+rows[axis*4+1]*local[1]+rows[axis*4+2]*local[2]+rows[axis*4+3]-camera.eye[axis])*glassForward[axis];
+        return depth;
+    };
+    struct PaneCandidate { const Impl::Part* part; uint32_t id; std::array<float,12> rows; };
+    std::vector<PaneCandidate> paneCandidates;
+    auto appendPane = [&](const Impl::Part& part,uint32_t id,const float* rows) {
+        PaneCandidate candidate{&part,id,{}};
+        std::copy_n(rows,12,candidate.rows.begin());
+        paneCandidates.push_back(candidate);
+    };
     auto append = [&](const Impl::Part& part, const DrawConstants& draw, uint32_t seed, bool visible, bool city, uint32_t actor=0u) {
         const uint32_t id=static_cast<uint32_t>(s.frameInstances.size());
         s.frameInstances.push_back(makeInstanceData(draw,part.meshId,seed));
@@ -2234,11 +2400,20 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             ray.AccelerationStructure=part.compactBlas;
         }
         if (!visible) return;
-        const bool liftPane=draw.part==kObservatoryLiftCab || draw.part==kWaterfrontLiftCab ||
-                            (part.kit==2 && draw.part==0u);
-        if (!useRt && iv.aovMode==0u && draw.mat==40u && liftPane) {
-            s.liftGlazing.push_back({id,1,part.sub.indexCount,part.meshId,false});
-            return;
+        if (!useRt && iv.aovMode==0u && isGlassMaterial(draw.mat)) {
+            if (!glassInFrustum(part,draw.rows)) return;
+            // Flat panes (material 40) go through the refractive pass with no offset, like the other
+            // glass. A separate blended pane pass showed glass behind glass but left the skyline behind
+            // the dawn windows blurred, so raster glass behind glass is a known limitation instead.
+            if (ensureGlassSnapshots()) {
+                const bool twoSided=part.kit==0u && draw.part==184u;
+                if (!s.glassBatches.empty()) {
+                    auto& last=s.glassBatches.back();
+                    if (last.meshId==part.meshId && last.twoSided==twoSided && last.first+last.count==id) { ++last.count; return; }
+                }
+                s.glassBatches.push_back({id,1,part.sub.indexCount,part.meshId,false,twoSided});
+                return;
+            }
         }
         if (city) ++stats.visibleCityInstances;
         if (!s.batches.empty()) {
@@ -2673,7 +2848,29 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
                 std::iota(ids.begin(),ids.end(),0u);
                 std::for_each(std::execution::par,ids.begin(),ids.end(),work);
             }
-            s.batches.push_back({static_cast<uint32_t>(first+b0),static_cast<uint32_t>(b1-b0),tpl.sub.indexCount,tpl.meshId,isCutoutMaterial(tpl.sub.material)});
+            bool rasterGlass=!useRt && iv.aovMode==0u && isGlassMaterial(tpl.sub.material);
+            if (rasterGlass) {
+                bool anyVisible=false;
+                for (size_t i=b0; i<b1 && !anyVisible; ++i) {
+                    float rows[12];
+                    rowsOf(bodies->poses+8*i,bodies->stretch ? bodies->stretch+3*i : nullptr,rows);
+                    anyVisible=glassInFrustum(tpl,rows);
+                }
+                if (!anyVisible) continue;
+                rasterGlass=ensureGlassSnapshots();
+            }
+            auto& target=rasterGlass ? s.glassBatches : s.batches;
+            target.push_back({static_cast<uint32_t>(first+b0),static_cast<uint32_t>(b1-b0),tpl.sub.indexCount,tpl.meshId,isCutoutMaterial(tpl.sub.material)});
+        }
+    }
+    for (const auto& candidate:paneCandidates) {
+        const auto& part=*candidate.part;
+        if (s.glassAllocationFailed) {
+            s.batches.push_back({candidate.id,1,part.sub.indexCount,part.meshId,false});
+        } else {
+            for (const auto& surface:part.paneSurfaces)
+                s.paneBatches.push_back({candidate.id,1,surface.vertexCount,part.meshId,false,true,
+                                         glassSortDepth(part,candidate.rows.data(),&surface.center),surface.firstVertex});
         }
     }
     if (canonical && flockPlan.shown) {
@@ -2890,14 +3087,73 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     // Sky last, at the far plane: only pixels the Z-prepass left at the cleared depth run the sky
     // shader, so its ray-marched light shafts never trace under geometry.
     cmd->SetPipelineState(rr ? s.rrSky.Get() : (useRt ? s.skyRt.Get() : s.sky.Get()));cmd->DrawInstanced(3,1,0,0);
-    if (!s.liftGlazing.empty()) {
-        constexpr float reflection[4]={.065f,.065f,.065f,1.f};
-        cmd->OMSetBlendFactor(reflection);
-        cmd->SetPipelineState(s.rasterLiftGlazing.Get());
-        for (const auto& batch:s.liftGlazing) {
+    // Frustum-visible refractive glass triggers full-frame copies even if opaque geometry occludes it.
+    // Overlapping curved glass shares one snapshot and can hide other curved glass in raster mode, including Lite.
+    if (!s.glassBatches.empty()) {
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(cmd,dist,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(cmd,s.glassColor.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(cmd,s.glassDistance.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        const D3D12_BOX box{0,0,0,width,height,1};
+        auto copy=[&](ID3D12Resource* destination,ID3D12Resource* source) {
+            D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=destination;to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source;from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            cmd->CopyTextureRegion(&to,0,0,0,&from,&box);
+        };
+        copy(s.glassColor.Get(),hdr);copy(s.glassDistance.Get(),dist);
+        transition(cmd,hdr,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        transition(cmd,dist,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        transition(cmd,s.glassColor.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transition(cmd,s.glassDistance.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+        for (const auto& batch:s.glassBatches) {
+            cmd->SetPipelineState(batch.twoSided ? s.rasterGlassTwoSided.Get() : s.rasterGlass.Get());
             cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
             cmd->DrawInstanced(batch.indexCount,batch.count,0,0);
         }
+        if (writeMotion) {
+            auto mvRtv=handle;mvRtv.ptr+=SIZE_T(8)*rtvInc;
+            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->OMSetRenderTargets(1,&mvRtv,FALSE,&depthHandle);
+            for (const auto& batch:s.glassBatches) {
+                cmd->SetPipelineState(batch.twoSided ? s.motionGlassTwoSided.Get() : s.motionGlass.Get());
+                cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
+                cmd->DrawInstanced(batch.indexCount,batch.count,0,0);
+            }
+            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
+        }
+    }
+
+    if (!s.paneBatches.empty()) {
+        std::stable_sort(s.paneBatches.begin(),s.paneBatches.end(),[](const auto& a,const auto& b) { return a.sortDepth>b.sortDepth; });
+        cmd->OMSetRenderTargets(1,&handle,FALSE,&depthHandle);
+        cmd->SetPipelineState(s.rasterPane.Get());
+        for (const auto& batch:s.paneBatches) {
+            cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
+            cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
+        }
+        // Dual-source blending limits the color pass to one target. Replay the
+        // same far-to-near panes into distance, leaving the nearest pane last.
+        auto distanceRtv=handle;distanceRtv.ptr+=rtvInc;
+        cmd->OMSetRenderTargets(1,&distanceRtv,FALSE,&depthHandle);
+        cmd->SetPipelineState(s.rasterPaneDistance.Get());
+        for (const auto& batch:s.paneBatches) {
+            cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
+            cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
+        }
+        if (writeMotion) {
+            auto mvRtv=handle;mvRtv.ptr+=SIZE_T(8)*rtvInc;
+            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->OMSetRenderTargets(1,&mvRtv,FALSE,&depthHandle);
+            cmd->SetPipelineState(s.motionPane.Get());
+            for (const auto& batch:s.paneBatches) {
+                cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
+                cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
+            }
+            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        cmd->OMSetRenderTargets(2,&handle,TRUE,&depthHandle);
     }
 
     const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
