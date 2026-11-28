@@ -320,6 +320,7 @@ public:
     bool isCodecDisabled() const noexcept { return disableCodec_; }
     bool isCodecSignalHijackActive() const noexcept { return codecHijackActive_; }
     AbCompareEngine abCompareEngine() const noexcept { return abCompareEngine_; }
+    bool lastRenderHadSecondPass() const noexcept { return lastRenderHadSecondPass_; }
     LivePillarTelemetry livePillarTelemetry(size_t pillarIndex) const noexcept;
 
     bool ownsLiveEngineStatus(EngineKind kind) const noexcept override {
@@ -375,7 +376,8 @@ public:
         uint32_t& outWidth,
         uint32_t& outHeight,
         std::string* outError = nullptr,
-        std::vector<uint32_t>* outRgb10 = nullptr);
+        std::vector<uint32_t>* outRgb10 = nullptr,
+        bool comparisonCanvas = false);
 
     // Executes canonical CanvasClean + isolated A/B comparison buffer for headless A/B architecture verification.
     bool renderHeadlessAbCompareForTest(
@@ -390,13 +392,19 @@ public:
 
     // Executes the complete 4-pass live pipeline (Passes 1-3 + optional A/B or Codec round-trip + Pass 4 HUD/A-B Present)
     // into an offscreen RGBA8 presentation target for deterministic live-HUD and 4-pillar A/B verification & captures.
+    struct SoloWipeCaptureStatus {
+        bool engaged = false;
+        AbCompareEngine engine = AbCompareEngine::RT;
+        float splitRatio = 0.5f;
+    };
     bool renderHeadlessPresentedFrameForTest(
         const FrameContext& ctx,
         const HudTelemetrySnapshot& hud,
         uint32_t presentWidth,
         uint32_t presentHeight,
         std::vector<uint8_t>& outPresentedRgba,
-        std::string* outError = nullptr);
+        std::string* outError = nullptr,
+        SoloWipeCaptureStatus* wipeStatus = nullptr);
 
 private:
     struct Impl;
@@ -408,6 +416,7 @@ private:
     bool disableCodec_ = false;
     bool codecHijackActive_ = false;
     AbCompareEngine abCompareEngine_ = AbCompareEngine::RT;
+    bool lastRenderHadSecondPass_ = false;
     bool simulateInitFailure_ = false;
     HudTelemetrySnapshot hud_{};
     std::unique_ptr<Impl> impl_;

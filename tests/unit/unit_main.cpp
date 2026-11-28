@@ -1060,6 +1060,172 @@ bool testMirrorWitnessFrustum() {
     return true;
 }
 
+bool testDawnEgretFramingAndClearance() {
+    using namespace boo;
+    using Vec = std::array<float, 3>;
+    const auto sub = [](const Vec& a, const Vec& b) -> Vec { return {a[0]-b[0],a[1]-b[1],a[2]-b[2]}; };
+    const auto dot = [](const Vec& a, const Vec& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    const auto cross = [](const Vec& a, const Vec& b) -> Vec {
+        return {a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};
+    };
+    const Bmesh bird = buildCityBird(CityBirdSpecies::Egret);
+    BOO_CHECK(!bird.vertices.empty());
+    const float halfSpan = std::max(std::abs(bird.bounds[0]), std::abs(bird.bounds[3]));
+    const float yExtent = std::max(std::abs(bird.bounds[1]), std::abs(bird.bounds[4]));
+    const float zExtent = std::max(std::abs(bird.bounds[2]), std::abs(bird.bounds[5]));
+    // The rotating wing joints stay inside this sphere, at every stroke and orientation.
+    const float radius = std::hypot(halfSpan + yExtent, zExtent) * 1.08f;
+    Bmesh alcove, city;
+    std::string error;
+    BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/dawn_alcove.bmesh"), alcove, &error));
+    BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/taipei_101_hero.bmesh"), city, &error));
+
+    // Trace to the actual glass, then reject sightlines blocked by the alcove's opaque triangles.
+    const auto hitsWindow = [&](const Vec& eye, const Vec& point) {
+        const Vec ray = sub(point, eye);
+        float glassT=2.f, opaqueT=2.f;
+        for (const auto& piece : alcove.submeshes) {
+            for (uint32_t i=0; i+2<piece.indexCount; i+=3) {
+                Vec a{}, b{}, c{};
+                for (int axis=0; axis<3; ++axis) {
+                    a[axis]=alcove.vertices[alcove.indices[piece.firstIndex+i]].positionMaterial[axis];
+                    b[axis]=alcove.vertices[alcove.indices[piece.firstIndex+i+1]].positionMaterial[axis];
+                    c[axis]=alcove.vertices[alcove.indices[piece.firstIndex+i+2]].positionMaterial[axis];
+                }
+                const Vec e1=sub(b,a), e2=sub(c,a), h=cross(ray,e2);
+                const float det=dot(e1,h);
+                if (std::abs(det)<1.e-7f) continue;
+                const Vec v=sub(eye,a), q=cross(v,e1);
+                const float u=dot(v,h)/det, w=dot(ray,q)/det, t=dot(e2,q)/det;
+                if (u<0.f || w<0.f || u+w>1.f || t<=0.f || t>=1.f) continue;
+                if (piece.material==40u && piece.part==237u) glassT=std::min(glassT,t);
+                else if (piece.material!=40u) opaqueT=std::min(opaqueT,t);
+            }
+        }
+        return glassT<1.f && glassT<opaqueT;
+    };
+    std::array<int, kDawnEgretCount> windowSamples{};
+    int titleWindowSamples=0;
+    constexpr float aspect=16.f/9.f;
+    const int steps=int(std::lround((kDawnEgretEnd-kDawnEgretStart)/.05f));
+    static_assert(kDawnEgretEnd < 355.f);
+    for (int step=0; step<=steps; ++step) {
+        const float time=std::min(kDawnEgretStart+.05f*step,kDawnEgretEnd);
+        const auto cam=evaluateShowCamera(ShowVisualMode::FullFilm360s,
+            int64_t(std::lround(time*48000.f)),48000,.5f,false,1.f);
+        const Vec eye{cam.eye[0],cam.eye[1],cam.eye[2]};
+        const Vec target{cam.target[0],cam.target[1],cam.target[2]};
+        const Vec f0=sub(target,eye);
+        const float length=std::sqrt(dot(f0,f0)), horizontal=std::hypot(f0[0],f0[2]);
+        const Vec f{f0[0]/length,f0[1]/length,f0[2]/length};
+        const Vec right{f0[2]/horizontal,0.f,-f0[0]/horizontal};
+        const Vec up{-f0[0]*f0[1]/(horizontal*length),horizontal/length,-f0[2]*f0[1]/(horizontal*length)};
+        const float tanY=std::tan(cam.fovYRadians*.5f), tanX=tanY*aspect;
+        for (uint32_t b=0; b<kDawnEgretCount; ++b) {
+            const auto pose=dawnEgretPose(time,b,1.f);
+            const Vec delta=sub(pose.center,eye);
+            const float depth=dot(delta,f), x=dot(delta,right), y=dot(delta,up);
+            const bool outside=depth < -radius || std::abs(x)-depth*tanX > radius*std::hypot(1.f,tanX) ||
+                std::abs(y)-depth*tanY > radius*std::hypot(1.f,tanY);
+            if (step==0 || step==steps) {
+                for (float wideAspect : {16.f/9.f,21.f/9.f,32.f/9.f}) {
+                    const float wideTanX=tanY*wideAspect;
+                    BOO_CHECK(depth < -radius || std::abs(x)-depth*wideTanX > radius*std::hypot(1.f,wideTanX) ||
+                              std::abs(y)-depth*tanY > radius*std::hypot(1.f,tanY));
+                }
+            }
+            if (outside || depth<=radius) continue;
+            // Conservative projected sphere box in 1920x1080 normalized canvas coordinates.
+            const float pxRadius=radius*std::hypot(depth,x)/(depth*(depth-radius)*tanX);
+            const float pyRadius=radius*std::hypot(depth,y)/(depth*(depth-radius)*tanY);
+            const float px=.5f+.5f*x/(depth*tanX), py=.5f-.5f*y/(depth*tanY);
+            const float x0=px-.5f*pxRadius, x1=px+.5f*pxRadius;
+            const float y0=py-.5f*pyRadius, y1=py+.5f*pyRadius;
+            const auto separate=[&](float l,float t,float r,float bottom) {
+                return x1<l || x0>r || y1<t || y0>bottom;
+            };
+            // The end-title glyphs and plate are active from 351 s. The overlay variant
+            // is moved into the upper right; this conservative box includes its scrim.
+            if (time>=351.f) {
+                BOO_CHECK(separate(.075f,.105f,.37f,.41f));
+                BOO_CHECK(separate(.64f,.33f,.95f,.62f));
+            }
+            // Captions and the end-card plate occupy the lower canvas.
+            BOO_CHECK(y1 < .70f);
+            if (std::abs(x)<depth*tanX && std::abs(y)<depth*tanY && hitsWindow(eye,pose.center)) {
+                ++windowSamples[b];
+                if (time>=351.f) ++titleWindowSamples;
+            }
+        }
+    }
+    for (int count : windowSamples) BOO_CHECK(count >= 5);
+    BOO_CHECK(titleWindowSamples >= 2);
+
+    // Triangle AABBs conservatively enclose actual building geometry. Each coordinate of
+    // the route is monotonic, so each segment AABB encloses its whole continuous piece.
+    struct Box { Vec lo, hi; };
+    std::vector<Box> route;
+    for (uint32_t b=0; b<kDawnEgretCount; ++b) for (int i=0; i<128; ++i) {
+        const float t0=kDawnEgretStart+(kDawnEgretEnd-kDawnEgretStart)*float(i)/128.f;
+        const float t1=kDawnEgretStart+(kDawnEgretEnd-kDawnEgretStart)*float(i+1)/128.f;
+        const auto a=dawnEgretPose(t0,b,1.f).center, c=dawnEgretPose(t1,b,1.f).center;
+        Box box{};
+        for (int axis=0; axis<3; ++axis) { box.lo[axis]=std::min(a[axis],c[axis]); box.hi[axis]=std::max(a[axis],c[axis]); }
+        route.push_back(box);
+    }
+    const float clearance=kBirdBuildingClearance+halfSpan*1.08f;
+    const auto boxDistance2=[](const Box& a,const Box& b) {
+        float d2=0.f;
+        for (int axis=0; axis<3; ++axis) {
+            const float d=std::max({a.lo[axis]-b.hi[axis],b.lo[axis]-a.hi[axis],0.f}); d2+=d*d;
+        }
+        return d2;
+    };
+    Box whole=route.front();
+    for (const auto& segment:route) for (int axis=0; axis<3; ++axis) {
+        whole.lo[axis]=std::min(whole.lo[axis],segment.lo[axis]);
+        whole.hi[axis]=std::max(whole.hi[axis],segment.hi[axis]);
+    }
+    const auto checkMesh=[&](const Bmesh& mesh, const std::array<float,12>& transform) {
+        for (const auto& piece:mesh.submeshes) for (uint32_t i=0; i+2<piece.indexCount; i+=3) {
+            Box tri{};
+            for (int j=0; j<3; ++j) {
+                const auto& v=mesh.vertices[mesh.indices[piece.firstIndex+i+j]].positionMaterial;
+                for (int axis=0; axis<3; ++axis) {
+                    const float* row=transform.data()+4*axis;
+                    const float p=row[0]*v[0]+row[1]*v[1]+row[2]*v[2]+row[3];
+                    if (!j) tri.lo[axis]=tri.hi[axis]=p;
+                    else { tri.lo[axis]=std::min(tri.lo[axis],p); tri.hi[axis]=std::max(tri.hi[axis],p); }
+                }
+            }
+            if (boxDistance2(whole,tri)>=clearance*clearance) continue;
+            for (const auto& segment:route) if (boxDistance2(segment,tri)<clearance*clearance) return false;
+        }
+        return true;
+    };
+    BOO_CHECK(checkMesh(alcove,{1,0,0,0, 0,1,0,0, 0,0,1,0}));
+    CityModuleLayout modules;
+    appendCityModules(modules,2,city);
+    // At this cue the renderer moves/scales the entire Taipei kit to (33,-9.6,66), .064.
+    BOO_CHECK(checkMesh(city,{.064f,0,0,33.f, 0,.064f,0,-9.6f, 0,0,.064f,66.f}));
+    for (const auto& placement:modules.placements) {
+        const Vec center{33.f+.064f*placement.center[0],-9.6f+.064f*placement.center[1],66.f+.064f*placement.center[2]};
+        Box bounds{};
+        for (int axis=0; axis<3; ++axis) {
+            bounds.lo[axis]=center[axis]-.064f*placement.radius;
+            bounds.hi[axis]=center[axis]+.064f*placement.radius;
+        }
+        if (boxDistance2(whole,bounds)>=clearance*clearance) continue;
+        auto transform=placement.rows;
+        for (int axis=0; axis<3; ++axis) {
+            for (int col=0; col<4; ++col) transform[4*axis+col]*=.064f;
+            transform[4*axis+3]+=(axis==0?33.f:axis==1?-9.6f:66.f);
+        }
+        for (uint32_t module:placement.modules) BOO_CHECK(checkMesh(modules.modules[module],transform));
+    }
+    return true;
+}
+
 bool testAircraftHeroFraming() {
     using namespace boo;
     for (float motion : {1.0f, 0.35f}) {
@@ -1964,8 +2130,10 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 97 + static_cast<size_t>(ResultText::Count));
+    // 97 interface strings, plus the 8 solo-wipe labels (B2), plus the results card's.
+    BOO_CHECK(keys.size() == 105 + static_cast<size_t>(ResultText::Count));
     BOO_CHECK(std::find(keys.begin(), keys.end(), "win.preset_lite") != keys.end());
+    BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.wipe_dxr_on") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.play_again") != keys.end());
 
@@ -2052,6 +2220,7 @@ int main() {
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
     runTest("FilmOrbits", testFilmOrbits);
     runTest("MirrorWitnessFrustum", testMirrorWitnessFrustum);
+    runTest("DawnEgretFramingAndClearance", testDawnEgretFramingAndClearance);
     runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);

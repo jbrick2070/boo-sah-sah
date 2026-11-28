@@ -68,6 +68,10 @@ constexpr UiLabelSpec kLabelSpecs[static_cast<size_t>(UiLabel::Count)] = {
     // The studio dock draws it at this size; the transport bar samples the same cell at 1.55.
     {"hud.play_again", 9.9f, 1.35f, true, 0},
     {"results.Run", 24.0f, 1.25f, false, 0},
+    {"hud.wipe_dxr_on", 12.0f, 1.35f, false, 0}, {"hud.wipe_raster_off", 12.0f, 1.35f, false, 0},
+    {"hud.wipe_cuda_on", 12.0f, 1.35f, false, 0}, {"hud.wipe_hlsl_off", 12.0f, 1.35f, false, 0},
+    {"hud.wipe_neural_on", 12.0f, 1.35f, false, 0}, {"hud.wipe_neural_off", 12.0f, 1.35f, false, 0},
+    {"hud.wipe_npu_on", 12.0f, 1.35f, false, 0}, {"hud.wipe_script_off", 12.0f, 1.35f, false, 0},
 };
 
 std::wstring utf8ToWide(std::string_view utf8) {

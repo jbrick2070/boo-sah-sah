@@ -2007,8 +2007,16 @@ void traceBathroomGiRay(float3 origin, float3 direction, out float3 giRad, out f
     occWeight = 0.0;
 }
 
-bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT) {
+bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT,
+                  out uint outHitMat, out float3 outHitPos, out float3 outHitGeomNormal, out float3 outHitNormal,
+                  out float3 outMirrorIbl, out float3 outMirrorWeight) {
     outHitT = distance;
+    outHitMat = 0u;
+    outHitPos = 0.0.xxx;
+    outHitGeomNormal = 0.0.xxx;
+    outHitNormal = 0.0.xxx;
+    outMirrorIbl = 0.0.xxx;
+    outMirrorWeight = 0.0.xxx;
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
@@ -2080,6 +2088,10 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         hNorXY *= hNormScale;
         float hNz = sqrt(saturate(1.0 - dot(hNorXY, hNorXY)));
         float3 hitN = norm(T * hNorXY.x + B * hNorXY.y + hitNGeom * hNz);
+        outHitMat = hm;
+        outHitPos = p;
+        outHitGeomNormal = hitNGeom;
+        outHitNormal = hitN;
 
         float wetP = (hm == 1u) ? puddleMask(p.xz) : 0.0;
         float hRough = clamp(hOrm.y, 0.03, 0.98);
@@ -2204,12 +2216,23 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         if (hitPart == 62u && hm == 15u && abs(hitNGeom.y) < 0.55)
             hitEmission = shopLightbox(hitUv, hitUvWidth * taipeiKit.w / 0.08, sceneInstances[q.CommittedInstanceID()].buildingSeed);
         float3 hitCol = direct2 + ibl2 + stageTrim + streetLight + hitEmission;
+        float fogTransmission = 1.0f;
         if (cityExterior()) {
-            hitCol = lerp(hitCol, skyAerialFog(direction), cityHazeWeight(hitT, origin.y, p.y));
+            float haze = cityHazeWeight(hitT, origin.y, p.y);
+            fogTransmission = 1.0f - haze;
+            hitCol = lerp(hitCol, skyAerialFog(direction), haze);
         } else if (!inBath) {
             float hAlt = exp(-max(p.y - 2.0, 0.0) * 0.14);
             float hFog = 1.0 - exp(-max(hitT - (isDawnFinale() ? 95.0f : 4.5f), 0.0) * (isDawnFinale() ? (0.0006 + 0.0020 * hAlt) : 0.0055));
-            hitCol = lerp(hitCol, sky(direction), hFog * (isDawnFinale() ? 0.36f : 0.72f));
+            float fog = hFog * (isDawnFinale() ? 0.36f : 0.72f);
+            fogTransmission = 1.0f - fog;
+            hitCol = lerp(hitCol, sky(direction), fog);
+        }
+        if (hm == 12u) {
+            // Replace only the stela's IBL specular term when tracing a further bounce.
+            float3 specWeight = (f0_2 * brdf2.x + brdf2.y) * hOrm.x;
+            outMirrorIbl = specEnv2 * specWeight * fogTransmission;
+            outMirrorWeight = saturate(specWeight) * fogTransmission;
         }
         color = hitCol;
         return true;
@@ -2219,15 +2242,25 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
     return false;
 }
 
+bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color, out float outHitT) {
+    uint hitMat;
+    float3 hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight;
+    return traceSceneEx(origin, direction, distance, mask, coneSpread, color, outHitT,
+                        hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
+}
+
 bool traceScene(float3 origin, float3 direction, float distance, uint mask, float coneSpread, out float3 color) {
     float dummyT = distance;
     return traceSceneEx(origin, direction, distance, mask, coneSpread, color, dummyT);
 }
 
-bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uint extraQueries, out float firstHitDistance) {
+bool traceMirrorScene(float3 origin, float3 direction, bool stela, out float3 color, out uint extraQueries, out float firstHitDistance) {
     extraQueries = 1u;
     float opqT = 180.0;
-    bool hitOpq = traceSceneEx(origin, direction, 180.0, 0x01u, 0.0015, color, opqT);
+    uint hitMat;
+    float3 hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight;
+    bool hitOpq = traceSceneEx(origin, direction, 180.0, 0x01u, 0.0015, color, opqT,
+                               hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
     firstHitDistance = hitOpq ? opqT : 65504.0;
 
     // Check thin-glass sheets (shower partition, gallery frame glass, window panes) in front of the opaque hit!
@@ -2265,7 +2298,32 @@ bool traceMirrorScene(float3 origin, float3 direction, out float3 color, out uin
         color = lerp(color * gTint, gSpec, gFres);
         return true;
     }
-    return hitOpq;
+    // The primary surface has already applied its own Fresnel term. Each hit
+    // stela contributes its local lighting and reflects the remaining radiance.
+    uint maxBounces = effectsDetail() >= 2u ? 3u : (effectsDetail() == 1u ? 2u : 1u);
+    float3 throughput = 1.0.xxx;
+    float3 accumulated = 0.0.xxx;
+    float3 rayDir = direction;
+    [loop]
+    for (uint bounce = 1u; stela && hitOpq && hitMat == 12u && bounce < maxBounces; ++bounce) {
+        accumulated += throughput * (color - mirrorIbl);
+        throughput *= mirrorWeight * 0.88f;
+        if (max(throughput.r, max(throughput.g, throughput.b)) < 0.015f) {
+            color = 0.0.xxx;
+            break;
+        }
+        float3 nextDir = reflect(rayDir, hitNormal);
+        if (dot(nextDir, hitGeomNormal) <= 0.0f) nextDir = reflect(rayDir, hitGeomNormal);
+        rayDir = nextDir;
+        float nextT = 28.0f;
+        ++extraQueries;
+        hitOpq = traceSceneEx(hitPos + hitGeomNormal * 0.016f, rayDir, 28.0f, 0x01u,
+                              0.0015f + (float)bounce * 0.002f, color, nextT,
+                              hitMat, hitPos, hitGeomNormal, hitNormal, mirrorIbl, mirrorWeight);
+    }
+    color = accumulated + throughput * color;
+    // The caller and ray reconstruction use only the first segment's result.
+    return firstHitDistance < 65504.0f;
 }
 
 // Rough, IBL-shaded receivers still need the geometry seen along their
@@ -2976,7 +3034,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         if (wantRayRefl) {
             if (matId == 34u || (matId == 12u && dist < 24.0)) {
                 uint mQueries = 0u;
-                reflHit = traceMirrorScene(i.world + nGeom * 0.016, reflect(-v, n), reflected, mQueries, rrHitDistance);
+                reflHit = traceMirrorScene(i.world + nGeom * 0.016, reflect(-v, n), matId == 12u, reflected, mQueries, rrHitDistance);
                 if (reflHit) rrHitDistance = length(nGeom * 0.016 + reflect(-v,n) * rrHitDistance);
                 hasTracedReflection = reflHit || ((cityWeatherLighting() || (duskOpening() && matId == 7u)) && reflect(-v, n).y > 0.008);
                 specHitDist = 4.0;

@@ -64,6 +64,9 @@ struct D3D12Context::Impl {
     ComPtr<IDXGIFactory2> fgFactory;
     ComPtr<ID3D12Device> fgDevice;
     ComPtr<ID3D12Resource> fgHudless,fgUiAlpha;
+    // A comparison can reuse the mesh depth buffer after the canonical draw.
+    // Keep the depth tagged to Streamline intact until this frame is presented.
+    std::array<ComPtr<ID3D12Resource>, kFrameCount> fgDepthCopies;
     ComPtr<ID3D12DescriptorHeap> fgRtv;
     bool fgTargetsBound=false;
     ComPtr<IDXGIFactory6> factory;
@@ -816,7 +819,43 @@ void D3D12Context::endSimulation() {if(impl_) impl_->frameGeneration.endSimulati
 FrameGenerationStats D3D12Context::frameGenerationStats() const noexcept {return impl_ ? impl_->frameGeneration.stats() : FrameGenerationStats{};}
 bool D3D12Context::frameGenerationInputsNeeded() const noexcept {return impl_ && impl_->frameOpen && impl_->swapChain && impl_->frameGeneration.needsInputs();}
 void D3D12Context::setFrameGenerationScene(const M1CameraState& camera,void* depth,void* motion,uint32_t w,uint32_t h,const float* jitter,bool reset) {
-    if(frameGenerationInputsNeeded()) impl_->frameGeneration.scene(camera,static_cast<ID3D12Resource*>(depth),static_cast<ID3D12Resource*>(motion),w,h,jitter,reset);
+    if (!frameGenerationInputsNeeded() || !depth || !motion) return;
+    auto& s = *impl_;
+    auto* source = static_cast<ID3D12Resource*>(depth);
+    auto& copy = s.fgDepthCopies[s.frameIndex];
+    const auto sourceDesc = source->GetDesc();
+    if (!copy || copy->GetDesc().Width != sourceDesc.Width || copy->GetDesc().Height != sourceDesc.Height ||
+        copy->GetDesc().Format != sourceDesc.Format) {
+        copy.Reset();
+        auto desc = sourceDesc;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&copy)))) return;
+    } else {
+        D3D12_RESOURCE_BARRIER toCopy{};
+        toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopy.Transition.pResource = copy.Get();
+        toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        s.commandList->ResourceBarrier(1, &toCopy);
+    }
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Transition.pResource = source;
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    s.commandList->ResourceBarrier(1, barriers);
+    s.commandList->CopyResource(copy.Get(), source);
+    std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
+    barriers[1] = barriers[0];
+    barriers[1].Transition.pResource = copy.Get();
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    s.commandList->ResourceBarrier(2, barriers);
+    s.frameGeneration.scene(camera,copy.Get(),static_cast<ID3D12Resource*>(motion),w,h,jitter,reset);
 }
 bool D3D12Context::bindFrameGenerationTargets() {
     if(!frameGenerationInputsNeeded() || !impl_->frameGeneration.hasScene()) return false;

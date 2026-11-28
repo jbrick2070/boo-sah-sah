@@ -1927,7 +1927,11 @@ static const uint UI_LBL_GRAPHICS = 62u, UI_LBL_AUTO = 63u, UI_LBL_ENABLED = 64u
 static const uint UI_LBL_RR = 66u, UI_LBL_FG = 67u, UI_LBL_RENDER_FPS = 68u, UI_LBL_DISPLAY_FPS = 69u;
 static const uint UI_LBL_DLSS_UPSCALING = 70u, UI_LBL_PLAY_AGAIN = 71u;
 static const uint UI_LBL_RUN_BENCHMARK = 72u;
-static const float UI_CAPTION_TOP = 1140.0;
+static const uint UI_LBL_WIPE_DXR = 73u, UI_LBL_WIPE_RASTER = 74u;
+static const uint UI_LBL_WIPE_CUDA = 75u, UI_LBL_WIPE_HLSL = 76u;
+static const uint UI_LBL_WIPE_NEURAL_ON = 77u, UI_LBL_WIPE_NEURAL_OFF = 78u;
+static const uint UI_LBL_WIPE_NPU = 79u, UI_LBL_WIPE_SCRIPT = 80u;
+static const float UI_CAPTION_TOP = 1260.0f;
 
 // A translated label, one atlas texel per screen pixel. `origin` and `scale` are what the glyph call at
 // the same site uses; `cells` is the room the label has, in 5-unit glyph cells. Returns `fallback`
@@ -2824,6 +2828,7 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
     const float2 canvasRes = max(gSwapchainAndCanvas.zw, float2(1.0, 1.0));
     const float2 px = pin.uv * res;
 
+    const bool soloWipe           = (gHudFlags & (1u << 23u)) != 0u;
     const bool showOverlay        = (gHudFlags & 1u) != 0u;
     const uint hudMode            = (gHudFlags >> 8u) & 3u;
     // Bits 10..11 retain the four original engines; bit 19 selects the director comparison.
@@ -2845,8 +2850,8 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
         px.y >= lbMin.y && px.y < (lbMin.y + lbSize.y))
     {
         float2 canvasUv = saturate((px - lbMin) / lbSize);
-        const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
-        if (showOverlay && hudMode == 2u)
+        const float splitRatio = soloWipe ? saturate(gInteractiveState.x) : clamp(gInteractiveState.x, 0.05f, 0.95f);
+        if (soloWipe || (showOverlay && hudMode == 2u))
         {
             if (abEngine == 3u)
             {
@@ -2863,7 +2868,7 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
                     sdr = litePresent ? gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
                 }
             }
-            else if ((directorCompare || abLeftHwVerified) && canvasUv.x >= splitRatio)
+            else if ((soloWipe ? abLeftHwVerified : (directorCompare || abLeftHwVerified)) && canvasUv.x >= splitRatio)
             {
                 // RT / CUDA / Tensor A/B: Left = Canonical Live HW CanvasClean, Right = Isolated Substitute CanvasAbCompare
                 sdr = litePresent ? gCanvasAbCompareTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
@@ -2903,6 +2908,37 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
     if (uiAlpha == 0.0) hudless = sdr;
 }
 
+// Solo labels name the paths actually compared. English uses the stroke font;
+// other locales use the corresponding catalog entries in the UI text atlas.
+float soloWipeLabel(float2 px, float2 at, float scale, uint id)
+{
+    float glyph = 0.0f;
+    if (id == UI_LBL_WIPE_DXR)
+        glyph = sampleWord8(px, at, scale, 76u,73u,86u,69u,32u,68u,88u,82u); // LIVE DXR
+    else if (id == UI_LBL_WIPE_RASTER)
+        glyph = sampleWord8(px, at, scale, 83u,85u,66u,32u,82u,65u,83u,84u); // SUB RAST
+    else if (id == UI_LBL_WIPE_CUDA) {
+        glyph = sampleWord8(px, at, scale, 76u,73u,86u,69u,32u,67u,85u,68u);
+        glyph = max(glyph, textGlyph(px, at + float2(40.0f * scale, 0.0f), scale, 65u)); // LIVE CUDA
+    } else if (id == UI_LBL_WIPE_HLSL)
+        glyph = sampleWord8(px, at, scale, 83u,85u,66u,32u,72u,76u,83u,76u); // SUB HLSL
+    else if (id == UI_LBL_WIPE_NEURAL_ON) {
+        glyph = sampleWord8(px, at, scale, 84u,69u,78u,83u,79u,82u,32u,79u);
+        glyph = max(glyph, textGlyph(px, at + float2(40.0f * scale, 0.0f), scale, 78u)); // TENSOR ON
+    } else if (id == UI_LBL_WIPE_NEURAL_OFF) {
+        glyph = sampleWord8(px, at, scale, 83u,72u,65u,68u,73u,78u,71u,32u);
+        glyph = max(glyph, textGlyph(px, at + float2(40.0f * scale, 0.0f), scale, 79u));
+        glyph = max(glyph, textGlyph(px, at + float2(45.0f * scale, 0.0f), scale, 70u));
+        glyph = max(glyph, textGlyph(px, at + float2(50.0f * scale, 0.0f), scale, 70u)); // SHADING OFF
+    } else if (id == UI_LBL_WIPE_NPU)
+        glyph = sampleWord8(px, at, scale, 76u,73u,86u,69u,32u,78u,80u,85u); // LIVE NPU
+    else {
+        glyph = sampleWord8(px, at, scale, 83u,67u,82u,73u,80u,84u,32u,76u);
+        glyph = max(glyph, sampleWord4(px, at + float2(40.0f * scale, 0.0f), scale, 73u,71u,72u,84u)); // SCRIPT LIGHT
+    }
+    return uiLabel(px, at, scale, 12.0f, id, glyph, 1.35f);
+}
+
 // Every HUD layer over the film, in order. It runs once per text pass (see textRun); everything but
 // text coverage comes out the same in every pass.
 void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
@@ -2911,6 +2947,7 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
     const float2 canvasRes = max(gSwapchainAndCanvas.zw, float2(1.0, 1.0));
     const float2 px = pin.uv * res;
 
+    const bool soloWipe           = (gHudFlags & (1u << 23u)) != 0u;
     const bool showOverlay        = (gHudFlags & 1u) != 0u;
     const uint hudMode            = (gHudFlags >> 8u) & 3u;
     // Bits 10..11 retain the four original engines; bit 19 selects the director comparison.
@@ -2951,6 +2988,36 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
     const float3 colAmber  = float3(1.00, 0.68, 0.16);
     const float3 colCyan   = float3(0.14, 0.74, 0.96);
     const float3 colEnamel = float3(0.96, 0.95, 0.91);
+
+    if (soloWipe && abLeftHwVerified) {
+        const float u = BOO_HUD_AB_SCALE(res.y, lbSize.x);
+        const float splitX = lbMin.x + lbSize.x * saturate(gInteractiveState.x);
+        if (abs(px.x - splitX) < 1.35f && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
+            sdr = hudInk(uiAlpha, colEnamel);
+
+        const float2 size = float2(100.0f, 25.0f) * u;
+        // Keep both boxes inside the picture even at the outermost divider positions.
+        // The camera privacy pill is anchored to the screen top, not the letterbox.
+        const float camScale = clamp(floor(res.y / 540.0f), 1.0f, 3.0f);
+        const float labelY = max(lbMin.y + 14.0f * u, 32.0f * camScale + 8.0f * u);
+        const float maxX = max(lbMin.x, lbMin.x + lbSize.x - size.x);
+        const float2 left = float2(clamp(splitX - size.x - 10.0f * u, lbMin.x, maxX), labelY);
+        const float2 right = float2(clamp(splitX + 10.0f * u, lbMin.x, maxX), labelY);
+        const uint leftId = directorCompare ? UI_LBL_WIPE_NPU : (abEngine == 0u ? UI_LBL_WIPE_DXR :
+                            (abEngine == 1u ? UI_LBL_WIPE_CUDA :
+                            UI_LBL_WIPE_NEURAL_ON));
+        const uint rightId = directorCompare ? UI_LBL_WIPE_SCRIPT : (abEngine == 0u ? UI_LBL_WIPE_RASTER :
+                             (abEngine == 1u ? UI_LBL_WIPE_HLSL :
+                             UI_LBL_WIPE_NEURAL_OFF));
+        if (all(px >= left) && all(px < left + size)) {
+            sdr = hudOver(uiAlpha, sdr, float3(0.015f, 0.025f, 0.045f), 0.86f);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, soloWipeLabel(px, left + float2(8.0f, 7.0f) * u, 1.35f * u, leftId));
+        }
+        if (all(px >= right) && all(px < right + size)) {
+            sdr = hudOver(uiAlpha, sdr, float3(0.015f, 0.025f, 0.045f), 0.86f);
+            sdr = hudOver(uiAlpha, sdr, colEnamel, soloWipeLabel(px, right + float2(8.0f, 7.0f) * u, 1.35f * u, rightId));
+        }
+    }
 
     const uint curAovMode   = (gInteractiveMeta.x >> 9u) & 7u;
     const uint curDenMode   = (gInteractiveMeta.x >> 12u) & 3u;

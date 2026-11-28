@@ -154,6 +154,44 @@ bool writeFilmGateJson(const std::filesystem::path& path, const boo::JsonValue& 
     return true;
 }
 
+bool verifySoloWipePixels(boo::M1TaipeiSliceEffect& fx, const std::vector<uint8_t>& presented,
+                          const boo::M1TaipeiSliceEffect::SoloWipeCaptureStatus& status,
+                          boo::JsonValue& entry, std::string& error) {
+    uint32_t width = 0, height = 0;
+    std::vector<uint8_t> clean, comparison;
+    BOO_CHECK(fx.readLastRenderedCanvasForTest(clean, width, height, &error));
+    BOO_CHECK(fx.readLastRenderedCanvasForTest(comparison, width, height, &error, nullptr, true));
+    BOO_CHECK(width == 2560 && height == 1440 && clean != comparison);
+    // At equal source and presentation sizes, the filter samples each texel at
+    // its center. Allow for 10-bit quantization and presentation dither, and
+    // stay clear of labels, divider, transport and captions.
+    uint32_t matches[2]{}, differing[2]{};
+    for (uint32_t y = height / 3; y < 2 * height / 3; y += 17) {
+        for (uint32_t x = width / 10; x < 9 * width / 10; x += 19) {
+            const float u = (float(x) + 0.5f) / float(width);
+            if (std::abs(u - status.splitRatio) < 0.02f) continue;
+            const uint32_t side = u < status.splitRatio ? 0u : 1u;
+            const auto& expected = side == 0 ? clean : comparison;
+            const auto& other = side == 0 ? comparison : clean;
+            const size_t p = (size_t(y) * width + x) * 4u;
+            int expectedError = 0, difference = 0;
+            for (uint32_t c = 0; c < 3; ++c) {
+                expectedError = std::max(expectedError, std::abs(int(presented[p + c]) - int(expected[p + c])));
+                difference = std::max(difference, std::abs(int(expected[p + c]) - int(other[p + c])));
+            }
+            BOO_CHECK(expectedError <= 2);
+            ++matches[side];
+            if (difference > 2) ++differing[side];
+        }
+    }
+    BOO_CHECK(matches[0] && matches[1] && differing[0] && differing[1]);
+    entry["wipe_left_samples"] = static_cast<int>(matches[0]);
+    entry["wipe_right_samples"] = static_cast<int>(matches[1]);
+    entry["wipe_left_distinct_samples"] = static_cast<int>(differing[0]);
+    entry["wipe_right_distinct_samples"] = static_cast<int>(differing[1]);
+    return true;
+}
+
 bool testFullFilmCaptureGate() {
     using namespace boo;
     CaptureComScope com;
@@ -241,6 +279,7 @@ bool testFullFilmCaptureGate() {
                     entry["rt_backend"] = rt.activeBackend; entry["rt_verified"] = rt.successfullyExecutedTestWork;
                     entry["rgb10_hash"] = capturePixelHash(rgb10); entry["mean_luma"] = metrics.meanLuma;
                     entry["seek_repeat_equal"] = true; entry["pass"] = "CanvasClean";
+                    entry["wipe_eligible"] = false;
                     entry["hdr_nonfinite_components"] = nonFinite;
                     report["frames"].asArrayMut().push_back(std::move(entry));
                     if (!raster) { canonical = rgba; canonical10 = rgb10; }
@@ -254,10 +293,131 @@ bool testFullFilmCaptureGate() {
                 auto guarded = ctx; guarded.showOverlay = true; guarded.showCaptions = true; guarded.hudMode = 2;
                 fx.setAbCompareEngine(AbCompareEngine::RT);
                 std::vector<uint8_t> presented;
-                BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(guarded, hud, 2560, 1440, presented, &error));
+                M1TaipeiSliceEffect::SoloWipeCaptureStatus manualStatus;
+                BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(guarded, hud, 2560, 1440, presented, &error, &manualStatus));
+                BOO_CHECK(!manualStatus.engaged);
                 BOO_CHECK(fx.readLastRenderedCanvasForTest(repeat, width, height, &error, &repeated10));
                 BOO_CHECK(canonical10 == repeated10);
                 BOO_CHECK(presented != canonical);
+                if (mode == ShowVisualMode::FullFilm360s && edition == Edition::Family && seconds == 175) {
+                    M1TaipeiSliceEffect::SoloWipeCaptureStatus filmStatus;
+                    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(ctx, hud, 2560, 1440, presented, &error, &filmStatus));
+                    BOO_CHECK(!filmStatus.engaged);
+                    SoloLoopRange range{};
+                    BOO_CHECK(resolvePlaybackLoopRange(cue, PlaybackMode::SoloNPU, range));
+                    BOO_CHECK(range.startSample == int64_t(150) * cue.sampleRate && sample < range.endSample);
+                    auto inFilm = ctx;
+                    inFilm.playbackMode = PlaybackMode::SoloNPU;
+                    inFilm.playbackLoopStartSample = range.startSample;
+                    inFilm.playbackLoopEndSample = range.endSample;
+                    inFilm.moodIntensity = 0.97f; inFilm.moodPaletteAccent = 0.91f;
+                    inFilm.moodBloomStrength = 0.95f; inFilm.moodCutAccent = 0.90f;
+                    auto injectedHud = hud;
+                    injectedHud.liveCameraActive = false;
+                    injectedHud.directorBackend = DirectorHudBackend::Npu;
+                    injectedHud.mood.isScriptedFallback = false;
+                    injectedHud.npuCompletedInferences = 1;
+                    fx.resetTo(inFilm.filmTimeSeconds);
+                    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(inFilm, injectedHud, 2560, 1440, presented, &error, &filmStatus));
+                    BOO_CHECK(filmStatus.engaged == spec.allowNpu);
+                    JsonValue inFilmEntry(JsonValue::Object{});
+                    inFilmEntry["file"] = stem + "_in_film_npu_wipe.png";
+                    inFilmEntry["cue"] = cuePath; inFilmEntry["edition"] = editionName;
+                    inFilmEntry["sample"] = sample; inFilmEntry["seconds"] = seconds;
+                    inFilmEntry["pass"] = "In-film SoloNPU; injected test telemetry and mood, no live NPU claim";
+                    inFilmEntry["wipe_eligible"] = spec.allowNpu;
+                    inFilmEntry["wipe_engaged"] = filmStatus.engaged;
+                    inFilmEntry["wipe_engine"] = filmStatus.engaged ? "NPU" : "none";
+                    if (filmStatus.engaged) {
+                        BOO_CHECK(filmStatus.engine == AbCompareEngine::NPU);
+                        BOO_CHECK(verifySoloWipePixels(fx, presented, filmStatus, inFilmEntry, error));
+                    }
+                    BOO_CHECK(writeCapturePng(gFilmCaptureDirectory / (stem + "_in_film_npu_wipe.png"), presented, 2560, 1440));
+                    report["frames"].asArrayMut().push_back(std::move(inFilmEntry));
+                }
+                if (mode != ShowVisualMode::FullFilm360s) {
+                    // Capture the actual solo presentation at its local split-hold time.
+                    auto soloHud = hud;
+                    soloHud.liveCameraActive = false;
+                    auto soloCtx = ctx;
+                    // The Store build has no preview tensor-shading path. Request it
+                    // only when the actual test-rig pipeline was built and probed.
+                    const bool previewTensor = mode == ShowVisualMode::SoloTensor &&
+                                               fx.neuralRenderingStats().tensorCoresAvailable;
+                    if (previewTensor) {
+                        soloCtx.neural.enabled = true;
+                        soloCtx.neural.shading = true;
+                        soloCtx.neural.tensorCores = true;
+                    }
+                    std::vector<uint8_t> soloPresented;
+                    M1TaipeiSliceEffect::SoloWipeCaptureStatus wipeStatus;
+                    if (mode == ShowVisualMode::SoloNPU) {
+                        // First prove the real scripted telemetry is ineligible. Then inject
+                        // fixture telemetry and distinct mood values to exercise the NPU wipe;
+                        // this does not claim that an NPU was used by this capture.
+                        fx.resetTo(ctx.filmTimeSeconds);
+                        BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(soloCtx, soloHud, 2560, 1440, soloPresented, &error, &wipeStatus));
+                        BOO_CHECK(!wipeStatus.engaged);
+                        soloHud.directorBackend = DirectorHudBackend::Npu;
+                        soloHud.mood.isScriptedFallback = false;
+                        soloHud.npuCompletedInferences = 1;
+                        soloCtx.moodIntensity = 0.97f;
+                        soloCtx.moodPaletteAccent = 0.91f;
+                        soloCtx.moodBloomStrength = 0.95f;
+                        soloCtx.moodCutAccent = 0.90f;
+                    }
+                    fx.resetTo(ctx.filmTimeSeconds);
+                    BOO_CHECK(fx.renderHeadlessPresentedFrameForTest(soloCtx, soloHud, 2560, 1440, soloPresented, &error, &wipeStatus));
+                    const std::string file = stem + "_split_wipe.png";
+                    BOO_CHECK(writeCapturePng(gFilmCaptureDirectory / file, soloPresented, 2560, 1440));
+                    HardwareResult path;
+                    const EngineKind engine = mode == ShowVisualMode::SoloRT ? EngineKind::RT :
+                                              mode == ShowVisualMode::SoloCUDA ? EngineKind::CUDA : EngineKind::Tensor;
+                    const bool hasEngineStatus = (mode == ShowVisualMode::SoloRT || mode == ShowVisualMode::SoloCUDA) &&
+                                                 fx.queryLiveEngineStatus(engine, path);
+                    JsonValue entry(JsonValue::Object{});
+                    entry["file"] = file; entry["cue"] = cuePath; entry["edition"] = editionName;
+                    entry["sample"] = sample; entry["seconds"] = seconds;
+                    entry["pass"] = "Solo presentation; comparison when the actual path is available";
+                    entry["director"] = mode == ShowVisualMode::SoloNPU ?
+                        "injected NPU telemetry and mood fixture; no live NPU claim" :
+                        "scripted test director; no live NPU claim";
+                    bool eligible = false;
+                    if (mode == ShowVisualMode::SoloNPU) {
+                        eligible = spec.allowNpu;
+                        if (!eligible) entry["wipe_skip_reason"] = "Preset disallows NPU comparison";
+                    } else if (mode == ShowVisualMode::SoloTensor) {
+                        const bool active = previewTensor && fx.neuralRenderingStats().tensorCoresActive;
+                        eligible = active;
+                        if (!active) entry["wipe_skip_reason"] = "Preview tensor shading unavailable";
+                    } else if (hasEngineStatus) {
+                        eligible = path.status == BackendStatus::Accelerated && path.successfullyExecutedTestWork;
+                        if (!eligible) entry["wipe_skip_reason"] = "Requested hardware path unavailable or unverified";
+                    } else {
+                        entry["wipe_skip_reason"] = "Hardware path status unavailable";
+                    }
+                    entry["wipe_eligible"] = eligible;
+                    entry["wipe_engaged"] = wipeStatus.engaged;
+                    const AbCompareEngine expectedEngine = mode == ShowVisualMode::SoloRT ? AbCompareEngine::RT :
+                        mode == ShowVisualMode::SoloCUDA ? AbCompareEngine::CUDA :
+                        mode == ShowVisualMode::SoloTensor ? AbCompareEngine::Tensor : AbCompareEngine::NPU;
+                    const char* engineName = wipeStatus.engine == AbCompareEngine::RT ? "RT" :
+                        wipeStatus.engine == AbCompareEngine::CUDA ? "CUDA" :
+                        wipeStatus.engine == AbCompareEngine::Tensor ? "Tensor" :
+                        wipeStatus.engine == AbCompareEngine::NPU ? "NPU" : "Codec";
+                    entry["wipe_engine"] = wipeStatus.engaged ? engineName : "none";
+                    BOO_CHECK(wipeStatus.engaged == eligible);
+                    if (eligible) {
+                        BOO_CHECK(wipeStatus.engine == expectedEngine);
+                        BOO_CHECK(verifySoloWipePixels(fx, soloPresented, wipeStatus, entry, error));
+                    }
+                    if (hasEngineStatus) {
+                        entry["engine_status"] = toString(path.status);
+                        entry["engine_backend"] = path.activeBackend;
+                        entry["engine_verified"] = path.successfullyExecutedTestWork;
+                    }
+                    report["frames"].asArrayMut().push_back(std::move(entry));
+                }
                 if (mode == ShowVisualMode::FullFilm360s && editionName == "family" && (seconds == 36 || seconds == 355)) {
                     auto statsContext=ctx; statsContext.showOverlay=true; statsContext.showCaptions=true; statsContext.hudMode=0;
                     auto statsHud=hud; statsHud.liveCameraActive=false; statsHud.benchHasResults=true;
@@ -275,6 +435,7 @@ bool testFullFilmCaptureGate() {
                     BOO_CHECK(writeCapturePng(gFilmCaptureDirectory / file, presented, 2560, 1440));
                     narrativeSheet.add(presented, 2560, 1440, editionName + " " + std::to_string(seconds) + "s | captions / title");
                     JsonValue entry(JsonValue::Object{}); entry["file"] = file; entry["sample"] = sample;
+                    entry["wipe_eligible"] = false;
                     entry["edition"] = editionName; entry["pass"] = "Presentation with captions / end card";
                     entry["clean_feed_equal"] = true;
                     report["frames"].asArrayMut().push_back(std::move(entry));

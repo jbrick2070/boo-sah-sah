@@ -201,6 +201,7 @@ struct InteractiveView {
     bool accumulate = false;             // Progressive temporal accumulation + sub-pixel jitter
     uint32_t accumFrame = 0;             // 0 = reset history this frame
     float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
+    bool soloWipeActive = false;         // Renderer-owned automatic solo presentation
     uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark
     uint32_t aovMode = 0;                // 0 = Final, 1..7 = AOV buffer inspection modes
     uint32_t soloEngine = 0;             // 0 = All (Full Orchestra), 1 = RT, 2 = Tensor, 3 = NPU, 4 = CUDA, 5 = Codec
@@ -251,6 +252,9 @@ struct FrameContext {
     uint64_t hudInteractionSerial = 0; // Changes on viewer input to refresh cached controls immediately.
     int64_t samplePosition = 0;
     int32_t sampleRate = 48000;
+    PlaybackMode playbackMode = PlaybackMode::FullFilm;
+    int64_t playbackLoopStartSample = 0;
+    int64_t playbackLoopEndSample = 0; // Exclusive; zero means no active range.
     double filmTimeSeconds = 0.0;
     double dtSeconds = 0.0; // Bounded/clamped after stall
     bool seeking = false;

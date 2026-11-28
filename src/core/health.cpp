@@ -416,24 +416,26 @@ void QualityLadder::stepUp() noexcept {
     }
 }
 
-void QualityLadder::pushFrameSample(
-    double gpuFrameMs,
-    uint64_t estimatedVramBytes,
-    uint64_t softVramCapBytes,
-    bool atSafeSceneCut,
-    float elapsedSeconds) {
-    // Section 6.5: Immediate shed on VRAM pressure regardless of FPS
+bool QualityLadder::updateMemoryPressure(uint64_t estimatedVramBytes, uint64_t softVramCapBytes) noexcept {
     memoryPressure_ = softVramCapBytes > 0 && estimatedVramBytes > softVramCapBytes;
     if (memoryPressure_) {
         consecutiveHeadroomWindows_ = 0;
         fastSeconds_ = 0.0f;
         if (currentPreset_ != QualityPresetId::Lite) {
             stepDown();
-            return;
+            return true;
         }
-        // Lite has no lower preset. Still collect timings so sustained slowness
-        // can select its smaller safety canvas, even under memory pressure.
     }
+    return false;
+}
+
+void QualityLadder::pushFrameSample(
+    double gpuFrameMs,
+    uint64_t estimatedVramBytes,
+    uint64_t softVramCapBytes,
+    bool atSafeSceneCut,
+    float elapsedSeconds) {
+    if (updateMemoryPressure(estimatedVramBytes, softVramCapBytes)) return;
 
     if (samplesMs_.size() >= windowFrames_) {
         samplesMs_.pop_front();

@@ -178,6 +178,49 @@ ActGrade evalActGrade(float time) noexcept {
     return blendActGrades(*a.grade, *b.grade, w);
 }
 
+// In-film solos use the transport loop; standalone solo cues start at zero.
+bool soloWipeTimeline(ShowVisualMode mode, const FrameContext& frame,
+                      AbCompareEngine& engine, float& ratio) noexcept {
+    if (frame.qualityPreset == QualityPresetId::Lite || frame.qualityPreset == QualityPresetId::Safe ||
+        frame.interactive.exploreActive || frame.interactive.aovMode != 0u ||
+        (frame.showOverlay && frame.hudMode == 2u)) return false;
+    int64_t localSample = frame.samplePosition;
+    if (frame.playbackMode != PlaybackMode::FullFilm) {
+        if (frame.playbackLoopEndSample <= frame.playbackLoopStartSample ||
+            frame.samplePosition < frame.playbackLoopStartSample || frame.samplePosition >= frame.playbackLoopEndSample) return false;
+        localSample -= frame.playbackLoopStartSample;
+        switch (frame.playbackMode) {
+        case PlaybackMode::SoloRT: mode = ShowVisualMode::SoloRT; break;
+        case PlaybackMode::SoloTensor: mode = ShowVisualMode::SoloTensor; break;
+        case PlaybackMode::SoloNPU: mode = ShowVisualMode::SoloNPU; break;
+        case PlaybackMode::SoloCUDA: mode = ShowVisualMode::SoloCUDA; break;
+        default: return false;
+        }
+    }
+    float start = 0.f, settled = 0.f, exit = 0.f, end = 0.f, excursionStart = 0.f, excursionEnd = 0.f;
+    switch (mode) {
+    case ShowVisualMode::SoloRT: engine = AbCompareEngine::RT; start = 8.f; settled = 12.f; exit = 45.f; end = 48.f; excursionStart = 24.f; excursionEnd = 32.f; break;
+    case ShowVisualMode::SoloCUDA: engine = AbCompareEngine::CUDA; start = 6.f; settled = 10.f; exit = 42.f; end = 46.f; excursionStart = 26.f; excursionEnd = 30.f; break;
+    case ShowVisualMode::SoloTensor: engine = AbCompareEngine::Tensor; start = 6.f; settled = 10.f; exit = 42.f; end = 45.f; break;
+    case ShowVisualMode::SoloNPU: engine = AbCompareEngine::NPU; start = 5.f; settled = 8.f; exit = 38.f; end = 41.f; break;
+    default: return false;
+    }
+    const float t = static_cast<float>(static_cast<double>(localSample) / std::max(1, frame.sampleRate));
+    if (t < start || t >= end) return false;
+    if (frame.motionScale < 0.99f) { ratio = 0.5f; return true; }
+    const auto ease = [](float u) { u = std::clamp(u, 0.f, 1.f); return u * u * u * (u * (u * 6.f - 15.f) + 10.f); };
+    ratio = 0.5f;
+    if (t < settled) ratio = 1.f - 0.5f * ease((t - start) / (settled - start));
+    else if (t >= exit) ratio = 0.5f + 0.5f * ease((t - exit) / (end - exit));
+    else if (excursionEnd > excursionStart && t >= excursionStart && t < excursionEnd) {
+        const float mid = (excursionStart + excursionEnd) * 0.5f;
+        const float depth = mode == ShowVisualMode::SoloRT ? 0.35f : 0.40f;
+        ratio = t < mid ? 0.5f - depth * ease((t - excursionStart) / (mid - excursionStart))
+                        : 0.5f - depth * (1.f - ease((t - mid) / (excursionEnd - mid)));
+    }
+    return true;
+}
+
 ActGrade evalFrameGrade(ShowVisualMode visualMode, const FrameContext& ctx) noexcept {
     const float exactTimeSec = static_cast<float>(
         static_cast<double>(ctx.samplePosition) / static_cast<double>(std::max<int32_t>(1, ctx.sampleRate)));
@@ -1199,6 +1242,7 @@ struct M1TaipeiSliceEffect::Impl {
     bool smokeAttempted = false;
     uint32_t smokeAct = ~0u;          // the act its air belongs to
     DlssBridge dlss;
+    bool soloDlssPrepared = false; // Reuse the canonical input size for the paired pass.
 
     void resolveCudaSimParams(
         int64_t samplePosition,
@@ -1474,7 +1518,8 @@ struct M1TaipeiSliceEffect::Impl {
         bool isCanonicalPass,
         bool recordTimestamps,
         bool compareDirectorLighting = false,
-        bool pairedCapture = false);
+        bool pairedCapture = false,
+        bool soloNeuralComparison = false);
 
     void recordNv12PackAndReadback(
         ID3D12GraphicsCommandList* cmd,
@@ -1917,6 +1962,10 @@ bool M1TaipeiSliceEffect::Impl::buildCanvasBundle(
     const D3D12_RESOURCE_DESC cleanDesc = makeTex2dDesc(
         reqW, reqH, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
 
+    // Keep the comparison canvas in the bundle: its shader-visible descriptors can be
+    // referenced by frames already in flight, so replacing the placeholder on demand
+    // would require a GPU drain. Cost: one R10G10B10A2 canvas (roughly 4 bytes per
+    // pixel, plus allocation alignment), including on Lite and Safe presets.
     uint64_t newBundleBytes =
         singleResourceAllocBytes(dev, hdrDesc) +
         singleResourceAllocBytes(dev, depthDesc) +
@@ -3366,7 +3415,11 @@ RendererFeatureState M1TaipeiSliceEffect::pathTracingState() const noexcept {
 }
 
 RendererFeatureState M1TaipeiSliceEffect::dlssState() const noexcept {
-    return impl_ ? impl_->dlss.state() : RendererFeatureState::Unavailable;
+    if (!impl_) return RendererFeatureState::Unavailable;
+    const auto state = impl_->dlss.state();
+    // DLSS is evaluated to keep its history warm, but the solo presents the
+    // shared spatial resolve, so do not claim reconstructed output is shown.
+    return impl_->soloDlssPrepared && state == RendererFeatureState::Active ? RendererFeatureState::Idle : state;
 }
 RendererFeatureState M1TaipeiSliceEffect::rayReconstructionState() const noexcept {
     return impl_ ? impl_->dlss.rayReconstructionState() : RendererFeatureState::Unavailable;
@@ -3662,7 +3715,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     bool isCanonicalPass,
     bool recordTimestamps,
     bool compareDirectorLighting,
-    bool pairedCapture) {
+    bool pairedCapture,
+    bool soloNeuralComparison) {
     // This is before the first scene draw in the command list; the old instance
     // buffer can be retired before reserving the optional rigid-body slots.
     if (isCanonicalPass && frame.physxBodies && frame.physxBodies->count && trilogyMesh && !trilogyMesh->reservePhysxBodies())
@@ -3676,6 +3730,11 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         ctx.moodPaletteAccent = scripted.spectralShift;
         ctx.moodBloomStrength = scripted.bloomStrength;
         ctx.moodCutAccent = scripted.cutAccent;
+    }
+    if (soloNeuralComparison && !isCanonicalPass) {
+        // Preserve all other neural features while showing the scene without shading.
+        ctx.neural.shading = false;
+        if (ctx.neural.solo == NeuralSolo::Shading) ctx.neural.solo = NeuralSolo::None;
     }
     if (isCanonicalPass) {
         if (slot < kFrameSlots) {
@@ -3773,16 +3832,27 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     const bool orbital = trilogyMesh && isOrbitalCutaway(visualMode, ctx);
     if (isCanonicalPass) orbitalViewActive = orbital;
     if(trilogyMesh) {
-        const bool eligible = !pairedCapture && ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate &&
-                              !(ctx.showOverlay && ctx.hudMode == 2) && !orbital;
+        const bool solo = ctx.playbackMode == PlaybackMode::SoloRT || ctx.playbackMode == PlaybackMode::SoloTensor ||
+                          ctx.playbackMode == PlaybackMode::SoloNPU || ctx.playbackMode == PlaybackMode::SoloCUDA ||
+                          visualMode == ShowVisualMode::SoloRT || visualMode == ShowVisualMode::SoloTensor ||
+                          visualMode == ShowVisualMode::SoloNPU || visualMode == ShowVisualMode::SoloCUDA;
+        const bool eligible = (solo || (!pairedCapture && !(ctx.showOverlay && ctx.hudMode == 2))) &&
+                              ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate && !orbital;
         const bool allowDlss = !d3d.benchmark() || d3d.benchmark()->mode == BenchmarkMode::DlssQuality;
-        bool sr = isCanonicalPass && allowDlss && dlss.prepare(d3d, cmd, ctx.dlssMode, eligible, ctx.rayReconstruction,
-            useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get());
+        bool sr = false;
+        if (isCanonicalPass) {
+            sr = allowDlss && dlss.prepare(d3d, cmd, ctx.dlssMode, eligible, ctx.rayReconstruction && !solo,
+                useDxr && trilogyMesh->rrGuidesReady(), sceneHdr.Get(), sceneDepth.Get());
+            soloDlssPrepared = solo && sr;
+        } else if (solo) {
+            sr = soloDlssPrepared;
+        }
         if (orbital && ctx.interactive.aovMode == 0 && !ctx.interactive.accumulate) {
             trilogyMesh->recordOrbital(cmd,ctx,sceneHdr.Get(),sceneDepth.Get(),canvasW,canvasH,slot,isCanonicalPass);
         } else {
             if (sr && !trilogyMesh->resize(dlss.width(), dlss.height())) {
                 dlss.rejectInputSize();
+                soloDlssPrepared = false;
                 sr = false;
             }
             const uint32_t width = sr ? dlss.width() : canvasW;
@@ -3793,8 +3863,10 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             const float zeroJitter[2]{};
             const float* jitter = sr ? dlss.jitter() : (frameGeneration ? zeroJitter : nullptr);
             trilogyMesh->record(cmd,ctx,cam,sr ? dlss.color() : sceneHdr.Get(),sr ? dlss.distance() : sceneDepth.Get(),
-                srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting,jitter,sr && dlss.renderNoisyRays(),sr);
-            if (sr) dlss.resolve(cmd,*trilogyMesh,static_cast<float>(ctx.dtSeconds));
+                srvGpuAt(7u).ptr,width,height,slot,useDxr,isCanonicalPass,compareDirectorLighting || solo,jitter,sr && dlss.renderNoisyRays(),sr);
+            // Both views use the same spatial resolve throughout a solo. Keep evaluating
+            // DLSS on canonical frames so its feature and temporal history stay warm.
+            if (sr) dlss.resolve(cmd,*trilogyMesh,static_cast<float>(ctx.dtSeconds), solo, isCanonicalPass);
             if (frameGeneration) d3d.setFrameGenerationScene(cam,trilogyMesh->dlssDepthResource(),trilogyMesh->dlssMotionResource(),
                 width,height,jitter,trilogyMesh->dlssHistoryReset());
         }
@@ -4243,7 +4315,9 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     switch (abEngine) {
     case AbCompareEngine::RT:     abLeftHwVerified = (liveRtStatus.status == BackendStatus::Accelerated); break;
     case AbCompareEngine::CUDA:   abLeftHwVerified = livePillars[1].hardwareVerified; break;
-    case AbCompareEngine::Tensor: abLeftHwVerified = livePillars[2].hardwareVerified; break;
+    case AbCompareEngine::Tensor: abLeftHwVerified = ctx.interactive.soloWipeActive
+        ? (neural && neural->stats().tensorCoresActive && ctx.neural.runs(NeuralFeature::Shading))
+        : livePillars[2].hardwareVerified; break;
     case AbCompareEngine::Codec:  abLeftHwVerified = livePillars[3].hardwareVerified && codecHwTexValid &&
                                                        !(codecSplitActive && externalNv12Active && externalTexUploaded); break;
     case AbCompareEngine::NPU:    abLeftHwVerified = hud.directorBackend == DirectorHudBackend::Npu &&
@@ -4293,6 +4367,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     flags |= (1u << 20u);
 #endif
     if (ctx.qualityPreset == QualityPresetId::Lite) flags |= (1u << 22u);
+    if (ctx.interactive.soloWipeActive) flags |= (1u << 23u);
     pc.hudFlags = flags;
 
     std::copy(hud.recentGpuMs.begin(), hud.recentGpuMs.end(), pc.recentGpuMs);
@@ -4414,7 +4489,9 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     }
     pc.captionStyle[3] = hud.liveCameraActive ? 1.0f : 0.0f;
 
-    pc.interactiveState[0] = std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
+    pc.interactiveState[0] = ctx.interactive.soloWipeActive
+        ? std::clamp(ctx.interactive.abSplitRatio, 0.0f, 1.0f)
+        : std::clamp(ctx.interactive.abSplitRatio, 0.05f, 0.95f);
     pc.interactiveState[1] = std::clamp(ctx.interactive.sunElevation01, 0.0f, 1.0f);
     pc.interactiveState[2] = std::clamp(ctx.interactive.sunAzimuth01, 0.0f, 1.0f);
     const uint32_t accumSpp = ctx.interactive.accumulate ? (ctx.interactive.accumFrame + 1u) : 1u;
@@ -4519,7 +4596,7 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
         : (clean && psoPresentClean ? psoPresentClean.Get() : psoPresentHud.Get());
     // Refresh even in capture mode; its final draw uses the original direct pass for
     // pixel-exact golden frames without the cache texture's RGBA8 rounding.
-    bool cached = (captureTarget || onscreen) && psoHudCache && (!clean || psoHudCacheClean) && psoPresentCached &&
+    bool cached = !ctx.interactive.soloWipeActive && (captureTarget || onscreen) && psoHudCache && (!clean || psoHudCacheClean) && psoPresentCached &&
                   (!writeFrameInputs || psoPresentCachedFg);
     if (cached && (!hudCache || hudCacheW != targetWidth || hudCacheH != targetHeight)) {
         // Swapchain resize and synchronous capture both drain the queue before replacing this texture.
@@ -4796,7 +4873,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     cmd->DrawInstanced(3, 1, 0, 0);
 }
 
-void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
+void M1TaipeiSliceEffect::render(const FrameContext& frame) {
+    lastRenderHadSecondPass_ = false;
     if (!impl_ || !impl_->canvasClean || !impl_->canvasAbCompare) {
         throw std::runtime_error("M1TaipeiSliceEffect::render called without initialized canvas");
     }
@@ -4810,9 +4888,22 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
     const bool canonDxr    = !disableRT_ && activeSpec_.allowDxr;
     const bool canonCuda   = !disableCUDA_ && activeSpec_.allowCuda;
     const bool canonTensor = !disableTensor_ && activeSpec_.allowTensor;
-    const bool abSplitActive = ctx.showOverlay && (ctx.hudMode == 2u);
+    FrameContext ctx = frame;
+    ctx.qualityPreset = activeSpec_.id;
+    AbCompareEngine abEngine = abCompareEngine_;
+    float soloRatio = 0.5f;
+    const bool soloTime = soloWipeTimeline(impl_->visualMode, ctx, abEngine, soloRatio);
+    const bool soloVerified = soloTime && ((abEngine == AbCompareEngine::RT && canonDxr && impl_->liveRtStatus.status == BackendStatus::Accelerated) ||
+        (abEngine == AbCompareEngine::CUDA && canonCuda && impl_->livePillars[1].hardwareVerified) ||
+        (abEngine == AbCompareEngine::Tensor && impl_->neural && impl_->neural->stats().tensorCoresAvailable && ctx.neural.tensorCores && ctx.neural.runs(NeuralFeature::Shading) && !isOrbitalCutaway(impl_->visualMode, ctx)) ||
+        (abEngine == AbCompareEngine::NPU && activeSpec_.allowNpu && hud_.directorBackend == DirectorHudBackend::Npu && !hud_.mood.isScriptedFallback && hud_.npuCompletedInferences > 0));
+    if (soloVerified) {
+        ctx.interactive.soloWipeActive = true;
+        ctx.interactive.abSplitRatio = soloRatio;
+    } else abEngine = abCompareEngine_;
+    const bool abSplitActive = ctx.interactive.soloWipeActive || (ctx.showOverlay && ctx.hudMode == 2u);
     const bool effectiveCodecHijack = codecHijackActive_ || impl_->isCueSignalHijackAt(ctx.filmTimeSeconds);
-    const bool codecViewActive = effectiveCodecHijack || (abSplitActive && abCompareEngine_ == AbCompareEngine::Codec);
+    const bool codecViewActive = effectiveCodecHijack || (abSplitActive && abEngine == AbCompareEngine::Codec);
 
     if (codecViewActive && !disableCodec_) {
         impl_->ensureLiveAccelerators(d3d_, false, false, true);
@@ -4829,7 +4920,7 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         canonDxr, canonCuda, canonTensor,
         false, false,
         impl_->canvasClean.Get(), 5u,
-        slot, true, true, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
+        slot, true, true, abSplitActive && abEngine == AbCompareEngine::NPU, soloVerified);
 
     impl_->updateLiveRtStatus(disableRT_, activeSpec_.allowDxr);
 
@@ -4886,33 +4977,44 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         disableTensor_, activeSpec_.allowTensor,
         disableCodec_, codecViewActive);
 
+    if (soloVerified && ((abEngine == AbCompareEngine::RT && impl_->liveRtStatus.status != BackendStatus::Accelerated) ||
+                         (abEngine == AbCompareEngine::CUDA && !impl_->livePillars[1].hardwareVerified) ||
+                         (abEngine == AbCompareEngine::Tensor && (!impl_->neural || !impl_->neural->stats().tensorCoresActive)))) {
+        ctx = frame;
+        abEngine = abCompareEngine_;
+    }
+
     // 3. Single-variable A/B Split-Screen comparison pass into isolated canvasAbCompare (never touches CanvasClean!)
-    if (abSplitActive) {
-        if (abCompareEngine_ == AbCompareEngine::NPU) {
+    if (ctx.interactive.soloWipeActive || (ctx.showOverlay && ctx.hudMode == 2u)) {
+        if (abEngine == AbCompareEngine::NPU) {
+            lastRenderHadSecondPass_ = true;
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx, frameGrade, canonDxr, canonCuda, canonTensor, true, true,
                 impl_->canvasAbCompare.Get(), 6u, slot, false, false, true);
-        } else if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
+        } else if (abEngine == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
+            lastRenderHadSecondPass_ = true;
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx, frameGrade,
                 false, canonCuda, canonTensor,
                 true, true,
                 impl_->canvasAbCompare.Get(), 6u,
                 slot, false, false);
-        } else if (abCompareEngine_ == AbCompareEngine::CUDA && impl_->livePillars[1].hardwareVerified) {
+        } else if (abEngine == AbCompareEngine::CUDA && impl_->livePillars[1].hardwareVerified) {
+            lastRenderHadSecondPass_ = true;
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx, frameGrade,
                 canonDxr, false, canonTensor,
                 false, true,
                 impl_->canvasAbCompare.Get(), 6u,
                 slot, false, false);
-        } else if (abCompareEngine_ == AbCompareEngine::Tensor && impl_->livePillars[2].hardwareVerified) {
+        } else if (abEngine == AbCompareEngine::Tensor && (soloVerified || impl_->livePillars[2].hardwareVerified)) {
+            lastRenderHadSecondPass_ = true;
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx, frameGrade,
-                canonDxr, canonCuda, false,
-                true, false,
+                canonDxr, canonCuda, soloVerified ? canonTensor : false,
+                true, soloVerified,
                 impl_->canvasAbCompare.Get(), 6u,
-                slot, false, false);
+                slot, false, false, false, soloVerified, soloVerified);
         }
     }
 
@@ -4925,7 +5027,7 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         d3d_.width(), d3d_.height(),
         static_cast<DXGI_FORMAT>(d3d_.backBufferDxgiFormat()),
         d3d_.swapchainChannelBits(),
-        slot, ctx, hud_, abCompareEngine_, codecHijackActive_, pathTracingState(), dlssState(), rayReconstructionState(), fgInputs, &d3d_);
+        slot, ctx, hud_, abEngine, codecHijackActive_, pathTracingState(), dlssState(), rayReconstructionState(), fgInputs, &d3d_);
     if (fgInputs) d3d_.finishFrameGenerationInputs();
 }
 
@@ -5247,8 +5349,10 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
     uint32_t& outWidth,
     uint32_t& outHeight,
     std::string* outError,
-    std::vector<uint32_t>* outRgb10) {
-    if (!impl_ || !impl_->canvasClean) {
+    std::vector<uint32_t>* outRgb10,
+    bool comparisonCanvas) {
+    auto* canvas = impl_ ? (comparisonCanvas ? impl_->canvasAbCompare.Get() : impl_->canvasClean.Get()) : nullptr;
+    if (!canvas) {
         if (outError) *outError = "M1TaipeiSliceEffect canvas is not initialized";
         return false;
     }
@@ -5264,7 +5368,7 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
         return false;
     }
 
-    const D3D12_RESOURCE_DESC cleanDesc = impl_->canvasClean->GetDesc();
+    const D3D12_RESOURCE_DESC cleanDesc = canvas->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT numRows = 0;
     UINT64 rowSizeBytes = 0;
@@ -5284,9 +5388,9 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
 
     const bool execOk = d3d_.executeSingleCommandListAndWait([&](void* rawCmd) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(rawCmd);
-        transitionResource(cmd, impl_->canvasClean.Get(), kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transitionResource(cmd, canvas, kCanvasReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        srcLoc.pResource = impl_->canvasClean.Get();
+        srcLoc.pResource = canvas;
         srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         srcLoc.SubresourceIndex = 0;
 
@@ -5296,7 +5400,7 @@ bool M1TaipeiSliceEffect::readLastRenderedCanvasForTest(
         dstLoc.PlacedFootprint = footprint;
 
         cmd->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
-        transitionResource(cmd, impl_->canvasClean.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, kCanvasReadState);
+        transitionResource(cmd, canvas, D3D12_RESOURCE_STATE_COPY_SOURCE, kCanvasReadState);
     }, outError);
 
     if (!execOk) {
@@ -5421,12 +5525,14 @@ bool M1TaipeiSliceEffect::renderHeadlessAbCompareForTest(
 }
 
 bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
-    const FrameContext& ctx,
+    const FrameContext& frame,
     const HudTelemetrySnapshot& hud,
     uint32_t presentWidth,
     uint32_t presentHeight,
     std::vector<uint8_t>& outPresentedRgba,
-    std::string* outError) {
+    std::string* outError,
+    SoloWipeCaptureStatus* wipeStatus) {
+    if (wipeStatus) *wipeStatus = {};
     if (!impl_ || !impl_->canvasClean || !impl_->canvasAbCompare) {
         if (outError) *outError = "M1TaipeiSliceEffect canvas bundle is not initialized";
         return false;
@@ -5443,9 +5549,22 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
     const bool canonDxr    = !disableRT_ && activeSpec_.allowDxr;
     const bool canonCuda   = !disableCUDA_ && activeSpec_.allowCuda;
     const bool canonTensor = !disableTensor_ && activeSpec_.allowTensor;
-    const bool abSplitActive = ctx.showOverlay && (ctx.hudMode == 2u);
+    FrameContext ctx = frame;
+    ctx.qualityPreset = activeSpec_.id;
+    AbCompareEngine abEngine = abCompareEngine_;
+    float soloRatio = 0.5f;
+    const bool soloTime = soloWipeTimeline(impl_->visualMode, ctx, abEngine, soloRatio);
+    const bool soloVerified = soloTime && ((abEngine == AbCompareEngine::RT && canonDxr && impl_->liveRtStatus.status == BackendStatus::Accelerated) ||
+        (abEngine == AbCompareEngine::CUDA && canonCuda && impl_->livePillars[1].hardwareVerified) ||
+        (abEngine == AbCompareEngine::Tensor && impl_->neural && impl_->neural->stats().tensorCoresAvailable && ctx.neural.tensorCores && ctx.neural.runs(NeuralFeature::Shading) && !isOrbitalCutaway(impl_->visualMode, ctx)) ||
+        (abEngine == AbCompareEngine::NPU && activeSpec_.allowNpu && hud.directorBackend == DirectorHudBackend::Npu && !hud.mood.isScriptedFallback && hud.npuCompletedInferences > 0));
+    if (soloVerified) {
+        ctx.interactive.soloWipeActive = true;
+        ctx.interactive.abSplitRatio = soloRatio;
+    } else abEngine = abCompareEngine_;
+    const bool abSplitActive = ctx.interactive.soloWipeActive || (ctx.showOverlay && ctx.hudMode == 2u);
     const bool effectiveCodecHijack = codecHijackActive_ || impl_->isCueSignalHijackAt(ctx.filmTimeSeconds);
-    const bool codecViewActive = effectiveCodecHijack || (abSplitActive && abCompareEngine_ == AbCompareEngine::Codec);
+    const bool codecViewActive = effectiveCodecHijack || (abSplitActive && abEngine == AbCompareEngine::Codec);
 
     if (codecViewActive && !disableCodec_) {
         impl_->ensureLiveAccelerators(d3d_, false, false, true);
@@ -5473,18 +5592,18 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
-            kHeadlessSlot, true, false, abSplitActive && abCompareEngine_ == AbCompareEngine::NPU);
+            kHeadlessSlot, true, false, abSplitActive && abEngine == AbCompareEngine::NPU, soloVerified);
 
-        if (abSplitActive && abCompareEngine_ != AbCompareEngine::Codec) {
-            const bool abDxr    = (abCompareEngine_ == AbCompareEngine::RT)     ? false : canonDxr;
-            const bool abCuda   = (abCompareEngine_ == AbCompareEngine::CUDA)   ? false : canonCuda;
-            const bool abTensor = (abCompareEngine_ == AbCompareEngine::Tensor) ? false : canonTensor;
+        if (abSplitActive && abEngine != AbCompareEngine::Codec) {
+            const bool abDxr    = (abEngine == AbCompareEngine::RT)     ? false : canonDxr;
+            const bool abCuda   = (abEngine == AbCompareEngine::CUDA)   ? false : canonCuda;
+            const bool abTensor = (abEngine == AbCompareEngine::Tensor && !soloVerified) ? false : canonTensor;
             impl_->recordScenePipelineToCanvas(
                 d3d_, cmd, ctx, frameGrade,
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
-                kHeadlessSlot, false, false, abCompareEngine_ == AbCompareEngine::NPU);
+                kHeadlessSlot, false, false, abEngine == AbCompareEngine::NPU, soloVerified, soloVerified && abEngine == AbCompareEngine::Tensor);
         }
 
         if (codecViewActive && !impl_->externalNv12Active && !disableCodec_ && !d3d_.isWarp() && impl_->liveAccel.codecHardwareAvailable()) {
@@ -5552,6 +5671,18 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
         disableTensor_, activeSpec_.allowTensor,
         disableCodec_, codecViewActive);
 
+    if (soloVerified && ((abEngine == AbCompareEngine::RT && impl_->liveRtStatus.status != BackendStatus::Accelerated) ||
+                         (abEngine == AbCompareEngine::CUDA && !impl_->livePillars[1].hardwareVerified) ||
+                         (abEngine == AbCompareEngine::Tensor && (!impl_->neural || !impl_->neural->stats().tensorCoresActive)))) {
+        ctx = frame;
+        abEngine = abCompareEngine_;
+    }
+    if (wipeStatus && ctx.interactive.soloWipeActive) {
+        wipeStatus->engaged = true;
+        wipeStatus->engine = abEngine;
+        wipeStatus->splitRatio = ctx.interactive.abSplitRatio;
+    }
+
     // Phase B: Allocate offscreen RGBA8 presentation target + RTV, upload decoded H.264 if needed, execute Pass 4 HUD/A-B Present
     const D3D12_RESOURCE_DESC presDesc = makeTex2dDesc(
         presentWidth, presentHeight, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
@@ -5598,7 +5729,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             dev, cmd,
             presentWidth, presentHeight,
             DXGI_FORMAT_R8G8B8A8_UNORM, 8u,
-            kHeadlessSlot, ctx, effHud, abCompareEngine_, codecHijackActive_, pathTracingState(), dlssState(), rayReconstructionState(), false, nullptr, &presRtv);
+            kHeadlessSlot, ctx, effHud, abEngine, codecHijackActive_, pathTracingState(), dlssState(), rayReconstructionState(), false, nullptr, &presRtv);
 
         transitionResource(cmd, presTex.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         D3D12_TEXTURE_COPY_LOCATION srcLoc{};

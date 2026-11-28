@@ -22,7 +22,8 @@ public:
     void warmUp(D3D12Context& context);
     bool prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, DlssMode mode, bool eligible, bool requestRR, bool raytracing,
                  ID3D12Resource* fullColor, ID3D12Resource* fullDistance);
-    void resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds);
+    void resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds,
+                 bool spatialOnly = false, bool evaluateDlss = true);
     void reset() noexcept;
     void rejectInputSize() noexcept;
     bool renderNoisyRays() const noexcept;

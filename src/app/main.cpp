@@ -2374,6 +2374,11 @@ int main(int argc, char** argv) {
     bool captureRequested = false;
     auto volumeVisibleUntil = wallStart;
     std::array<float, 16> recentGpuMs{};
+    // GPU queries retire when their swapchain slot is reused, not on the frame
+    // that recorded them. Track the comparison flag with each slot.
+    std::array<bool, D3D12Context::kFrameCount> secondPassBySlot{};
+    bool lastCompletedHadSecondPass = false;
+    bool lastSubmittedHadSecondPass = false;
     uint32_t hudMode = settings.showOverlay ? 0u : 3u;
     uint32_t hudBeforeComparison = hudMode;
     AbCompareEngine abCompareEngine = AbCompareEngine::RT;
@@ -3582,9 +3587,11 @@ int main(int argc, char** argv) {
         const QualityPresetSpec prevSpec = qualityLadder.effectiveSpec(findQualityPresetSpec(presets, qualityLadder.currentPreset()));
         const bool hadSafetyResolution = qualityLadder.safetyResolutionActive();
         const bool comparingDirector = settings.showOverlay && hudMode == 2u && abCompareEngine == AbCompareEngine::NPU;
-        // A comparison draws the scene twice. Keep these timings out of the film's
-        // preset decisions, but keep the memory-pressure response active throughout.
-        if (!comparingDirector || appVram > prevSpec.softVramLimitBytes || qualityLadder.memoryPressureActive()) {
+        const bool excludeComparisonTiming = lastSubmittedHadSecondPass || lastCompletedHadSecondPass;
+        if (excludeComparisonTiming) {
+            // Memory pressure is independent of timing and must still be acted on.
+            qualityLadder.updateMemoryPressure(appVram, prevSpec.softVramLimitBytes);
+        } else {
             const float elapsed = previousFrameStart
                 ? std::chrono::duration<float>(cpuFrameT0 - *previousFrameStart).count() : 0.0f;
             qualityLadder.pushFrameSample(lastGpuMs, appVram, prevSpec.softVramLimitBytes, sceneChanged, elapsed);
@@ -3616,6 +3623,9 @@ int main(int argc, char** argv) {
         fctx.presentationFrame = frameCounter;
         fctx.samplePosition = tick.samplePosition;
         fctx.sampleRate = cueSheet.sampleRate;
+        fctx.playbackMode = settings.playbackMode;
+        if (!clock.getLoopRange(fctx.playbackLoopStartSample, fctx.playbackLoopEndSample))
+            fctx.playbackLoopEndSample = 0;
         fctx.filmTimeSeconds = tick.filmTimeSeconds;
         fctx.dtSeconds = tick.dtSeconds;
         fctx.seeking = (tick.state == TransportState::Seeking);
@@ -3708,7 +3718,7 @@ int main(int argc, char** argv) {
             gin.floorFps = settings.workoutFloorFps;
             // Shots with no birds at all (the orbital views, the last seconds) teach it nothing.
             gin.flockVisible = m1Live && !window.isMinimized() && liveM1Ptr->birdCount() > 0u;
-            workoutGovernor.update(gin);
+            if (!excludeComparisonTiming) workoutGovernor.update(gin);
             previousFrameStart = cpuFrameT0;
             if (m1Live && workoutGovernor.released() > liveM1Ptr->workoutBirdCapacity()) {
                 // More birds than the buffers hold: make room now, between frames.
@@ -3888,7 +3898,11 @@ int main(int argc, char** argv) {
 
             d3d.endSimulation();
             if (d3d.beginFrame()) {
+                const uint32_t timingSlot = d3d.currentBackBufferIndex();
+                const bool retiredSecondPass = secondPassBySlot[timingSlot];
                 orchestrator.renderFrame(fctx, false);
+                const bool submittedSecondPass = liveM1Ptr && !orchestrator.isUsingFallbackEffect() &&
+                                                 liveM1Ptr->lastRenderHadSecondPass();
                 if (!cameraLabelAvailable()) stopCamera("its label can no longer be shown.");
                 if (spoutSender.isActive() && liveM1Ptr && !orchestrator.isUsingFallbackEffect()) {
                     spoutSender.recordCleanPublish(
@@ -3900,6 +3914,11 @@ int main(int argc, char** argv) {
                 }
                 double completedGpuMs = 0.0;
                 const bool presented = d3d.endFrameAndPresent(settings.vsync, completedGpuMs);
+                if (presented) {
+                    secondPassBySlot[timingSlot] = submittedSecondPass;
+                    lastSubmittedHadSecondPass = submittedSecondPass;
+                    if (completedGpuMs > 0.0) lastCompletedHadSecondPass = retiredSecondPass;
+                }
                 if (!viewerStartupSeconds && presented && d3d.lastPresentationVisible() &&
                     !orchestrator.isUsingFallbackEffect() && IsWindowVisible(window.hwnd())) {
                     viewerStartupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - viewerEntry).count();

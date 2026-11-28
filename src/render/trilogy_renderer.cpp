@@ -2607,6 +2607,28 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         }
     }
 
+    // Dawn's departing egrets are world actors in both raster and the RT scene.
+    // Like the mirror witness they are omitted at reduced motion. They do not
+    // participate in the workout flock or its focus.
+    if (!orbital && !s.birdTemplates[1].empty() && f.motionScale >= 1.f &&
+        s.visualMode == ShowVisualMode::FullFilm360s &&
+        filmTime >= kDawnEgretStart && filmTime <= kDawnEgretEnd) {
+        std::array<BirdTransforms,kDawnEgretCount> egrets;
+        for (uint32_t bird = 0; bird < kDawnEgretCount; ++bird)
+            egrets[bird] = articulateCityBird(dawnEgretPose(filmTime,bird,cityFlightMotion(f)));
+        for (const auto& part : s.birdTemplates[1]) {
+            DrawConstants draw{};
+            draw.mat = part.sub.material;
+            draw.part = part.sub.part;
+            const auto joint = part.sub.part - kEgretBody;
+            for (uint32_t bird = 0; bird < kDawnEgretCount; ++bird) {
+                const auto& transform = egrets[bird].at(joint);
+                std::copy(transform.begin(),transform.end(),draw.rows);
+                append(part,draw,0u,true,false,kCityBirdCount + 1u + bird);
+            }
+        }
+    }
+
     // Append dynamic rigid-body ray-traced physics marbles (with 3D rotation quaternion + world motion vectors!)
     for (uint32_t m = 0; m < dynMarbles; ++m) {
         const float rad = std::clamp(iv.marblePosRad[m][3], 0.005f, 0.25f);

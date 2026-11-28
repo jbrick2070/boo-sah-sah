@@ -373,7 +373,8 @@ bool DlssBridge::prepare(D3D12Context& context, ID3D12GraphicsCommandList* cmd, 
 #endif
 }
 
-void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds) {
+void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRenderer& scene, float frameSeconds,
+                         bool spatialOnly, bool evaluateDlss) {
 #ifdef BOO_HAS_DLSS
     auto& s = *impl_;
     constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -388,6 +389,7 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
     const bool resetHistory = s.historyReset || scene.dlssHistoryReset();
     const float dtMs = frameSeconds > 0.f ? frameSeconds * 1000.f : (1000.f / 60.f);
     NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_InvalidParameter;
+    if (evaluateDlss) {
 #ifdef BOO_HAS_DLSS_RR
     if (s.configuredRR) {
         if (depth && motion && scene.rrDiffuseAlbedo() && scene.rrSpecularAlbedo() &&
@@ -425,11 +427,14 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
         eval.InReset = resetHistory;
         result = NGX_D3D12_EVALUATE_DLSS_EXT(cmd,s.feature,s.params,&eval);
     }
-    const bool success = NVSDK_NGX_SUCCEED(result);
-    const bool spatialColor = !success || s.primePresentation;
-    s.status = !success ? RendererFeatureState::Unavailable :
-        (s.primePresentation ? RendererFeatureState::Idle : RendererFeatureState::Active);
-    if (s.configuredRR) s.rrStatus = s.status;
+    }
+    const bool success = evaluateDlss && NVSDK_NGX_SUCCEED(result);
+    const bool spatialColor = spatialOnly || !success || s.primePresentation;
+    if (evaluateDlss) {
+        s.status = !success ? RendererFeatureState::Unavailable :
+            (s.primePresentation ? RendererFeatureState::Idle : RendererFeatureState::Active);
+        if (s.configuredRR) s.rrStatus = s.status;
+    }
     if (spatialColor) {
         // A direct seek primes NGX privately. A failed evaluation may also have enqueued writes.
         // Serialize either case before the spatial pass overwrites the output.
@@ -438,13 +443,13 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
         barrier.UAV.pResource = s.fullColor.Get();
         cmd->ResourceBarrier(1,&barrier);
     }
-    s.primePresentation = false;
-    if (!success) {
+    if (evaluateDlss) s.primePresentation = false;
+    if (evaluateDlss && !success) {
         BOO_LOG_WARN("DLSS","Reconstruction failed, result " + std::to_string(static_cast<uint32_t>(result)));
         if (s.configuredRR) s.failedRR = s.configured;
         else s.failed = s.configured;
     }
-    s.historyReset = !success;
+    if (evaluateDlss) s.historyReset = !success;
     ID3D12DescriptorHeap* heaps[] = {s.descriptors.Get()};
     cmd->SetDescriptorHeaps(1,heaps);
     cmd->SetComputeRootSignature(s.root.Get());
@@ -458,7 +463,7 @@ void DlssBridge::resolve(ID3D12GraphicsCommandList* cmd, const TrilogyMeshRender
     transition(cmd,s.inputDistance.Get(),read,pixel);
     transition(cmd,s.inputColor.Get(),read,pixel);
 #else
-    (void)cmd; (void)scene; (void)frameSeconds;
+    (void)cmd; (void)scene; (void)frameSeconds; (void)spatialOnly; (void)evaluateDlss;
 #endif
 }
 }

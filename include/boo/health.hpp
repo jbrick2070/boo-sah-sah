@@ -94,6 +94,9 @@ public:
     bool safetyResolutionActive() const noexcept { return safetyResolutionActive_; }
     QualityPresetSpec effectiveSpec(QualityPresetSpec spec) const noexcept;
 
+    // Apply memory pressure independently when a timing sample is unsuitable for learning.
+    bool updateMemoryPressure(uint64_t estimatedVramBytes, uint64_t softVramCapBytes) noexcept;
+
     void pushFrameSample(
         double gpuFrameMs,
         uint64_t estimatedVramBytes,
