@@ -60,10 +60,10 @@ struct RelayFlyby {
 };
 // Both the full film and the trilogy express the Shenzhen sequence in 60 local seconds.
 RelayFlyby relayFlyby(float localSeconds, float motionScale) noexcept;
-enum class CityBirdSpecies { BlackKite, Egret };
+enum class CityBirdSpecies { BlackKite, Egret, NightHeron };
 // Each body is followed by the left/right inner wings and the left/right hands.
 // Bird-local axes are +Z forward and +Y up. Both hinges turn about local Z.
-inline constexpr uint32_t kKiteBody = 160, kEgretBody = 165;
+inline constexpr uint32_t kKiteBody = 160, kEgretBody = 165, kNightHeronBody = 192;
 inline constexpr float kBirdShoulderX = .09f, kBirdWristX = .52f;
 Bmesh buildCityBird(CityBirdSpecies species);
 inline constexpr uint32_t kSkyBlimp = 172u;

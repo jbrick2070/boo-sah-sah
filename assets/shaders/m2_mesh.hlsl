@@ -1434,6 +1434,14 @@ bool citySkyFinish(uint part, uint material, inout float3 base, inout float4 orm
         ormt = float4(1.0, material == 26u ? 0.47f : 0.72f, material == 26u ? 0.56f : 0.0f, 0.0);
         return true;
     }
+    if (part >= 192u && part <= 196u) {
+        // Night heron: pale underside, slate plumage, and black crown and bill.
+        if (material == 33u) base = float3(0.60f, 0.59f, 0.54f);
+        else if (material == 37u) base = float3(0.035f, 0.038f, 0.045f);
+        else base = float3(0.20f, 0.22f, 0.26f);
+        ormt = float4(1.0f, 0.82f, 0.0f, 0.0f);
+        return true;
+    }
     if (part < 160u || part > 169u) return false;
     if (part < 165u) {
         // Warm umber coverts and darker, spread outer flight feathers.

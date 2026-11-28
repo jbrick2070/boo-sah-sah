@@ -77,6 +77,19 @@ struct BirdFlightPose {
     float wingLift, wingFlex; // Flex is relative to the inner wing, in radians.
 };
 
+// The solitary night heron flies away from the mirror on film time.
+// It is rendered only at full motion, where the camera reaches the hold.
+inline constexpr float kMirrorWitnessStart = 58.5f, kMirrorWitnessEnd = 66.f;
+inline BirdFlightPose mirrorWitnessPose(float filmTime, float motionScale) noexcept {
+    const float dt = filmTime - 59.5f;
+    const float motion = std::clamp(motionScale, 0.f, 1.f);
+    const float stroke = dt * 15.1f * std::max(motion, 0.35f) + 0.55f;
+    return {{-2.40f - 0.685f * dt, 13.825f - 0.35f * dt, -0.83f - 2.555f * dt},
+            std::atan2(-0.685f, -2.555f), -std::atan2(-0.35f, std::hypot(0.685f, 2.555f)),
+            -0.10f * motion, 0.65f, 0.08f + 0.52f * motion * std::sin(stroke),
+            -0.12f - 0.30f * motion * std::cos(stroke)};
+}
+
 // The closed circuit the film's birds fly in each city (world coordinates).
 struct BirdRoute { float anchor, speed, x, y, z, xs, xc, ys, yc, zs, zc; };
 inline constexpr BirdRoute birdRoute(uint32_t kit, bool trilogy) noexcept {

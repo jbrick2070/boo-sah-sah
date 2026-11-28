@@ -472,7 +472,7 @@ struct TrilogyMeshRenderer::Impl {
         std::array<float,3> detailCenter{};
     };
     std::vector<Part> parts;
-    std::array<std::vector<Part>,2> birdTemplates;
+    std::array<std::vector<Part>,3> birdTemplates;
     struct Chunk {
         uint32_t kit = 0;
         std::array<float,3> center{};
@@ -1461,6 +1461,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         if (!fault) {
             appendMesh(buildCityBird(CityBirdSpecies::BlackKite),2,s.birdTemplates[0]);
             appendMesh(buildCityBird(CityBirdSpecies::Egret),1,s.birdTemplates[1]);
+            appendMesh(buildCityBird(CityBirdSpecies::NightHeron),2,s.birdTemplates[2]);
         }
         for (size_t m = 0; m < kMarbleTemplateMats.size(); ++m) {
             BmeshSubmesh sph = appendSmoothSphereTemplate(vertices, indices, kMarbleTemplateMats[m], 900u + static_cast<uint32_t>(m));
@@ -1510,10 +1511,10 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         }
         const size_t orchidParts = std::count_if(s.parts.begin(),s.parts.end(),[](const auto& p){ return p.kit==3; });
         const size_t taipeiPlaneParts = std::count_if(s.parts.begin(),s.parts.end(),[](const auto& p){return p.kit==2 && p.sub.part==kSkyPlane;});
-        s.birdParts = static_cast<uint32_t>(std::max(s.birdTemplates[0].size(),s.birdTemplates[1].size()));
+        s.birdParts = static_cast<uint32_t>(std::max({s.birdTemplates[0].size(),s.birdTemplates[1].size(),s.birdTemplates[2].size()}));
         s.baseSceneInstances = s.parts.size() + InteractiveView::kMaxMarbles
             + kPlanterOrchids*orchidParts + kMaxDriftingPetals + taipeiPlaneParts
-            + size_t(kCityBirdCount) * s.birdParts + kMaxPhysxBodies
+            + size_t(kCityBirdCount + 1u) * s.birdParts + kMaxPhysxBodies
             + *std::max_element(cityCapacity.begin(),cityCapacity.end());
         // The flock begins with room for one unit; reserveWorkoutBirds() makes more when asked.
         s.workoutBirdCapacity = kInitialWorkoutBirds;
@@ -2379,6 +2380,20 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
                     std::copy(transform.begin(),transform.end(),draw.rows);
                     append(part,draw,0u,true,false,bird);
                 }
+            }
+        }
+        // An off-camera world actor, visible in the Act 2 mirror through the normal RT path.
+        if (!s.birdTemplates[2].empty() && f.motionScale >= 1.f &&
+            s.visualMode == ShowVisualMode::FullFilm360s && act == 2 && !trilogyRoutes &&
+            filmTime >= kMirrorWitnessStart && filmTime <= kMirrorWitnessEnd) {
+            const auto witness = articulateCityBird(mirrorWitnessPose(filmTime,flightMotion));
+            for (const auto& part : s.birdTemplates[2]) {
+                DrawConstants draw{};
+                draw.mat = part.sub.material;
+                draw.part = part.sub.part;
+                const auto& transform = witness.at(part.sub.part - kNightHeronBody);
+                std::copy(transform.begin(),transform.end(),draw.rows);
+                append(part,draw,0u,true,false,kCityBirdCount);
             }
         }
         // The workout flock joins them below, once everything that goes through append() is in.

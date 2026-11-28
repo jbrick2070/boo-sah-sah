@@ -16,6 +16,7 @@
 #include "boo/settings.hpp"
 #include "boo/spout_sender.hpp"
 #include "../../src/app/world_portal.h"
+#include "../../src/render/bird_flight.hpp"
 #include "boo/ui_text.hpp"
 #include "boo/results_text.hpp"
 
@@ -797,6 +798,165 @@ bool testFilmOrbits() {
                     BOO_CHECK(seek.eye[axis] == poses[i].eye[axis] && seek.target[axis] == poses[i].target[axis]);
                 }
                 BOO_CHECK(seek.fovYRadians == poses[i].fovYRadians);
+            }
+        }
+    }
+    return true;
+}
+
+bool testMirrorWitnessFrustum() {
+    using namespace boo;
+    const Bmesh bird = buildCityBird(CityBirdSpecies::NightHeron);
+    BOO_CHECK(!bird.vertices.empty());
+    const float scale = mirrorWitnessPose(59.5f, 1.f).scale;
+    const float halfSpan = std::max(std::abs(bird.bounds[0]), std::abs(bird.bounds[3])) * scale;
+    const float yExtent = std::max(std::abs(bird.bounds[1]), std::abs(bird.bounds[4]));
+    const float zExtent = std::max(std::abs(bird.bounds[2]), std::abs(bird.bounds[5]));
+    // Wing joints rotate in XY about points on X: this bounds every flap pose.
+    const float radius = std::hypot(halfSpan / scale + yExtent, zExtent) * scale;
+    for (float motion : {1.f}) {
+        for (int irisStep = 0; irisStep <= 20; ++irisStep) {
+            const float iris = irisStep * 0.05f;
+            const int steps = int(std::lround((kMirrorWitnessEnd - kMirrorWitnessStart) / .05f));
+            for (int step = 0; step <= steps; ++step) {
+            const float time = std::min(kMirrorWitnessStart + 0.05f * step, kMirrorWitnessEnd);
+                const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s,
+                    int64_t(std::lround(time * 48000.f)), 48000, iris, false, motion);
+                const auto pose = mirrorWitnessPose(time, motion);
+                const float dx = cam.target[0] - cam.eye[0];
+                const float dy = cam.target[1] - cam.eye[1];
+                const float dz = cam.target[2] - cam.eye[2];
+                const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const float horizontal = std::hypot(dx, dz);
+                const std::array<float, 3> forward{dx / length, dy / length, dz / length};
+                const std::array<float, 3> right{dz / horizontal, 0.f, -dx / horizontal};
+                const std::array<float, 3> up{-dx * dy / (horizontal * length), horizontal / length,
+                                               -dz * dy / (horizontal * length)};
+                const std::array<float, 3> delta{pose.center[0] - cam.eye[0], pose.center[1] - cam.eye[1],
+                                                  pose.center[2] - cam.eye[2]};
+                const auto dot = [&](const std::array<float, 3>& v) {
+                    return delta[0] * v[0] + delta[1] * v[1] + delta[2] * v[2];
+                };
+                const float depth = dot(forward), x = std::abs(dot(right)), y = std::abs(dot(up));
+                const float tanY = std::tan(cam.fovYRadians * 0.5f);
+                for (float aspect : {16.f / 9.f, 21.f / 9.f, 32.f / 9.f}) {
+                    const float tanX = tanY * aspect;
+                    // Sphere is fully outside at least one normalized frustum plane.
+                    const bool outside = depth < -radius ||
+                        x - depth * tanX > radius * std::sqrt(1.f + tanX * tanX) ||
+                        y - depth * tanY > radius * std::sqrt(1.f + tanY * tanY);
+                    BOO_CHECK(outside);
+                }
+            }
+        }
+    }
+    Bmesh cathedral;
+    std::string error;
+    BOO_CHECK(loadBmesh(resolveResourcePath("assets/meshes/enamel_cathedral.bmesh"), cathedral, &error));
+    // Sample triangles and interpolated smooth normals of the actual stela 205
+    // pane at the hold, then trace each reflected ray against the actual body.
+    const auto cam = evaluateShowCamera(ShowVisualMode::FullFilm360s,
+        int64_t(59.5f * 48000.f), 48000, .5f, false, 1.f);
+    const auto birdAtHold = mirrorWitnessPose(59.5f, 1.f);
+    float model[12];
+    writeModelTransform(model, birdAtHold.center.data(), birdAtHold.yaw, birdAtHold.pitch,
+                        birdAtHold.roll, birdAtHold.scale);
+    using Vec = std::array<float, 3>;
+    const auto dot3 = [](const Vec& a, const Vec& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    const auto sub3 = [](const Vec& a, const Vec& b) -> Vec { return {a[0]-b[0], a[1]-b[1], a[2]-b[2]}; };
+    const auto cross = [](const Vec& a, const Vec& b) -> Vec {
+        return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    };
+    bool reflected = false;
+    for (const auto& sub : cathedral.submeshes) {
+        if (sub.part != 205u || sub.material != 12u) continue;
+        for (uint32_t j = 0; j + 2 < sub.indexCount && !reflected; j += 3) {
+            const auto& a = cathedral.vertices[cathedral.indices[sub.firstIndex+j]];
+            const auto& b = cathedral.vertices[cathedral.indices[sub.firstIndex+j+1]];
+            const auto& c = cathedral.vertices[cathedral.indices[sub.firstIndex+j+2]];
+            for (int iu = 0; iu <= 8 && !reflected; ++iu) for (int iv = 0; iv <= 8-iu && !reflected; ++iv) {
+                const float u = iu/8.f, v = iv/8.f, w = 1.f-u-v;
+                Vec p{}, normal{};
+                for (int axis = 0; axis < 3; ++axis) {
+                    p[axis] = w*a.positionMaterial[axis]+u*b.positionMaterial[axis]+v*c.positionMaterial[axis];
+                    normal[axis] = w*a.normalPart[axis]+u*b.normalPart[axis]+v*c.normalPart[axis];
+                }
+                Vec incident{p[0]-cam.eye[0], p[1]-cam.eye[1], p[2]-cam.eye[2]};
+                const float il = std::sqrt(dot3(incident, incident));
+                const float nl = std::sqrt(dot3(normal, normal));
+                if (il < 1.e-5f || nl < 1.e-5f) continue;
+                for (int axis = 0; axis < 3; ++axis) { incident[axis] /= il; normal[axis] /= nl; }
+                const float incidence = dot3(incident, normal);
+                if (incidence >= 0.f) continue;
+                Vec ray{};
+                for (int axis = 0; axis < 3; ++axis) ray[axis] = incident[axis] - 2.f*incidence*normal[axis];
+                const Vec toBird = sub3(birdAtHold.center, p);
+                const float along = dot3(toBird, ray);
+                Vec separation{};
+                for (int axis = 0; axis < 3; ++axis) separation[axis] = toBird[axis]-along*ray[axis];
+                if (along <= 0.f || dot3(separation, separation) >= .25f*.25f) continue;
+
+                // Inverse of the renderer's uniform-scale model transform.
+                Vec originLocal{}, rayLocal{};
+                for (int axis = 0; axis < 3; ++axis) for (int row = 0; row < 3; ++row) {
+                    originLocal[axis] += model[4*row+axis]*(p[row]-model[4*row+3])/(scale*scale);
+                    rayLocal[axis] += model[4*row+axis]*ray[row]/(scale*scale);
+                }
+                for (const auto& body : bird.submeshes) {
+                    if (body.part != kNightHeronBody) continue;
+                    for (uint32_t k = 0; k + 2 < body.indexCount; k += 3) {
+                        const auto& va = bird.vertices[bird.indices[body.firstIndex+k]].positionMaterial;
+                        const auto& vb = bird.vertices[bird.indices[body.firstIndex+k+1]].positionMaterial;
+                        const auto& vc = bird.vertices[bird.indices[body.firstIndex+k+2]].positionMaterial;
+                        const Vec a0{va[0],va[1],va[2]}, b0{vb[0],vb[1],vb[2]}, c0{vc[0],vc[1],vc[2]};
+                        const Vec e1 = sub3(b0,a0), e2 = sub3(c0,a0), h = cross(rayLocal,e2);
+                        const float det = dot3(e1,h);
+                        if (std::abs(det) < 1.e-7f) continue;
+                        const Vec s = sub3(originLocal,a0);
+                        const float hitU = dot3(s,h)/det;
+                        const Vec q = cross(s,e1);
+                        const float hitV = dot3(rayLocal,q)/det;
+                        if (hitU >= 0.f && hitV >= 0.f && hitU+hitV <= 1.f && dot3(e2,q)/det > 0.f) {
+                            reflected = true;
+                            break;
+                        }
+                    }
+                    if (reflected) break;
+                }
+            }
+        }
+    }
+    BOO_CHECK(reflected);
+
+    // Triangle AABBs enclose the loaded stelae, ribs, columns and canopy.
+    // Their distance is a conservative lower bound on distance to the mesh.
+    // Add half a sampling interval of travel to cover the continuous route.
+    const int steps = int(std::lround((kMirrorWitnessEnd - kMirrorWitnessStart) / .05f));
+    const auto first = mirrorWitnessPose(kMirrorWitnessStart, 1.f).center;
+    const auto last = mirrorWitnessPose(kMirrorWitnessEnd, 1.f).center;
+    const float routeLength = std::sqrt((last[0]-first[0])*(last[0]-first[0]) +
+        (last[1]-first[1])*(last[1]-first[1]) + (last[2]-first[2])*(last[2]-first[2]));
+    const float clearance = 5.f + halfSpan + routeLength / (2.f * steps);
+    for (const auto& sub : cathedral.submeshes) {
+        if (sub.part < 200u || sub.part > 219u) continue;
+        for (uint32_t j = 0; j + 2 < sub.indexCount; j += 3) {
+            const auto& a = cathedral.vertices[cathedral.indices[sub.firstIndex+j]].positionMaterial;
+            const auto& b = cathedral.vertices[cathedral.indices[sub.firstIndex+j+1]].positionMaterial;
+            const auto& c = cathedral.vertices[cathedral.indices[sub.firstIndex+j+2]].positionMaterial;
+            std::array<float, 3> lo{}, hi{};
+            for (int axis = 0; axis < 3; ++axis) {
+                lo[axis] = std::min({a[axis], b[axis], c[axis]});
+                hi[axis] = std::max({a[axis], b[axis], c[axis]});
+            }
+            for (int step = 0; step <= steps; ++step) {
+                const float time = std::min(kMirrorWitnessStart + .05f * step, kMirrorWitnessEnd);
+                const auto p = mirrorWitnessPose(time, 1.f).center;
+                float distance2 = 0.f;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float d = std::max({lo[axis]-p[axis], 0.f, p[axis]-hi[axis]});
+                    distance2 += d*d;
+                }
+                BOO_CHECK(distance2 >= clearance*clearance);
             }
         }
     }
@@ -1750,6 +1910,7 @@ int main() {
     runTest("LastLight", testLastLight);
     runTest("TrilogyMeshAudioAndCamera",testTrilogyMeshAudioAndCamera);
     runTest("FilmOrbits", testFilmOrbits);
+    runTest("MirrorWitnessFrustum", testMirrorWitnessFrustum);
     runTest("AircraftHeroFraming",testAircraftHeroFraming);
     runTest("ShowVisualModeRoutingAndEnamelMicrocosmKit", testShowVisualModeRoutingAndEnamelMicrocosmKit);
     runTest("MadameNModelManifestAndAsyncFallback", testMadameNModelManifestAndAsyncFallback);

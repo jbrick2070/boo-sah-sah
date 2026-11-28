@@ -130,6 +130,9 @@ Full screen is a borderless window that exactly covers the display, presented th
 
 On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick and playback smooth. AMD graphics cards also start with raster lighting and without the neural suite, and if any card resets, the app comes back that way. Naming a preset with `--preset` (even `safe`) turns the light start off: the app then builds everything the chip supports, and a first start takes much longer.
 
+The Act 2 mirror shows ray-traced reflections only when hardware ray tracing is active.
+The night heron is absent when motion is reduced below full motion.
+
 ### Loading bar
 
 While the app starts, a bar under **Loading** shows how far it has got. It counts bytes, not seconds. It is the average of four gauges, each read from the machine, and the line under the bar gives their figures:

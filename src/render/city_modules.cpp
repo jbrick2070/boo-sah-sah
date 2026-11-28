@@ -1233,7 +1233,9 @@ PlumageSection birdSection(float z,float y,float width,float depth,float x=0.f) 
     return {{x,y,z},{width,0,0},{0,depth,0}};
 }
 
-void birdWing(ModuleBuilder& b,uint32_t bodyPart,bool egret,bool left) {
+void birdWing(ModuleBuilder& b,uint32_t bodyPart,CityBirdSpecies species,bool left) {
+    const bool egret=species==CityBirdSpecies::Egret;
+    const bool rounded=species!=CityBirdSpecies::BlackKite;
     const float side=left ? -1.f : 1.f;
     auto station=[side](float x,float y,float z,float chord,float thickness) -> PlumageSection {
         return {{side*x,y,z},{0,0,-side*chord},{0,thickness,0}};
@@ -1243,15 +1245,15 @@ void birdWing(ModuleBuilder& b,uint32_t bodyPart,bool egret,bool left) {
     featherVolume(b,mat,{
         station(.045f,0,-.018f,.12f,.037f),
         station(.16f,.013f,-.015f,.17f,.038f),
-        station(.30f,.028f,egret ? -.023f : .008f,egret ? .185f : .153f,.032f),
-        station(.435f,.023f,egret ? -.015f : .030f,.143f,.025f),
+        station(.30f,.028f,rounded ? -.023f : .008f,rounded ? .185f : .153f,.032f),
+        station(.435f,.023f,rounded ? -.015f : .030f,.143f,.025f),
         station(kBirdWristX+.015f,.002f,.012f,.108f,.018f)});
 
     b.part=bodyPart+(left ? 3u : 4u);
     featherVolume(b,mat,{
         station(kBirdWristX-.029f,0,.013f,.114f,.020f),
         station(.60f,.004f,.014f,.107f,.018f),
-        station(.675f,.008f,egret ? -.010f : -.001f,.071f,.014f),
+        station(.675f,.008f,rounded ? -.010f : -.001f,.071f,.014f),
         station(.714f,.010f,-.017f,.022f,.007f)});
     // Primaries spread like fingers on a kite. The egret has a rounder hand:
     // its broad overlapping vanes show short notches when seen against the sky.
@@ -1259,11 +1261,11 @@ void birdWing(ModuleBuilder& b,uint32_t bodyPart,bool egret,bool left) {
         const float u=float(i)*.25f;
         const float rootX=.68f-.096f*u;
         const float rootZ=.034f-.116f*u;
-        const float tipX=egret ? .783f+.083f*std::sin(2.85f*u)-.024f*u
+        const float tipX=rounded ? .783f+.083f*std::sin(2.85f*u)-.024f*u
                                : .829f+.013f*std::sin(4.0f*u)-.118f*u;
-        const float tipZ=egret ? .020f-.182f*u : .029f-.249f*u;
-        const float vane=egret ? .027f : .021f;
-        featherVolume(b,egret ? mat : 37u,{
+        const float tipZ=rounded ? .020f-.182f*u : .029f-.249f*u;
+        const float vane=rounded ? .027f : .021f;
+        featherVolume(b,rounded ? mat : 37u,{
             station(rootX,.004f,rootZ,vane,.010f),
             station(rootX+.54f*(tipX-rootX),.014f+.010f*u,rootZ+.40f*(tipZ-rootZ),vane,.008f),
             station(tipX,.032f-.018f*u,tipZ,.0035f,.003f)});
@@ -1434,49 +1436,82 @@ Bmesh buildShanghaiPoliceHelicopter() {
 
 Bmesh buildCityBird(CityBirdSpecies species) {
     const bool egret=species==CityBirdSpecies::Egret;
-    const uint32_t body=egret ? kEgretBody : kKiteBody;
+    const bool heron=species==CityBirdSpecies::NightHeron;
+    const uint32_t body=heron ? kNightHeronBody : egret ? kEgretBody : kKiteBody;
     const uint32_t mat=egret ? 33u : 26u;
     ModuleBuilder b{body,{}};
-    featherVolume(b,mat,{
-        birdSection(-.30f,-.012f,.018f,.025f),birdSection(-.20f,-.008f,.071f,.067f),
-        birdSection(-.054f,-.006f,.105f,.091f),birdSection(.072f,.002f,.084f,.085f),
-        birdSection(.128f,.018f,.046f,.050f)});
-    if (egret) {
-        // Great egrets tuck the neck into an S in flight, with the legs visibly
-        // extending aft of their short white tail and a long, straight bill.
-        featherVolume(b,mat,{
-            birdSection(.054f,.027f,.054f,.055f),birdSection(.128f,.043f,.058f,.068f),
-            birdSection(.175f,.084f,.044f,.067f),birdSection(.208f,.125f,.044f,.049f),
-            birdSection(.257f,.124f,.043f,.040f),birdSection(.284f,.117f,.025f,.023f)});
+    if (heron) {
+        // Stocky pale underside and folded neck, with a black mantle and crown.
+        // Stretch the body length without moving the wing hinges.
+        auto heronSection=[](float z,float y,float width,float depth,float x=0.f) {
+            return birdSection(z*1.2f,y,width,depth,x);
+        };
+        featherVolume(b,33,{
+            heronSection(-.28f,-.015f,.025f,.027f),heronSection(-.20f,-.012f,.085f,.075f),
+            heronSection(-.045f,-.004f,.125f,.105f),heronSection(.085f,.012f,.105f,.100f),
+            heronSection(.145f,.045f,.066f,.070f),heronSection(.198f,.090f,.055f,.052f),
+            heronSection(.255f,.092f,.044f,.040f),heronSection(.277f,.084f,.025f,.024f)});
+        featherVolume(b,37,{
+            heronSection(-.30f,.036f,.031f,.014f),heronSection(-.20f,.062f,.077f,.023f),
+            heronSection(-.045f,.090f,.105f,.029f),heronSection(.075f,.096f,.088f,.028f),
+            heronSection(.14f,.092f,.046f,.023f)});
         featherVolume(b,26,{
-            birdSection(.261f,.118f,.025f,.022f),birdSection(.328f,.115f,.018f,.014f),
-            birdSection(.452f,.103f,.0025f,.0025f)});
-        featherVolume(b,mat,{
-            birdSection(-.389f,-.020f,.069f,.011f),birdSection(-.293f,-.009f,.087f,.022f),
-            birdSection(-.182f,-.003f,.055f,.025f)});
+            heronSection(-.36f,-.012f,.045f,.009f),heronSection(-.27f,-.008f,.078f,.018f),
+            heronSection(-.16f,0.f,.055f,.025f)});
+        featherVolume(b,37,{
+            heronSection(.175f,.126f,.037f,.013f),heronSection(.218f,.137f,.047f,.018f),
+            heronSection(.264f,.122f,.030f,.012f)});
+        featherVolume(b,37,{
+            heronSection(.257f,.085f,.026f,.021f),heronSection(.315f,.082f,.017f,.014f),
+            heronSection(.375f,.077f,.0025f,.0025f)});
+        // The tucked feet leave only short toes visible beyond the tail.
         for (float side:{-1.f,1.f})
             featherVolume(b,37,{
-                birdSection(-.645f,-.090f,.004f,.004f,side*.050f),
-                birdSection(-.575f,-.084f,.009f,.006f,side*.047f),
-                birdSection(-.380f,-.066f,.009f,.009f,side*.043f),
-                birdSection(-.166f,-.050f,.013f,.012f,side*.038f)});
+                heronSection(-.395f,-.030f,.003f,.003f,side*.040f),
+                heronSection(-.365f,-.029f,.006f,.005f,side*.040f),
+                heronSection(-.27f,-.026f,.009f,.007f,side*.038f)});
     } else {
         featherVolume(b,mat,{
-            birdSection(.078f,.033f,.069f,.065f),birdSection(.155f,.061f,.059f,.063f),
-            birdSection(.206f,.062f,.045f,.048f),birdSection(.225f,.052f,.025f,.028f)});
-        featherVolume(b,37,{
-            birdSection(.202f,.055f,.031f,.023f),birdSection(.244f,.048f,.019f,.016f),
-            birdSection(.264f,.019f,.005f,.007f)});
-        // Long outer rectrices frame the shallow V of the black kite's tail.
-        for (float side:{-1.f,1.f})
+            birdSection(-.30f,-.012f,.018f,.025f),birdSection(-.20f,-.008f,.071f,.067f),
+            birdSection(-.054f,-.006f,.105f,.091f),birdSection(.072f,.002f,.084f,.085f),
+            birdSection(.128f,.018f,.046f,.050f)});
+        if (egret) {
+            // Great egrets tuck the neck into an S in flight, with the legs visibly
+            // extending aft of their short white tail and a long, straight bill.
             featherVolume(b,mat,{
-                birdSection(-.452f,-.025f,.016f,.0045f,side*.112f),
-                birdSection(-.396f,-.020f,.040f,.008f,side*.082f),
-                birdSection(-.330f,-.018f,.071f,.010f,side*.047f),
-                birdSection(-.173f,-.010f,.038f,.018f,side*.019f)});
+                birdSection(.054f,.027f,.054f,.055f),birdSection(.128f,.043f,.058f,.068f),
+                birdSection(.175f,.084f,.044f,.067f),birdSection(.208f,.125f,.044f,.049f),
+                birdSection(.257f,.124f,.043f,.040f),birdSection(.284f,.117f,.025f,.023f)});
+            featherVolume(b,26,{
+                birdSection(.261f,.118f,.025f,.022f),birdSection(.328f,.115f,.018f,.014f),
+                birdSection(.452f,.103f,.0025f,.0025f)});
+            featherVolume(b,mat,{
+                birdSection(-.389f,-.020f,.069f,.011f),birdSection(-.293f,-.009f,.087f,.022f),
+                birdSection(-.182f,-.003f,.055f,.025f)});
+            for (float side:{-1.f,1.f})
+                featherVolume(b,37,{
+                    birdSection(-.645f,-.090f,.004f,.004f,side*.050f),
+                    birdSection(-.575f,-.084f,.009f,.006f,side*.047f),
+                    birdSection(-.380f,-.066f,.009f,.009f,side*.043f),
+                    birdSection(-.166f,-.050f,.013f,.012f,side*.038f)});
+        } else {
+            featherVolume(b,mat,{
+                birdSection(.078f,.033f,.069f,.065f),birdSection(.155f,.061f,.059f,.063f),
+                birdSection(.206f,.062f,.045f,.048f),birdSection(.225f,.052f,.025f,.028f)});
+            featherVolume(b,37,{
+                birdSection(.202f,.055f,.031f,.023f),birdSection(.244f,.048f,.019f,.016f),
+                birdSection(.264f,.019f,.005f,.007f)});
+            // Long outer rectrices frame the shallow V of the black kite's tail.
+            for (float side:{-1.f,1.f})
+                featherVolume(b,mat,{
+                    birdSection(-.452f,-.025f,.016f,.0045f,side*.112f),
+                    birdSection(-.396f,-.020f,.040f,.008f,side*.082f),
+                    birdSection(-.330f,-.018f,.071f,.010f,side*.047f),
+                    birdSection(-.173f,-.010f,.038f,.018f,side*.019f)});
+        }
     }
-    birdWing(b,body,egret,true);
-    birdWing(b,body,egret,false);
+    birdWing(b,body,species,true);
+    birdWing(b,body,species,false);
     return b.finish();
 }
 
