@@ -989,6 +989,60 @@ bool isDistrictGlazing(uint m, uint partId) {
     return isCurtainWall(m) && (act == 1u || (act == 2u && ((partId >= 2u && partId <= 4u) || partId == 61u || partId == 62u)));
 }
 
+// The opening's ignition starts gently, swells through the blue hour, and finishes by 32 s.
+float windowNightProgress() {
+    return smoothstep(23.0f, 32.0f, time);
+}
+
+// A single optional ballast strike. Full night is exactly neutral; reduced flash disables it.
+float windowIgnition(float nightProgress, float roomOrder, float flickHash, out float strikeTint) {
+    strikeTint = 0.0f;
+    if (nightProgress <= 0.0f) return 0.0f;
+    if (nightProgress >= 1.0f) return 1.0f;
+    bool reducedFlash = (interFlags & (1u << 14u)) != 0u;
+    float age = nightProgress - lerp(0.01f, 0.91f, saturate(roomOrder));
+    if (age <= 0.0f) return 0.0f;
+    float ramp = reducedFlash ? 0.068f : 0.034f;
+    if (!reducedFlash && flickHash < 0.08f) {
+        float strikePulse = smoothstep(0.0f, 0.011f, age) * (1.0f - smoothstep(0.011f, 0.030f, age));
+        float catchRamp = smoothstep(0.020f, 0.056f, age);
+        strikeTint = strikePulse * 0.65f + catchRamp * (1.0f - catchRamp) * 0.60f;
+        return saturate(max(catchRamp, 0.78f * strikePulse));
+    }
+    return smoothstep(0.0f, ramp, age);
+}
+
+// Use the actual room grouping and floor coordinates for every district LOD.
+// The same height rule is also used by the non-district glazing below.
+float ignitionOrder(float orderHash, float storeyCentre) {
+    return lerp(orderHash, saturate((storeyCentre + 0.4f) / 16.0f), 0.15f);
+}
+
+float3 facadeIgnition(uint m, uint buildingSeed, float3 p, float3 n, float3 footprint) {
+    bool front = abs(n.z) >= abs(n.x);
+    bool hotel = m == 13u;
+    bool campus = m == 5u;
+    bool apartments = act == 2u;
+    float bayWidth = apartments ? (hotel ? 0.68f : 0.52f) : (hotel ? 0.78f : (campus ? 1.15f : 0.62f));
+    float floorHeight = apartments ? 0.49f : (hotel ? 0.57f : (campus ? 0.82f : 0.67f));
+    float roomBays = hotel ? 1.0f : (apartments ? 2.0f : (campus ? 4.0f : 6.0f));
+    float roomWidth = bayWidth * roomBays;
+    float face = front ? (n.z >= 0.0f ? 0.0f : 1.0f) : (n.x >= 0.0f ? 2.0f : 3.0f);
+    float2 cell = floor(float2((front ? p.x : p.z) / roomWidth, (p.y + 0.31f) / floorHeight));
+    float seed = float(buildingSeed & 65535u);
+    float orderHash = hash21(cell + float2(seed * 0.137f + face * 19.1f, seed * 0.071f + 41.3f));
+    float flickHash = hash21(cell.yx + float2(seed * 0.053f + face * 31.7f, seed * 0.113f + 73.1f));
+    float storeyCentre = (cell.y + 0.5f) * floorHeight - 0.31f;
+    float progress = windowNightProgress();
+    float strike = 0.0f;
+    float switched = windowIgnition(progress, ignitionOrder(orderHash, storeyCentre), flickHash, strike);
+    float2 width = float2((front ? footprint.x : footprint.z) / roomWidth, footprint.y / floorHeight);
+    float resolved = 1.0f - smoothstep(0.20f, 0.60f, max(width.x, width.y));
+    float average = saturate((progress - 0.01f) / 0.90f);
+    float night = lerp(average, switched, resolved);
+    return night * lerp(float3(1.0f, 1.0f, 1.0f), float3(0.76f, 0.96f, 1.16f), strike * resolved);
+}
+
 // City street furniture (module part 63) and rooftop sets (64), src/render/city_modules.cpp. A tree or
 // a lamp is one mesh in one material, told apart by height in its own frame (0 at the ground, 1 at its
 // top), so each costs one instance. Trees: bark below 0.30 of the height, leaves varied tree by tree.
@@ -1196,6 +1250,14 @@ float3 shadeBlockWindows(uint m, uint buildingSeed, float3 p, float3 n, float3 f
     float3 gallery = housing ? float3(0.51, 0.24, 0.095) :
                     (jade ? float3(0.13, 0.48, 0.43) : float3(0.52, 0.31, 0.14));
     float band = audioBandForBuilding(float(buildingSeed & 255u));
+    if (duskOpening() && time > 18.0f && time < 32.0f) {
+        float oldNight = 1.0f - smoothstep(0.08f, 0.68f, daylight);
+        float3 ignition = facadeIgnition(m, buildingSeed, p, n, footprint);
+        // The old curve only lends a faint 10 % floor; each room's own ignition supplies the rest, so the
+        // city visibly switches on window by window instead of all at once.
+        float floorNight = min(oldNight, 0.1f);
+        return (rooms + gallery * accent) * (floorNight + (1.0f - floorNight) * ignition) * (1.0f + 0.20f * band);
+    }
     return (rooms + gallery * accent) * ((1.0 - smoothstep(0.08, 0.68, daylight)) * (1.0 + 0.20 * band));
 }
 
@@ -1324,6 +1386,12 @@ float3 shadeDistrictFacade(uint m, uint buildingSeed, float3 p, float3 geomNorma
     base = lerp(base, blockBase, blockWeight);
     rough = lerp(rough, blockRough, blockWeight);
     metallic = lerp(metallic, blockMetallic, blockWeight);
+    if (duskOpening() && time > 18.0f && time < 32.0f) {
+        float3 ignition = facadeIgnition(m, buildingSeed, p, geomNormal, footprint);
+        float floorNight = min(night, 0.1f);
+        float3 lit = (light + trim * gallery * run * (campus ? 0.85f : 0.48f)) * (floorNight + (1.0f - floorNight) * ignition) * wall;
+        return lerp(lit, blockLight, blockWeight);
+    }
     return lerp((light + trim * gallery * run * (campus ? 0.85f : 0.48f)) * night * wall, blockLight, blockWeight);
 }
 
@@ -1582,6 +1650,19 @@ float3 emissive(uint m, float3 p, float filterW) {
         float band = audioBandForBuilding(bldgId);
         float meter = smoothstep(0.0, 0.20, band - frac(flr / 40.0) * 0.92);
         float audioGain = 1.0 + (0.14 * band + 0.38 * meter) * (1.0 - lodBlend * 0.5);
+        if (duskOpening() && time > 18.0f && time < 32.0f) {
+            float baseNight = windowNightProgress();
+            float roomHash = hash21(float2(flr * 2.13f + bldgId * 0.41f, bay * 1.79f + 13.7f));
+            float flickHash = hash21(float2(bay * 3.47f + bldgId, flr * 1.91f + 29.3f));
+            float roomOrder = ignitionOrder(roomHash, (flr + 0.5f) * floorH);
+            float roomStrike = 0.0f;
+            float roomSwitch = windowIgnition(baseNight, roomOrder, flickHash, roomStrike);
+            float ignLod = smoothstep(0.20f, 0.60f, filterW);
+            float winNight = lerp(roomSwitch, saturate((baseNight - 0.01f) / 0.90f), ignLod);
+            float3 strikeCol = lerp(float3(1.0f, 1.0f, 1.0f), float3(0.76f, 0.96f, 1.16f), roomStrike * (1.0f - ignLod));
+            float floorNight = min(nightFactor, 0.1f);
+            return winCol * (winFactor * intensity * audioGain) * (floorNight + (1.0f - floorNight) * strikeCol * winNight);
+        }
         return winCol * (winFactor * intensity * nightFactor * audioGain);
     }
     if (m == 21u) {
