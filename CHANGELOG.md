@@ -11,6 +11,7 @@ All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 - **Egrets leave at dawn** past the bathroom window; close-up material details on the enamel, Madame N's iris, the parcel latch and the canopy ribbon; steam that clears from the dawn mirror.
 - **Before/after wipes in the Hardware Solos**: LIVE DXR / SUB RAST, LIVE CUDA / SUB HLSL, LIVE NPU / SCRIPT LIGHT, rendered for real on both sides and shown only where the hardware runs the live path.
 - **GPUs without ray tracing**: glass now shows the scene behind it instead of a stand-in.
+- **GPUs without CUDA** now show the particle vortex around the orchid in the sanctuary act, following the CUDA formation, and the canopy ribbons glow on integrated graphics.
 - **Lite mode** for Intel HD/UHD 500-600 graphics and WARP (960x540, lighter effects), an automatic step down from Safe, and a 640x360 safety rung. Heavy services no longer start before the preset is chosen, and Safe and Lite allocate much less GPU memory.
 - **The on-screen dashboard is cached**: it cost 25 ms per frame on Intel Iris Xe; now about 0.3 ms. Lite on Iris Xe runs at 44-60 fps with the dashboard on.
 - **Testing**: a cross-GPU capture comparison with a pixel tolerance (`tools/compare_captures.py`), integration captures on the integrated GPU (`--low-power-gpu`), and bounds checks on every CPU write into mapped GPU buffers.
