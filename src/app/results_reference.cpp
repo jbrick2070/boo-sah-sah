@@ -10,6 +10,8 @@ namespace {
 using E = BenchmarkEvidence;
 using F = BenchmarkFeature;
 constexpr std::string_view referenceBuild = "2.1.0.0";
+constexpr double referenceColdStartupSeconds = 36.7; // 35.8 and 37.7 s with --cold-shader-cache, 2026-11-28
+constexpr double referenceWarmStartupSeconds = 7.4;  // 7.25 and 7.52 s, 2026-11-28
 constexpr uint64_t referenceDriver = (32ull << 48) | (16ull << 16) | 2140ull;
 
 // First completed mains-powered measurement per protocol, documented in
@@ -33,7 +35,8 @@ constexpr ResultsReference reference(BenchmarkMode mode, unsigned inputWidth, un
     s.evidence = evidence;
     s.medianMs = median;
     s.worstMs = maximum;
-    return {referenceBuild.data(), s, {ResultsCpuModel::IntelCoreUltra9_275HX, ResultsNpuModel::IntelAiBoost}};
+    return {referenceBuild.data(), s, {ResultsCpuModel::IntelCoreUltra9_275HX, ResultsNpuModel::IntelAiBoost},
+            referenceColdStartupSeconds, referenceWarmStartupSeconds};
 }
 constexpr auto references = std::to_array<ResultsReference>({
     reference(BenchmarkMode::Raster, 1280, 720, 0.5819, 0.6006,
@@ -46,7 +49,8 @@ constexpr auto references = std::to_array<ResultsReference>({
 } // namespace
 
 const ResultsReference* resultsReferenceFor(const BenchmarkSnapshot& s) noexcept {
-    if (std::string_view(BOO_RELEASE_VERSION) != referenceBuild || s.outcome != ResultsOutcome::Completed ||
+    if ((std::string_view(BOO_RELEASE_VERSION) != referenceBuild &&
+         std::string_view(BOO_RELEASE_VERSION) != "2.1.1.0") || s.outcome != ResultsOutcome::Completed ||
         s.reason != BenchmarkReason::None || s.stage != BenchmarkStage::Finished ||
         s.warmupCount != kResultsWarmupCount || s.measuredCount != kResultsMeasuredCount ||
         !std::isfinite(s.medianMs) || !std::isfinite(s.worstMs) || s.medianMs < 0 || s.worstMs < s.medianMs)

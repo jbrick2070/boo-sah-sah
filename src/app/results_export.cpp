@@ -20,9 +20,6 @@ namespace boo {
 namespace {
 using Microsoft::WRL::ComPtr;
 using Path = std::filesystem::path;
-constexpr wchar_t kStem[] = L"BOO-SAH-SAH-results";
-constexpr wchar_t kPng[] = L"BOO-SAH-SAH-results.png";
-constexpr wchar_t kTxt[] = L"BOO-SAH-SAH-results.txt";
 constexpr int kMaxTextBytes = 8192;
 constexpr UINT kWidth = 1280, kMargin = 44;
 
@@ -30,23 +27,6 @@ struct Handle {
     HANDLE value;
     ~Handle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
 };
-
-bool isLocal(const Path& directory) {
-    auto localDrive = [](const Path& path) {
-        const auto type = GetDriveTypeW(path.root_path().c_str());
-        return type == DRIVE_FIXED || type == DRIVE_REMOVABLE || type == DRIVE_RAMDISK;
-    };
-    if (!directory.is_absolute() || directory.native().starts_with(L"\\\\") || !localDrive(directory)) return false;
-    Handle handle{CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
-        FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
-    if (handle.value == INVALID_HANDLE_VALUE) return false;
-    std::wstring final(32768, L'\0');
-    const auto n = GetFinalPathNameByHandleW(handle.value, final.data(), static_cast<DWORD>(final.size()), VOLUME_NAME_DOS);
-    if (!n || n >= final.size()) return false;
-    final.resize(n);
-    if (!final.starts_with(L"\\\\?\\") || final.size() < 7 || final[5] != L':' || final[6] != L'\\') return false;
-    return localDrive(Path(final.substr(4)));
-}
 
 bool encodeCard(const ResultCard& card, std::wstring_view language, bool rtl, std::vector<BYTE>& png, UINT& height) {
     ComPtr<IDWriteFactory> text;
@@ -195,68 +175,72 @@ bool writeAndVerify(const Path& file, const void* data, DWORD size) {
 }
 
 struct Staging {
-    Path folder;
-    bool active = false;
-    ~Staging() {
-        if (!active) return;
-        DeleteFileW((folder / kPng).c_str());
-        DeleteFileW((folder / kTxt).c_str());
-        RemoveDirectoryW(folder.c_str());
-    }
+    Path file;
+    bool active = true;
+    ~Staging() { if (active) DeleteFileW(file.c_str()); }
 };
 } // namespace
 
-bool detail::publishResultsPair(const Path& directory, const std::function<bool(const Path&)>& stage) {
+bool detail::publishResultsFile(const Path& destination, const std::function<bool(const Path&)>& stage) {
+    if (!destination.is_absolute() || destination.filename().empty()) return false;
     GUID guid{};
     wchar_t id[40]{};
     if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, id, 40)) return false;
-    Staging staged{directory / (std::wstring(L".BOO-SAH-SAH-") + id)};
-    if (!CreateDirectoryW(staged.folder.c_str(), nullptr)) return false;
-    staged.active = true;
-    if (!stage(staged.folder)) return false;
-
-    for (unsigned suffix = 1; suffix <= 10000; ++suffix) {
-        auto folder = directory / (std::wstring(kStem) + (suffix == 1 ? L"" : L"-" + std::to_wstring(suffix)));
-        if (MoveFileExW(staged.folder.c_str(), folder.c_str(), MOVEFILE_WRITE_THROUGH)) {
-            staged.active = false;
-            return true;
-        }
-        const auto error = GetLastError();
-        if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS) return false;
-    }
-    return false;
+    Staging staged{destination.parent_path() / (std::wstring(L".BOO-SAH-SAH-") + id + L".tmp")};
+    if (!stage(staged.file)) return false;
+    if (!MoveFileExW(staged.file.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return false;
+    staged.active = false;
+    return true;
 }
 
-bool writeResultsFiles(const Path& directory, const ResultCard& card, std::wstring_view language, bool rtl) {
-    if (card.rows.empty() || !isLocal(directory)) return false;
-    const std::wstring content = resultsCardText(card);
-    if (content.empty() || content.size() > kMaxTextBytes) return false;
-    const int length = static_cast<int>(content.size());
-    const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, content.data(), length, nullptr, 0, nullptr, nullptr);
-    if (bytes <= 0 || bytes > kMaxTextBytes) return false;
-    std::string utf8(bytes, '\0');
-    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, content.data(), length, utf8.data(), bytes, nullptr, nullptr) != bytes) return false;
+bool writeResultsFile(const Path& file, const ResultCard& card, std::wstring_view language, bool rtl,
+                      ResultsSaveKind kind) {
+    if (card.rows.empty()) return false;
+    if (kind == ResultsSaveKind::Text) {
+        const std::wstring content = resultsCardText(card);
+        if (content.empty() || content.size() > kMaxTextBytes) return false;
+        const int length = static_cast<int>(content.size());
+        const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, content.data(), length, nullptr, 0, nullptr, nullptr);
+        if (bytes <= 0 || bytes > kMaxTextBytes) return false;
+        std::string utf8(bytes, '\0');
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, content.data(), length, utf8.data(), bytes, nullptr, nullptr) != bytes) return false;
+        return detail::publishResultsFile(file, [&](const Path& stage) {
+            return writeAndVerify(stage, utf8.data(), static_cast<DWORD>(utf8.size()));
+        });
+    }
     std::vector<BYTE> png;
     UINT height{};
     if (!encodeCard(card, language, rtl, png, height)) return false;
-    return detail::publishResultsPair(directory, [&](const Path& stage) {
-        return writeAndVerify(stage / kTxt, utf8.data(), bytes) &&
-               writeAndVerify(stage / kPng, png.data(), static_cast<DWORD>(png.size()));
+    return detail::publishResultsFile(file, [&](const Path& stage) {
+        return writeAndVerify(stage, png.data(), static_cast<DWORD>(png.size()));
     });
 }
 
 ResultsSaveStatus pickAndSaveResults(HWND owner, const ResultCard& card, const std::wstring& language,
-                                    bool rtl, const std::wstring& title) {
-    ComPtr<IFileOpenDialog> picker;
-    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&picker))))
+                                    bool rtl, const std::wstring& title, ResultsSaveKind kind, BenchmarkMode mode) {
+    ComPtr<IFileSaveDialog> picker;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&picker))))
         return ResultsSaveStatus::Failed;
     FILEOPENDIALOGOPTIONS options{};
-    if (FAILED(picker->GetOptions(&options)) || FAILED(picker->SetOptions(options | FOS_PICKFOLDERS |
+    if (FAILED(picker->GetOptions(&options)) || FAILED(picker->SetOptions(options | FOS_OVERWRITEPROMPT |
         FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_NOCHANGEDIR))) return ResultsSaveStatus::Failed;
-    picker->SetTitle(title.c_str());
+    const bool picture = kind == ResultsSaveKind::Picture;
+    const COMDLG_FILTERSPEC filter[] = {{picture ? L"PNG image" : L"Text file", picture ? L"*.png" : L"*.txt"}};
+    SYSTEMTIME today{};
+    GetLocalTime(&today);
+    wchar_t date[16]{};
+    swprintf_s(date, L"%04u-%02u-%02u", today.wYear, today.wMonth, today.wDay);
+    const wchar_t* modeName = mode == BenchmarkMode::PathTracing ? L"Path tracing" :
+                              mode == BenchmarkMode::DlssQuality ? L"DLSS Quality" : L"Raster";
+    const std::wstring suggested = std::wstring(L"BOO SAH SAH benchmark ") + date + L" " + modeName +
+                                   (picture ? L".png" : L".txt");
+    if (FAILED(picker->SetTitle(title.c_str())) || FAILED(picker->SetFileTypes(1, filter)) ||
+        FAILED(picker->SetDefaultExtension(picture ? L"png" : L"txt")) || FAILED(picker->SetFileName(suggested.c_str())))
+        return ResultsSaveStatus::Failed;
     ComPtr<IShellItem> pictures;
     if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Pictures, KF_FLAG_DONT_VERIFY, nullptr, IID_PPV_ARGS(&pictures))))
-        picker->SetFolder(pictures.Get());
+        picker->SetDefaultFolder(pictures.Get());
     const HRESULT shown = picker->Show(owner);
     if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return ResultsSaveStatus::Cancelled;
     ComPtr<IShellItem> item;
@@ -264,6 +248,6 @@ ResultsSaveStatus pickAndSaveResults(HWND owner, const ResultCard& card, const s
     if (FAILED(shown) || FAILED(picker->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
         return ResultsSaveStatus::Failed;
     struct FreePath { PWSTR path; ~FreePath() { CoTaskMemFree(path); } } freePath{path};
-    return writeResultsFiles(path, card, language, rtl) ? ResultsSaveStatus::Saved : ResultsSaveStatus::Failed;
+    return writeResultsFile(path, card, language, rtl, kind) ? ResultsSaveStatus::Saved : ResultsSaveStatus::Failed;
 }
 } // namespace boo

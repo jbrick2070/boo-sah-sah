@@ -6,9 +6,26 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <optional>
 #include <vector>
 
 namespace boo {
+
+// Per-user measurements, tied to the app build and graphics UMD version.
+struct StartupTimingState {
+    std::string build;
+    uint64_t driverVersion = 0;
+    std::optional<double> coldSeconds, warmSeconds;
+};
+std::string_view releaseBuildString() noexcept;
+bool parseStartupTiming(std::string_view text, StartupTimingState& out);
+StartupTimingState loadStartupTiming(const std::filesystem::path& path);
+bool saveStartupTiming(const std::filesystem::path& path, const StartupTimingState& state);
+bool startupIsCold(const StartupTimingState& state, std::string_view build,
+                   uint64_t driverVersion, bool coldShaderCache) noexcept;
+bool recordStartupTiming(StartupTimingState& state, std::string_view build,
+                         uint64_t driverVersion, bool coldShaderCache, double seconds);
 
 struct QualityPresetSpec {
     QualityPresetId id = QualityPresetId::Balanced;
@@ -103,6 +120,7 @@ struct AppSettings {
     bool injectMediaFail = false;
 
     // Automation, diagnostics & ad-hoc numerical benchmark flags
+    bool startupTimingAutomation = false; // An explicit test option was passed, even if its value is zero.
     double autoExitSeconds = 0.0; // 0 = run until user closes window
     bool headlessProbeOnly = false;
     bool validateCuesOnly = false;
@@ -117,6 +135,7 @@ struct AppSettings {
     bool showHelp = false;
 };
 
+bool startupTimingShouldSave(const AppSettings& settings) noexcept;
 bool loadSettingsFromToml(const std::filesystem::path& path, AppSettings& ioSettings, std::string* outError = nullptr);
 bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioSettings, std::string* outError = nullptr);
 std::string buildCliHelpText();

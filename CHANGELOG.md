@@ -2,6 +2,14 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 2.1.1.0 — A clearer benchmark window
+
+- **The results window shows the answer first**: typical and worst GPU frame time next to the RTX 5080 reference, a one-line comparison, and what ran (mode, render and output size, whether DLSS ran on the GPU). The full table is behind **Details**.
+- **Two save buttons**: **Save picture…** saves one PNG and **Save text…** saves one text file, each through the standard Save As dialog. The old "save picture and text" folder picker is gone.
+- **A DLSS note** explains that DLSS adds a fixed cost per frame, so at the 1280 x 720 test size it can cost more than it saves.
+- **Cold and warm start rows**: a launch counts as cold when the app or graphics driver changed since the last launch. Your latest cold and warm start times are remembered; the RTX 5080 reference is 36.7 s cold and 7.4 s warm. The reference column no longer says "Unavailable" for startup.
+- New text in all 25 languages.
+
 ## 2.1.0.0 — A richer film, and smooth on integrated graphics
 
 - **The city lights up window by window** at 23-32 s of the opening, directly and in the pool.

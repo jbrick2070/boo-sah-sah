@@ -4,8 +4,7 @@
 #include <functional>
 
 namespace boo::detail {
-// Publishes a completed pair by renaming its private staging directory.
-// Used by the exporter and its partial-write rollback regression.
-bool publishResultsPair(const std::filesystem::path& destination,
+// Stage beside the destination and publish only after the complete write succeeds.
+bool publishResultsFile(const std::filesystem::path& destination,
                         const std::function<bool(const std::filesystem::path&)>& stage);
 }

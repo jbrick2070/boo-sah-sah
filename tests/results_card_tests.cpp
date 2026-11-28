@@ -72,64 +72,48 @@ void inspectPng(const fs::path& p) {
     CHECK(textRows > 200);
 }
 
-void pairedSaveTests(const boo::ResultsDialogContext& viewer, const boo::BenchmarkSnapshot& snapshot) {
+void singleSaveTests(const boo::ResultsDialogContext& viewer, const boo::BenchmarkSnapshot& snapshot) {
     GUID id{}; wchar_t unique[40]{};
     if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(id, unique, 40)) { CHECK(false); return; }
     const fs::path folder = fs::temp_directory_path() / (std::wstring(L"BooResultsTest-")+unique);
     if (!fs::create_directory(folder)) { CHECK(false); return; }
-    const auto tested = [&](const boo::ResultCard& card, const wchar_t* locale, bool rtl, const wchar_t* name) {
-        if (!boo::writeResultsFiles(folder, card, locale, rtl)) { CHECK(false); return; }
-        const auto bytes = read(folder/name/L"BOO-SAH-SAH-results.txt");
+    const auto txt = folder/L"results.txt", png = folder/L"results.png";
+    const auto tested = [&](const boo::ResultCard& card, const wchar_t* locale, bool rtl) {
+        CHECK(boo::writeResultsFile(txt, card, locale, rtl, boo::ResultsSaveKind::Text));
+        const auto bytes = read(txt);
         CHECK(!bytes.empty() && bytes.size() <= 8192);
         const auto n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
         std::wstring decoded(n, L'\0');
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), decoded.data(), n);
         CHECK(boo::resultsCardText(card) == decoded);
-        inspectPng(folder/name/L"BOO-SAH-SAH-results.png");
+        CHECK(boo::writeResultsFile(png, card, locale, rtl, boo::ResultsSaveKind::Picture));
+        inspectPng(png);
     };
     auto& strings = boo::UiStrings::instance();
     const auto english = boo::makeResultsCard(viewer, snapshot);
-    tested(english, L"en-US", false, L"BOO-SAH-SAH-results");
-    auto before = read(folder/L"BOO-SAH-SAH-results"/L"BOO-SAH-SAH-results.png");
+    tested(english, L"en-US", false);
+    auto before = read(png);
     CHECK(strings.load("assets/strings", "ar-SA"));
     const auto arabic = boo::makeResultsCard(viewer, snapshot);
     CHECK(strings.rightToLeft() && arabic.title != english.title);
-    tested(arabic, L"ar-SA", true, L"BOO-SAH-SAH-results-2");
-    CHECK(before == read(folder/L"BOO-SAH-SAH-results"/L"BOO-SAH-SAH-results.png"));
-    CHECK(before != read(folder/L"BOO-SAH-SAH-results-2"/L"BOO-SAH-SAH-results.png"));
+    tested(arabic, L"ar-SA", true);
+    CHECK(before != read(png));
     strings.clear();
     auto oversized = english;
     oversized.note.assign(8193,L'0');
-    CHECK(!boo::writeResultsFiles(folder, oversized, L"en-US", false));
-    // The private fixture grants read access and explicitly denies subdirectory
-    // creation, including on elevated accounts. A later save to its parent succeeds.
-    PSECURITY_DESCRIPTOR descriptor{};
-    CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        L"D:P(D;;0x4;;;WD)(A;;FA;;;OW)(A;;FA;;;SY)", SDDL_REVISION_1, &descriptor, nullptr));
-    if (descriptor) {
-        SECURITY_ATTRIBUTES attrs{sizeof(attrs),descriptor,FALSE};
-        const auto denied = folder/L"denied";
-        CHECK(CreateDirectoryW(denied.c_str(), &attrs));
-        CHECK(!boo::writeResultsFiles(denied, english, L"en-US", false));
-        CHECK(fs::is_empty(denied));
-        CHECK(RemoveDirectoryW(denied.c_str()));
-        LocalFree(descriptor);
-    }
-    // Inject a failed second write after both staged paths have appeared,
-    // matching an out-of-space error partway through the image. Neither may publish.
-    CHECK(!boo::detail::publishResultsPair(folder, [&](const fs::path& stage) {
-        std::ofstream(stage/L"BOO-SAH-SAH-results.txt") << "complete";
-        std::ofstream(stage/L"BOO-SAH-SAH-results.png") << "partial";
+    const auto originalText = read(txt);
+    CHECK(!boo::writeResultsFile(txt, oversized, L"en-US", false, boo::ResultsSaveKind::Text));
+    CHECK(read(txt) == originalText);
+    // A partial stage must be removed without replacing the previous file.
+    CHECK(!boo::detail::publishResultsFile(txt, [&](const fs::path& stage) {
+        std::ofstream(stage) << "partial";
         SetLastError(ERROR_DISK_FULL);
         return false;
     }));
+    CHECK(read(txt) == originalText);
     CHECK(std::distance(fs::directory_iterator(folder), fs::directory_iterator()) == 2);
-    tested(english, L"en-US", false, L"BOO-SAH-SAH-results-3");
-    for (auto name : {L"BOO-SAH-SAH-results", L"BOO-SAH-SAH-results-2", L"BOO-SAH-SAH-results-3"}) {
-        fs::remove(folder/name/L"BOO-SAH-SAH-results.png");
-        fs::remove(folder/name/L"BOO-SAH-SAH-results.txt");
-        fs::remove(folder/name);
-    }
+    fs::remove(txt);
+    fs::remove(png);
     fs::remove(folder);
 }
 }
@@ -142,7 +126,9 @@ int main() {
     viewer.vendorId = 0x10de;
     viewer.deviceId = 0x28a0;
     viewer.hardware = {ResultsCpuModel::IntelCoreI9_13900H, ResultsNpuModel::NoneDetected};
-    viewer.viewerStartupSeconds = 0.0;
+    viewer.startup.coldSeconds = 0.0;
+    viewer.startup.thisLaunchCold = true;
+    viewer.startup.measuredThisLaunch = true;
     BenchmarkSnapshot s;
     s.stage = BenchmarkStage::Finished;
     s.warmupCount = kResultsWarmupCount;
@@ -163,7 +149,10 @@ int main() {
     const auto raster = render();
     CHECK(field(raster, T::Outcome) == resultText(T::Completed));
     CHECK(field(raster, T::Typical) != resultText(T::Unavailable));
-    CHECK(field(raster, T::Startup) != resultText(T::Unavailable));
+    CHECK(field(raster, T::ColdStart) == L"0.0 (this launch)");
+    CHECK(field(raster, T::WarmStart) == resultText(T::NotMeasuredYet));
+    CHECK(field(raster, T::ColdStart, 1) == L"36.7");
+    CHECK(field(raster, T::WarmStart, 1) == L"7.4");
     CHECK(field(raster, T::Driver) == L"32.5.12.3456");
     const auto tableText = resultsCardText(raster);
     CHECK(tableText.find(L"987654321") == tableText.npos);
@@ -276,8 +265,8 @@ int main() {
         CHECK(field(render(), T::Typical) == resultText(T::Unavailable));
         CHECK(field(render(), T::Worst) == resultText(T::Unavailable));
     }
-    viewer.viewerStartupSeconds.reset();
-    CHECK(field(render(), T::Startup) == resultText(T::Unavailable));
+    viewer.startup.coldSeconds.reset();
+    CHECK(field(render(), T::ColdStart) == resultText(T::NotMeasuredYet));
     if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
         // Every localized report, including its numeric padding and UTF-8
         // glyphs, fits within the original privacy/export size limit.
@@ -289,7 +278,7 @@ int main() {
             CHECK(bytes > 0 && bytes <= 8192);
         }
         strings.clear();
-        pairedSaveTests(viewer, matchingSnapshot);
+        singleSaveTests(viewer, matchingSnapshot);
         CoUninitialize();
     } else CHECK(false);
     return failures ? 1 : 0;

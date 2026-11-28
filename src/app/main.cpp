@@ -45,6 +45,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -130,6 +131,29 @@ std::filesystem::path startupMemoryFile() {
     }
     CoTaskMemFree(local);
     return out;
+}
+
+std::filesystem::path startupTimingFile() {
+    PWSTR raw = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &raw)) || !raw) {
+        CoTaskMemFree(raw);
+        return {};
+    }
+    const auto folder = std::filesystem::path(raw) / L"BooSahSah";
+    CoTaskMemFree(raw);
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    return error ? std::filesystem::path{} : folder / L"startup-timings.txt";
+}
+
+uint64_t viewerDriverVersion(LUID luid) {
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    LARGE_INTEGER umd{};
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) ||
+        FAILED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) return 0;
+    return static_cast<uint64_t>(umd.QuadPart);
 }
 
 // The figures under the loading bar. Numbers and units only, so they need no translation:
@@ -2362,6 +2386,14 @@ int main(int argc, char** argv) {
     bool recoveryAttempted = false;
     bool graphicsUnavailable = false;
     std::optional<double> viewerStartupSeconds;
+    ResultsDialogContext::Startup viewerStartup;
+    const auto startupTimingPath = startupTimingFile();
+    auto startupTiming = loadStartupTiming(startupTimingPath);
+    const LUID startupAdapter{static_cast<DWORD>(d3d.adapterLuidLow()), d3d.adapterLuidHigh()};
+    const uint64_t startupDriver = d3d.isWarp() ? 0 : viewerDriverVersion(startupAdapter);
+    viewerStartup.coldSeconds = startupTiming.coldSeconds;
+    viewerStartup.warmSeconds = startupTiming.warmSeconds;
+
     uint64_t viewerLocalUsage = 0;
     bool deviceLostInjected = false;
     uint64_t retiredPresentCount = 0;
@@ -2981,7 +3013,7 @@ int main(int argc, char** argv) {
                 case TransportCommand::RunFilmBenchmark: {
                     ResultsDialogContext context{};
                     context.hardware = cardHardware;
-                    context.viewerStartupSeconds = viewerStartupSeconds;
+                    context.startup = viewerStartup;
                     context.adapter.luidLow = d3d.adapterLuidLow();
                     context.adapter.luidHigh = d3d.adapterLuidHigh();
                     context.adapter.viewerLocalUsage = viewerLocalUsage;
@@ -3924,6 +3956,19 @@ int main(int argc, char** argv) {
                 if (!viewerStartupSeconds && presented && d3d.lastPresentationVisible() &&
                     !orchestrator.isUsingFallbackEffect() && IsWindowVisible(window.hwnd())) {
                     viewerStartupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - viewerEntry).count();
+                }
+                if (viewerStartupSeconds && !viewerStartup.measuredThisLaunch) {
+                    viewerStartup.thisLaunchCold = recordStartupTiming(startupTiming, releaseBuildString(), startupDriver,
+                                                                       settings.coldShaderCache, *viewerStartupSeconds);
+                    viewerStartup.measuredThisLaunch = true;
+                    viewerStartup.coldSeconds = startupTiming.coldSeconds;
+                    viewerStartup.warmSeconds = startupTiming.warmSeconds;
+                    const bool saveTiming = startupTimingShouldSave(settings);
+                    BOO_LOG_INFO("Startup", std::format("Viewer startup {:.2f} s ({} start){}", *viewerStartupSeconds,
+                                                        viewerStartup.thisLaunchCold ? "cold" : "warm",
+                                                        saveTiming ? "" : " (not saved)"));
+                    if (saveTiming && !saveStartupTiming(startupTimingPath, startupTiming))
+                        BOO_LOG_WARN("Startup", "Could not save startup timing history.");
                 }
                 const bool published = spoutSender.completePublish();
                 if (presented) {

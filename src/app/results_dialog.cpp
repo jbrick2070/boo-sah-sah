@@ -2,6 +2,7 @@
 #include "boo/logging.hpp"
 #include "boo/results_card.hpp"
 #include "boo/results_export.hpp"
+#include "boo/results_reference.hpp"
 #include "boo/results_worker.hpp"
 #include "boo/ui_text.hpp"
 #include "results_dialog_ids.h"
@@ -27,6 +28,7 @@ constexpr wchar_t kReportPage[] = L"https://github.com/jbrick2070/boo-sah-sah/is
 struct SaveOperation {
     std::atomic<bool> done{false};
     ResultsSaveStatus status = ResultsSaveStatus::Failed;
+    ResultsSaveKind kind = ResultsSaveKind::Picture;
 };
 struct Dialog {
     explicit Dialog(const ResultsDialogContext& c) : context(c) {}
@@ -36,6 +38,7 @@ struct Dialog {
     Page page = Page::Select;
     BenchmarkMode mode = BenchmarkMode::Raster;
     bool closeViewer = false;
+    bool detailsExpanded = false;
     ResultCard card;
     HFONT numericFont{};
     std::wstring progress;
@@ -55,33 +58,49 @@ struct Dialog {
             MoveWindow(GetDlgItem(window,id),x,y,(std::max)(1,width),(std::max)(1,height),TRUE);
         };
         place(IDC_RESULTS_TITLE,dx,dy/2,inner,dy*2);
-        const int bw = (inner-2*dx)/3;
-        place(IDOK,dx,buttons,bw,3*dy);
-        place(IDC_RESULTS_SAVE,dx,buttons,bw,3*dy);
-        place(IDC_RESULTS_REPORT,2*dx+bw,buttons,bw,3*dy);
-        place(IDCANCEL,3*dx+2*bw,buttons,inner-2*(bw+dx),3*dy);
         if (page != Page::Card) {
+            const int bw = (inner-2*dx)/3;
+            place(IDOK,dx,buttons,bw,3*dy);
+            place(IDCANCEL,3*dx+2*bw,buttons,inner-2*(bw+dx),3*dy);
             for (size_t i=0;i<kChoices.size();++i) place(kChoices[i],dx,3*dy+int(i)*2*dy,inner,2*dy);
             const int top = page==Page::Select ? 10*dy : 3*dy;
             place(IDC_RESULTS_BODY,dx,top,inner,buttons-dy/2-top);
             return;
         }
-        place(IDC_RESULTS_SUBTITLE,dx,dy*3,inner,2*dy);
-        const int tableY = 5*dy, noteY = buttons-3*dy, detailsY = noteY-5*dy;
-        place(IDC_RESULTS_TABLE,dx,tableY,inner,detailsY-tableY-dy/2);
+        const int bw = (inner-3*dx)/4;
+        place(IDC_RESULTS_SAVE,dx,buttons,bw,3*dy);
+        place(IDC_RESULTS_SAVE_TEXT,2*dx+bw,buttons,bw,3*dy);
+        place(IDC_RESULTS_REPORT,3*dx+2*bw,buttons,bw,3*dy);
+        place(IDCANCEL,4*dx+3*bw,buttons,inner-3*(bw+dx),3*dy);
+        const int metric=inner*36/100, run=inner*32/100, reference=inner-metric-run;
+        const auto summaryRow = [&](int first, int second, int third, int y) {
+            place(first,dx,y,metric,3*dy/2);
+            place(second,dx+metric,y,run,3*dy/2);
+            place(third,dx+metric+run,y,reference,3*dy/2);
+        };
+        summaryRow(IDC_RESULTS_SUMMARY_METRIC, IDC_RESULTS_SUMMARY_RUN, IDC_RESULTS_SUMMARY_REFERENCE, 3*dy);
+        summaryRow(IDC_RESULTS_TYPICAL_LABEL, IDC_RESULTS_TYPICAL_RUN, IDC_RESULTS_TYPICAL_REFERENCE, 9*dy/2);
+        summaryRow(IDC_RESULTS_WORST_LABEL, IDC_RESULTS_WORST_RUN, IDC_RESULTS_WORST_REFERENCE, 6*dy);
+        place(IDC_RESULTS_COMPARISON,dx,15*dy/2,inner,3*dy/2);
+        place(IDC_RESULTS_RAN,dx,9*dy,inner,3*dy/2);
+        place(IDC_RESULTS_DLSS_NOTE,dx,21*dy/2,inner,3*dy);
+        place(IDC_RESULTS_DETAILS,dx,27*dy/2,inner/4,5*dy/2);
+        if (!detailsExpanded) return;
+        const int tableY = 33*dy/2, noteY = buttons-3*dy, detailsY = noteY-5*dy;
+        place(IDC_RESULTS_TABLE,dx,tableY,inner,(std::max)(dy,detailsY-tableY-dy/2));
         place(IDC_RESULTS_BODY,dx,detailsY,inner,5*dy-dy/2);
         place(IDC_RESULTS_NOTE,dx,noteY,inner,3*dy);
         HWND table = GetDlgItem(window,IDC_RESULTS_TABLE);
         RECT bounds{};
         GetClientRect(table,&bounds);
         const int available = (std::max)(3L,bounds.right);
-        const int metric=available*36/100, run=available*32/100;
-        ListView_SetColumnWidth(table,0,metric);
-        ListView_SetColumnWidth(table,1,run);
-        ListView_SetColumnWidth(table,2,available-metric-run);
+        const int tableMetric=available*36/100, tableRun=available*32/100;
+        ListView_SetColumnWidth(table,0,tableMetric);
+        ListView_SetColumnWidth(table,1,tableRun);
+        ListView_SetColumnWidth(table,2,available-tableMetric-tableRun);
     }
-    void expandForTable() const {
-        RECT desired{0,0,450,304}, current{};
+    void sizeForCard() const {
+        RECT desired{0,0,450,detailsExpanded ? 350 : 168}, current{};
         MapDialogRect(window,&desired);
         AdjustWindowRectEx(&desired,GetWindowLongW(window,GWL_STYLE),FALSE,GetWindowLongW(window,GWL_EXSTYLE));
         GetWindowRect(window,&current);
@@ -89,10 +108,18 @@ struct Dialog {
         if (!GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor)) return;
         const RECT screen=monitor.rcWork;
         const int w=(std::min)(screen.right-screen.left,(std::max)(current.right-current.left,desired.right-desired.left));
-        const int h=(std::min)(screen.bottom-screen.top,(std::max)(current.bottom-current.top,desired.bottom-desired.top));
+        const int h=(std::min)(screen.bottom-screen.top,desired.bottom-desired.top);
         const auto x=std::clamp(current.left+(current.right-current.left-w)/2,screen.left,screen.right-w);
         const auto y=std::clamp(current.top+(current.bottom-current.top-h)/2,screen.top,screen.bottom-h);
         SetWindowPos(window,nullptr,x,y,w,h,SWP_NOZORDER|SWP_NOACTIVATE);
+    }
+    void toggleDetails() {
+        if (page != Page::Card) return;
+        detailsExpanded = !detailsExpanded;
+        label(IDC_RESULTS_DETAILS, detailsExpanded ? T::HideDetails : T::Details);
+        for (int id : {IDC_RESULTS_TABLE, IDC_RESULTS_BODY, IDC_RESULTS_NOTE}) show(id, detailsExpanded);
+        sizeForCard();
+        layout();
     }
     void detail() const {
         const int index=ListView_GetNextItem(GetDlgItem(window,IDC_RESULTS_TABLE),-1,LVNI_SELECTED);
@@ -134,11 +161,10 @@ struct Dialog {
             }
         }
         ListView_SetItemState(table,0,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
-        SetDlgItemTextW(window,IDC_RESULTS_SUBTITLE,card.subtitle.c_str());
         SetDlgItemTextW(window,IDC_RESULTS_NOTE,card.note.c_str());
         detail();
         layout();
-        SetFocus(table);
+        SetFocus(GetDlgItem(window, IDC_RESULTS_DETAILS));
     }
     void setPage(Page next) {
         page = next;
@@ -146,8 +172,14 @@ struct Dialog {
         show(IDOK, next == Page::Select);
         show(IDC_RESULTS_REPORT, next == Page::Card);
         show(IDC_RESULTS_SAVE, next == Page::Card);
-        for (int id : {IDC_RESULTS_TABLE,IDC_RESULTS_SUBTITLE,IDC_RESULTS_NOTE}) show(id,next==Page::Card);
-        if (next==Page::Card) expandForTable();
+        show(IDC_RESULTS_SAVE_TEXT, next == Page::Card);
+        for (int id : {IDC_RESULTS_SUMMARY_METRIC, IDC_RESULTS_SUMMARY_RUN, IDC_RESULTS_SUMMARY_REFERENCE,
+                       IDC_RESULTS_TYPICAL_LABEL, IDC_RESULTS_TYPICAL_RUN, IDC_RESULTS_TYPICAL_REFERENCE,
+                       IDC_RESULTS_WORST_LABEL, IDC_RESULTS_WORST_RUN, IDC_RESULTS_WORST_REFERENCE,
+                       IDC_RESULTS_COMPARISON, IDC_RESULTS_RAN, IDC_RESULTS_DLSS_NOTE, IDC_RESULTS_DETAILS})
+            show(id, next == Page::Card);
+        for (int id : {IDC_RESULTS_TABLE, IDC_RESULTS_NOTE}) show(id, next == Page::Card && detailsExpanded);
+        if (next==Page::Card) { show(IDC_RESULTS_BODY, detailsExpanded); sizeForCard(); }
         layout();
         label(IDCANCEL, next == Page::Progress ? T::Cancel : (closeViewer ? T::Close : T::Back));
         if (next != Page::Select) SendMessageW(window, DM_SETDEFID, IDCANCEL, 0);
@@ -200,9 +232,37 @@ struct Dialog {
             last.width, last.height, last.warmupCount, last.measuredCount, last.medianMs, last.worstMs));
         setPage(Page::Card);
         SetDlgItemTextW(window,IDC_RESULTS_TITLE,card.title.c_str());
-        label(IDC_RESULTS_REPORT, T::Report);
-        label(IDC_RESULTS_SAVE, T::Save);
-        show(IDC_RESULTS_BODY, true);
+        label(IDC_RESULTS_REPORT, T::ReportButton);
+        label(IDC_RESULTS_SAVE, T::SavePicture);
+        label(IDC_RESULTS_SAVE_TEXT, T::SaveText);
+        label(IDC_RESULTS_DETAILS, T::Details);
+        label(IDC_RESULTS_SUMMARY_METRIC, T::Metric);
+        label(IDC_RESULTS_SUMMARY_RUN, T::ThisRun);
+        label(IDC_RESULTS_SUMMARY_REFERENCE, T::Reference);
+        if (card.rows.size() >= 2) {
+            const auto summary = [&](size_t row, int name, int run, int reference) {
+                SetDlgItemTextW(window, name, card.rows[row].label.c_str());
+                SetDlgItemTextW(window, run, card.rows[row].values[0].text.c_str());
+                SetDlgItemTextW(window, reference, card.rows[row].values[1].text.c_str());
+            };
+            summary(0, IDC_RESULTS_TYPICAL_LABEL, IDC_RESULTS_TYPICAL_RUN, IDC_RESULTS_TYPICAL_REFERENCE);
+            summary(1, IDC_RESULTS_WORST_LABEL, IDC_RESULTS_WORST_RUN, IDC_RESULTS_WORST_REFERENCE);
+        }
+        std::wstring comparison;
+        if (card.rows.size() >= 2 && card.rows[0].values[0].numeric && card.rows[0].values[1].numeric) {
+            if (const auto* reference = resultsReferenceFor(last))
+                comparison = resultsComparisonLine(last.medianMs, reference->snapshot.medianMs);
+        }
+        SetDlgItemTextW(window, IDC_RESULTS_COMPARISON, comparison.c_str());
+        std::wstring ran = resultText(resultsModeText(last.mode));
+        if (last.inputWidth && last.inputHeight && last.width && last.height) {
+            const auto resolution = std::format(L"{} \u00d7 {} \u2192 {} \u00d7 {}", last.inputWidth, last.inputHeight, last.width, last.height);
+            ran += L" \u00b7 " + (UiStrings::instance().rightToLeft() ? L"\u202d" + resolution + L"\u202c" : resolution);
+        }
+        if (last.mode == BenchmarkMode::DlssQuality)
+            ran += std::wstring(L" \u00b7 ") + resultText(last.evidence[static_cast<size_t>(BenchmarkFeature::Upscaling)] == BenchmarkEvidence::DlssGpu ? T::DlssRanGpu : T::DlssDidNotRunGpu);
+        SetDlgItemTextW(window, IDC_RESULTS_RAN, ran.c_str());
+        SetDlgItemTextW(window, IDC_RESULTS_DLSS_NOTE, last.mode == BenchmarkMode::DlssQuality ? resultText(T::DlssNote) : L"");
         populate();
     }
 
@@ -281,20 +341,23 @@ struct Dialog {
         }
     }
 
-    void save() {
+    void save(ResultsSaveKind kind) {
         if (page != Page::Card || saving) return;
         const auto& strings = UiStrings::instance();
         const auto& tag = strings.languageTag();
         auto job = std::make_shared<SaveOperation>();
-        if (!SetTimer(window, 2, 80, nullptr)) { label(IDC_RESULTS_TITLE, T::SaveFailed); return; }
+        job->kind = kind;
+        if (!SetTimer(window, 2, 80, nullptr)) { label(IDC_RESULTS_TITLE, T::FileSaveFailed); return; }
         try {
             // Playback may have initialized the viewer thread as MTA. The shell
             // picker needs its own STA. No worker touches the mutable dialog state.
             std::thread([job, owner = window, frozen = card, rtl = strings.rightToLeft(),
-                         locale = std::wstring(tag.begin(), tag.end()), title = std::wstring(resultText(T::Save))] {
+                         locale = std::wstring(tag.begin(), tag.end()),
+                         title = std::wstring(resultText(kind == ResultsSaveKind::Picture ? T::SavePicture : T::SaveText)),
+                         kind, mode = mode] {
                 const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
                 if (SUCCEEDED(com)) {
-                    try { if (IsWindow(owner)) job->status = pickAndSaveResults(owner, frozen, locale, rtl, title); }
+                    try { if (IsWindow(owner)) job->status = pickAndSaveResults(owner, frozen, locale, rtl, title, kind, mode); }
                     catch (...) { job->status = ResultsSaveStatus::Failed; }
                     CoUninitialize();
                 }
@@ -302,11 +365,13 @@ struct Dialog {
             }).detach();
         } catch (...) {
             KillTimer(window, 2);
-            label(IDC_RESULTS_TITLE, T::SaveFailed);
+            label(IDC_RESULTS_TITLE, T::FileSaveFailed);
             return;
         }
         saving = std::move(job);
         EnableWindow(GetDlgItem(window, IDC_RESULTS_SAVE), FALSE);
+        EnableWindow(GetDlgItem(window, IDC_RESULTS_SAVE_TEXT), FALSE);
+        EnableWindow(GetDlgItem(window, IDC_RESULTS_DETAILS), FALSE);
         EnableWindow(GetDlgItem(window, IDC_RESULTS_REPORT), FALSE);
         EnableWindow(GetDlgItem(window, IDCANCEL), FALSE);
     }
@@ -314,23 +379,29 @@ struct Dialog {
         if (!saving || !saving->done.load()) return;
         KillTimer(window, 2);
         auto status = saving->status;
+        const auto kind = saving->kind;
         saving.reset();
         EnableWindow(GetDlgItem(window, IDC_RESULTS_SAVE), TRUE);
+        EnableWindow(GetDlgItem(window, IDC_RESULTS_SAVE_TEXT), TRUE);
+        EnableWindow(GetDlgItem(window, IDC_RESULTS_DETAILS), TRUE);
         EnableWindow(GetDlgItem(window, IDC_RESULTS_REPORT), TRUE);
         EnableWindow(GetDlgItem(window, IDCANCEL), TRUE);
-        if (status == ResultsSaveStatus::Cancelled) return;
-        const auto rtl = UiStrings::instance().rightToLeft() ? MB_RTLREADING | MB_RIGHT : 0;
-        MessageBoxW(window, resultText(status == ResultsSaveStatus::Saved ? T::Saved : T::SaveFailed),
-            resultText(T::Save), MB_OK | (status == ResultsSaveStatus::Saved ? MB_ICONINFORMATION : MB_ICONWARNING) | rtl);
+        if (status != ResultsSaveStatus::Cancelled) {
+            const auto rtl = UiStrings::instance().rightToLeft() ? MB_RTLREADING | MB_RIGHT : 0;
+            MessageBoxW(window, resultText(status == ResultsSaveStatus::Saved ?
+                    (kind == ResultsSaveKind::Picture ? T::PictureSaved : T::TextSaved) : T::FileSaveFailed),
+                resultText(kind == ResultsSaveKind::Picture ? T::SavePicture : T::SaveText), MB_OK | (status == ResultsSaveStatus::Saved ? MB_ICONINFORMATION : MB_ICONWARNING) | rtl);
+        }
+        SetFocus(GetDlgItem(window, kind == ResultsSaveKind::Picture ? IDC_RESULTS_SAVE : IDC_RESULTS_SAVE_TEXT));
     }
 
     void report() const {
         if (page != Page::Card || saving) return;
         const auto rtl = UiStrings::instance().rightToLeft() ? MB_RTLREADING | MB_RIGHT : 0;
-        if (MessageBoxW(window, resultText(T::ConfirmReport), resultText(T::Report),
+        if (MessageBoxW(window, resultText(T::ConfirmReport), resultText(T::ReportButton),
             MB_YESNO | MB_DEFBUTTON2 | MB_ICONINFORMATION | rtl) == IDYES) {
             if (reinterpret_cast<INT_PTR>(ShellExecuteW(window, L"open", kReportPage, nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
-                MessageBoxW(window, resultText(T::Unavailable), resultText(T::Report), MB_OK | MB_ICONWARNING | rtl);
+                MessageBoxW(window, resultText(T::Unavailable), resultText(T::ReportButton), MB_OK | MB_ICONWARNING | rtl);
         }
     }
 };
@@ -349,11 +420,12 @@ INT_PTR CALLBACK proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     if (!dialog) return FALSE;
     if (message==WM_SIZE) { dialog->layout(); return TRUE; }
     if (message==WM_GETMINMAXINFO) {
-        RECT minimum{0,0,250,205};
+        RECT minimum{0,0,dialog->page == Page::Card ? 400 : 250,dialog->page == Page::Card ? (dialog->detailsExpanded ? 260 : 168) : 205};
         MapDialogRect(window,&minimum);
+        AdjustWindowRectEx(&minimum, GetWindowLongW(window,GWL_STYLE), FALSE, GetWindowLongW(window,GWL_EXSTYLE));
         auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
-        info->ptMinTrackSize.x=minimum.right;
-        info->ptMinTrackSize.y=minimum.bottom;
+        info->ptMinTrackSize.x=minimum.right-minimum.left;
+        info->ptMinTrackSize.y=minimum.bottom-minimum.top;
         return TRUE;
     }
     if (message==WM_NOTIFY) {
@@ -389,7 +461,9 @@ INT_PTR CALLBACK proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     case IDOK: dialog->start(); return TRUE;
     case IDCANCEL: dialog->leave(); return TRUE;
     case IDC_RESULTS_REPORT: dialog->report(); return TRUE;
-    case IDC_RESULTS_SAVE: dialog->save(); return TRUE;
+    case IDC_RESULTS_DETAILS: dialog->toggleDetails(); return TRUE;
+    case IDC_RESULTS_SAVE: dialog->save(ResultsSaveKind::Picture); return TRUE;
+    case IDC_RESULTS_SAVE_TEXT: dialog->save(ResultsSaveKind::Text); return TRUE;
     default: return FALSE;
     }
 }

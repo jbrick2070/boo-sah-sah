@@ -83,7 +83,7 @@ std::vector<std::wstring> readRows(HWND dialog) {
     require(IsWindowVisible(table) && focused(dialog)==table && header &&
         SendMessageW(header,HDM_GETITEMCOUNT,0,0)==3, "Keyboard-accessible three-column table missing");
     Microsoft::WRL::ComPtr<IAccessible> headerAccessibility;
-    require(SUCCEEDED(AccessibleObjectFromWindow(header,OBJID_CLIENT,IID_PPV_ARGS(&headerAccessibility))),
+    require(SUCCEEDED(AccessibleObjectFromWindow(header,static_cast<DWORD>(OBJID_CLIENT),IID_PPV_ARGS(&headerAccessibility))),
             "Column headers have no accessibility provider");
     for (const auto& [childId,heading] : {std::pair{1,L"Measurement"},std::pair{2,L"This run"},std::pair{3,L"RTX 5080 reference"}}) {
         VARIANT child{};
@@ -111,6 +111,17 @@ std::vector<std::wstring> readRows(HWND dialog) {
     }
     return rows;
 }
+void openDetails(HWND dialog) {
+    require(IsWindowVisible(GetDlgItem(dialog,IDC_RESULTS_DETAILS)) &&
+            !IsWindowVisible(GetDlgItem(dialog,IDC_RESULTS_TABLE)), "Details did not start collapsed");
+    const auto button = GetDlgItem(dialog,IDC_RESULTS_DETAILS);
+    require(PostMessageW(dialog,WM_COMMAND,IDC_RESULTS_DETAILS,reinterpret_cast<LPARAM>(button)) != FALSE,
+            "Could not expand details");
+    require(until(2s,[&] { return IsWindowVisible(GetDlgItem(dialog,IDC_RESULTS_TABLE)); }), "Details did not expand");
+    PostMessageW(dialog,WM_NEXTDLGCTL,reinterpret_cast<WPARAM>(GetDlgItem(dialog,IDC_RESULTS_TABLE)),TRUE);
+    require(until(1s,[&] { return focused(dialog)==GetDlgItem(dialog,IDC_RESULTS_TABLE); }), "Table did not receive focus");
+}
+
 UINT benchmarkMenu(HWND film) {
     const auto menu = GetSystemMenu(film, FALSE);
     for (int i = 0; i < GetMenuItemCount(menu); ++i) {
@@ -182,8 +193,9 @@ void run(HDESK desktop, const std::wstring& desktopName, const std::filesystem::
                 "Cancellation inaccessible on progress page");
         key(focused(dialog), VK_ESCAPE);
     }
-    require(until(2s, [&] { return IsWindowVisible(control(IDC_RESULTS_TABLE)) && focused(dialog)==control(IDC_RESULTS_TABLE); }),
+    require(until(2s, [&] { return IsWindowVisible(control(IDC_RESULTS_DETAILS)); }),
         "Native result card did not appear");
+    openDetails(dialog);
     std::wstring card;
     for (const auto& row : readRows(dialog)) card+=row+L"\n";
     require(card.find(L"0 / 180") != card.npos && card.find(L"Typical GPU frame (ms)\r\nThis run  —  Unavailable") != card.npos &&
@@ -234,75 +246,68 @@ void testResetSave(HDESK desktop, DWORD pid, HWND dialog, const std::wstring& ca
     const auto scratch = std::filesystem::temp_directory_path() /
         (L"BooResetCard-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     require(std::filesystem::create_directory(scratch), "Could not create private test destination");
-    const auto folder = scratch / L"BOO-SAH-SAH-results";
-    const auto txt = folder / L"BOO-SAH-SAH-results.txt";
-    const auto png = folder / L"BOO-SAH-SAH-results.png";
+    const auto txt = scratch / L"results.txt", png = scratch / L"results.png";
     struct Cleanup {
-        const std::filesystem::path& txt, &png, &folder, &scratch;
-        ~Cleanup() { DeleteFileW(txt.c_str()); DeleteFileW(png.c_str()); RemoveDirectoryW(folder.c_str()); RemoveDirectoryW(scratch.c_str()); }
-    } cleanup{txt,png,folder,scratch};
-    auto openPicker = [&] {
+        const std::filesystem::path& txt, &png, &scratch;
+        ~Cleanup() { DeleteFileW(txt.c_str()); DeleteFileW(png.c_str()); RemoveDirectoryW(scratch.c_str()); }
+    } cleanup{txt,png,scratch};
+    auto openPicker = [&](int id, const wchar_t* title) {
         HWND picker{};
-        const auto save = GetDlgItem(dialog,IDC_RESULTS_SAVE);
+        const auto save = GetDlgItem(dialog,id);
         require(IsWindowVisible(save) && IsWindowEnabled(save), "Save is unavailable after device reset");
-        require(PostMessageW(dialog,WM_COMMAND,IDC_RESULTS_SAVE,reinterpret_cast<LPARAM>(save)) != FALSE, "Could not activate Save");
+        require(PostMessageW(dialog,WM_COMMAND,id,reinterpret_cast<LPARAM>(save)) != FALSE, "Could not activate Save");
         require(until(6s,[&] {
             picker = find(desktop,pid,L"#32770",dialog);
-            return picker && textOf(picker) == L"Save picture and text" && GetDlgItem(picker,IDOK);
-        }), "Folder picker did not open after reset");
+            return picker && textOf(picker) == title && GetDlgItem(picker,IDOK);
+        }), "Save As picker did not open after reset");
         return picker;
     };
-    auto picker = openPicker();
+    auto picker = openPicker(IDC_RESULTS_SAVE,L"Save picture…");
     PostMessageW(picker,WM_COMMAND,IDCANCEL,0);
     require(until(3s,[&] { return !IsWindow(picker) && IsWindowEnabled(GetDlgItem(dialog,IDC_RESULTS_SAVE)); }) &&
-        std::filesystem::is_empty(scratch), "Cancelled folder picker wrote files or prevented another save");
-    picker = openPicker();
-    // Depending on the OS version, File Open exposes edt1 directly or nested under cmb13.
-    // Verify the exact, absolute test destination before accepting the picker.
-    HWND edit{};
-    const bool foundEdit = until(3s,[&] {
-        edit = byId(picker,0x0480);
-        const auto combo = byId(picker,0x047c);
-        if (!edit && combo) edit = byId(combo,0x03e9);
-        if (!edit && combo) {
-            const auto inner = FindWindowExW(combo,nullptr,L"ComboBox",nullptr);
-            if (inner) edit = FindWindowExW(inner,nullptr,L"Edit",nullptr);
-        }
-        wchar_t cls[32]{};
-        return edit && GetClassNameW(edit,cls,32) && std::wstring_view(cls)==L"Edit";
-    });
-    require(foundEdit, "Could not locate the folder name edit; destination left untouched");
-    DWORD_PTR result{};
-    require(SendMessageTimeoutW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(scratch.c_str()),SMTO_ABORTIFHUNG,500,&result) &&
-        result && textOf(edit)==scratch.wstring(), "Could not verify the selected test destination");
-    require(PostMessageW(picker,WM_COMMAND,IDOK,reinterpret_cast<LPARAM>(GetDlgItem(picker,IDOK))) != FALSE,
-        "Could not accept verified folder");
-    HWND acknowledgement{};
-    const auto saved = [&] {
-        acknowledgement = find(desktop,pid,L"#32770",dialog);
-        return !IsWindow(picker) && acknowledgement && textOf(GetDlgItem(acknowledgement,65535))==L"Picture and text saved." &&
-            std::filesystem::is_regular_file(png) && std::filesystem::is_regular_file(txt);
+        std::filesystem::is_empty(scratch), "Cancelled Save As wrote a file or prevented another save");
+    auto save = [&](int id, const wchar_t* title, const std::filesystem::path& destination, const wchar_t* message) {
+        const auto picker = openPicker(id,title);
+        HWND edit{};
+        const bool foundEdit = until(3s,[&] {
+            edit = byId(picker,0x0480);
+            const auto combo = byId(picker,0x047c);
+            if (!edit && combo) edit = byId(combo,0x03e9);
+            if (!edit && combo) {
+                const auto inner = FindWindowExW(combo,nullptr,L"ComboBox",nullptr);
+                if (inner) edit = FindWindowExW(inner,nullptr,L"Edit",nullptr);
+            }
+            wchar_t cls[32]{};
+            return edit && GetClassNameW(edit,cls,32) && std::wstring_view(cls)==L"Edit";
+        });
+        require(foundEdit, "Could not locate the file name edit; destination left untouched");
+        const auto file = destination.wstring();
+        DWORD_PTR result{};
+        require(SendMessageTimeoutW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(file.c_str()),SMTO_ABORTIFHUNG,500,&result) &&
+            result && textOf(edit)==file, "Could not verify the selected file");
+        require(PostMessageW(picker,WM_COMMAND,IDOK,reinterpret_cast<LPARAM>(GetDlgItem(picker,IDOK))) != FALSE,
+            "Could not accept verified file");
+        HWND acknowledgement{};
+        require(until(8s,[&] {
+            acknowledgement = find(desktop,pid,L"#32770",dialog);
+            return !IsWindow(picker) && acknowledgement && textOf(GetDlgItem(acknowledgement,65535))==message &&
+                std::filesystem::is_regular_file(destination);
+        }), "Save As did not confirm the selected file");
+        require(PostMessageW(acknowledgement,WM_CLOSE,0,0) && until(2s,[&] { return !IsWindow(acknowledgement) && IsWindowEnabled(dialog); }),
+            "Save confirmation did not close");
     };
-    if (!until(1s,saved) && IsWindow(picker)) {
-        // The first activation can navigate into the typed folder. Confirm the breadcrumb's
-        // full absolute address before pressing Select Folder in this version of the picker.
-        const auto address = byId(picker,1001);
-        wchar_t cls[64]{};
-        require(address && GetClassNameW(address,cls,64) && std::wstring_view(cls)==L"ToolbarWindow32" &&
-            textOf(address).ends_with(scratch.wstring()), "Picker did not navigate into the private test folder");
-        PostMessageW(picker,WM_COMMAND,IDOK,reinterpret_cast<LPARAM>(GetDlgItem(picker,IDOK)));
-    }
-    require(until(8s,saved), "Picker did not confirm saving both files in the selected folder");
+    save(IDC_RESULTS_SAVE_TEXT,L"Save text…",txt,L"Text saved.");
+    require(!std::filesystem::exists(png), "Saving text also wrote a picture");
     std::ifstream stream(txt,std::ios::binary);
     std::string content{std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>()};
     const int count = WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,card.data(),static_cast<int>(card.size()),nullptr,0,nullptr,nullptr);
     std::string expected(count,'\0');
     require(count>0 && WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,card.data(),static_cast<int>(card.size()),
         expected.data(),count,nullptr,nullptr)==count && expected==content, "Saved reset text differs from native card");
+    save(IDC_RESULTS_SAVE,L"Save picture…",png,L"Picture saved.");
     require(std::filesystem::file_size(png)>100, "Reset result PNG is empty");
-    require(PostMessageW(acknowledgement,WM_CLOSE,0,0) && until(2s,[&] { return !IsWindow(acknowledgement) && IsWindowEnabled(dialog); }),
-        "Save confirmation did not close");
 }
+
 void testFixtureCard(HDESK desktop,std::wstring name,const std::filesystem::path& exe,bool stalled,bool comparison=false) {
     Viewer viewer;
     STARTUPINFOW si{sizeof(si)};
@@ -318,8 +323,8 @@ void testFixtureCard(HDESK desktop,std::wstring name,const std::filesystem::path
     }), "Reset fixture selector did not open");
     PostMessageW(dialog,WM_COMMAND,IDOK,0);
     if (comparison) {
-        require(until(3s,[&]{return IsWindowVisible(GetDlgItem(dialog,IDC_RESULTS_TABLE)) &&
-            focused(dialog)==GetDlgItem(dialog,IDC_RESULTS_TABLE);}),"Completed comparison did not open");
+        require(until(3s,[&]{return IsWindowVisible(GetDlgItem(dialog,IDC_RESULTS_DETAILS));}),"Completed comparison did not open");
+        openDetails(dialog);
         const auto rows=readRows(dialog);
         require(rows[0].starts_with(L"Typical GPU frame (ms)\r\nThis run  —  9.4") &&
             rows[1].starts_with(L"Worst GPU frame (ms)\r\nThis run  —  11.6"),"Typical and worst values are misaligned");
@@ -361,9 +366,9 @@ void testFixtureCard(HDESK desktop,std::wstring name,const std::filesystem::path
     boo::ResultsDialogContext context;
     context.hardware={boo::ResultsCpuModel::IntelCoreUltra9_275HX,boo::ResultsNpuModel::IntelAiBoost};
     const auto expected=boo::makeResultsCard(context,snapshot);
+    openDetails(dialog);
     const auto rows=readRows(dialog);
-    require(rows.size()==expected.rows.size() && textOf(GetDlgItem(dialog,IDC_RESULTS_NOTE))==expected.note &&
-        textOf(GetDlgItem(dialog,IDC_RESULTS_SUBTITLE))==expected.subtitle,"Reset table metadata differs from export");
+    require(rows.size()==expected.rows.size() && textOf(GetDlgItem(dialog,IDC_RESULTS_NOTE))==expected.note,"Reset table metadata differs from export");
     for (size_t i=0;i<rows.size();++i) {
         const auto& row=expected.rows[i];
         require(rows[i]==row.label+L"\r\n"+expected.headings[1]+L"  —  "+row.values[0].text+

@@ -44,6 +44,20 @@ ResultText resultsModeText(BenchmarkMode mode) {
     }
 }
 
+std::wstring resultsComparisonLine(double runMs, double referenceMs) {
+    if (!std::isfinite(runMs) || !std::isfinite(referenceMs) || runMs <= 0 || referenceMs <= 0)
+        return {};
+    const double ratio = referenceMs / runMs;
+    if (!std::isfinite(ratio) || ratio <= 0) return {};
+    const double difference = (ratio - 1.0) * 100.0;
+    if (!std::isfinite(difference)) return {};
+    if (ratio >= 0.95 && ratio <= 1.05) return resultText(T::SameAsReference);
+    std::wstring line = resultText(difference > 0 ? T::Faster : T::Slower);
+    const auto at = line.find(L"{n}");
+    if (at != line.npos) line.replace(at, 3, std::format(L"{:.0f}", std::abs(difference)));
+    return line;
+}
+
 namespace {
 std::wstring chip(uint32_t vendor, uint32_t device) {
     if (vendor == 0x10de && device == 0x28a0) return L"NVIDIA GeForce RTX 4060 Laptop GPU";
@@ -182,9 +196,16 @@ std::vector<ResultCardRow> runRows(const ResultsDialogContext& context, const Be
     field(T::Worst, score ? decimal(s.worstMs) : absent, score);
     field(T::Warmup, std::format(L"{} / {}", s.warmupCount, kResultsWarmupCount), true);
     field(T::Samples, std::format(L"{} / {}", s.measuredCount, kResultsMeasuredCount), true);
-    const auto seconds = context.viewerStartupSeconds;
-    const bool started = !reference && seconds && std::isfinite(*seconds) && *seconds >= 0;
-    field(T::Startup, started ? decimal(*seconds) : absent, started);
+    const auto startup = [&](T label, const std::optional<double>& seconds, bool thisLaunch) {
+        const bool measured = seconds && std::isfinite(*seconds) && *seconds >= 0;
+        std::wstring value = measured ? decimal(*seconds) : resultText(T::NotMeasuredYet);
+        if (measured && thisLaunch) value += std::wstring(L" (") + resultText(T::ThisLaunch) + L")";
+        field(label, std::move(value), measured);
+    };
+    startup(T::ColdStart, context.startup.coldSeconds,
+            !reference && context.startup.measuredThisLaunch && context.startup.thisLaunchCold);
+    startup(T::WarmStart, context.startup.warmSeconds,
+            !reference && context.startup.measuredThisLaunch && !context.startup.thisLaunchCold);
     std::wstring status = resultText(outcomeText(outcome));
     if (reason != BenchmarkReason::None && reason != BenchmarkReason::Cancelled)
         status += std::wstring(L" · ") + resultText(resultsReasonText(reason));
@@ -272,12 +293,14 @@ ResultCard makeResultsCard(const ResultsDialogContext& context, const BenchmarkS
         const std::wstring displayVersion(version.begin(), version.end());
         ResultsDialogContext referenceContext;
         referenceContext.hardware = ref->hardware;
+        referenceContext.startup.coldSeconds = ref->coldStartupSeconds;
+        referenceContext.startup.warmSeconds = ref->warmStartupSeconds;
         const auto comparison = runRows(referenceContext, ref->snapshot, displayVersion, true, card.rtl);
         for (size_t i = 0; i < card.rows.size(); ++i) card.rows[i].values[1] = comparison[i].values[0];
     } else {
         card.note += std::wstring(L" ") + resultText(T::NoReference);
     }
-    card.note += std::wstring(L" ") + resultText(T::Conditions);
+    card.note += std::wstring(L" ") + resultText(T::ConditionsLatest);
     return card;
 }
 

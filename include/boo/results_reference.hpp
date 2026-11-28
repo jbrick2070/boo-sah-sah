@@ -8,6 +8,7 @@ struct ResultsReference {
     const char* build;
     BenchmarkSnapshot snapshot;
     ResultsHostHardware hardware;
+    double coldStartupSeconds, warmStartupSeconds;
 };
 
 // Points into immutable, bundled measurements from the designated reference rig.

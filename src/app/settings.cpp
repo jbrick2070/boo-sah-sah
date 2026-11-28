@@ -7,6 +7,11 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <cmath>
+#include <charconv>
+#include <locale>
+#include <windows.h>
 #include <sstream>
 
 namespace boo {
@@ -95,6 +100,102 @@ bool parseGraphicsMode(std::string_view key, std::string_view raw, AppSettings& 
     return valid;
 }
 } // namespace
+
+std::string_view releaseBuildString() noexcept { return BOO_RELEASE_VERSION; }
+
+bool parseStartupTiming(std::string_view text, StartupTimingState& out) {
+    out = {};
+    if (text.size() > 1024) return false;
+    std::istringstream in{std::string(text)};
+    in.imbue(std::locale::classic());
+    StartupTimingState parsed;
+    std::string magic, driver, cold, warm, extra;
+    if (!(in >> magic >> std::quoted(parsed.build) >> driver >> cold >> warm) ||
+        magic != "BOO_STARTUP_1" || parsed.build.empty() || (in >> extra)) return false;
+    const auto [end, error] = std::from_chars(driver.data(), driver.data() + driver.size(), parsed.driverVersion);
+    if (error != std::errc{} || end != driver.data() + driver.size()) return false;
+    const auto number = [](const std::string& token, std::optional<double>& value) {
+        if (token == "-") return true;
+        std::istringstream stream(token);
+        stream.imbue(std::locale::classic());
+        double seconds{};
+        char trailing{};
+        if (!(stream >> seconds) || (stream >> trailing) || !std::isfinite(seconds) || seconds < 0) return false;
+        value = seconds;
+        return true;
+    };
+    if (!number(cold, parsed.coldSeconds) || !number(warm, parsed.warmSeconds)) return false;
+    out = std::move(parsed);
+    return true;
+}
+
+StartupTimingState loadStartupTiming(const std::filesystem::path& path) {
+    StartupTimingState out;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return out;
+    file.seekg(0, std::ios::end);
+    const auto size = file.tellg();
+    if (size < 0 || size > 1024) return out;
+    file.seekg(0);
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    parseStartupTiming(text, out);
+    return out;
+}
+
+bool saveStartupTiming(const std::filesystem::path& path, const StartupTimingState& state) {
+    if (path.empty() || state.build.empty()) return false;
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << "BOO_STARTUP_1 " << std::quoted(state.build) << ' ' << state.driverVersion << ' ';
+    if (state.coldSeconds) text << std::setprecision(17) << *state.coldSeconds; else text << '-';
+    text << ' ';
+    if (state.warmSeconds) text << std::setprecision(17) << *state.warmSeconds; else text << '-';
+    text << '\n';
+    const auto bytes = text.str();
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+    wchar_t temporary[MAX_PATH]{};
+    if (!GetTempFileNameW(path.parent_path().c_str(), L"bst", 0, temporary)) return false;
+    HANDLE file = CreateFileW(temporary, GENERIC_WRITE, 0, nullptr, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = false;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
+             written == bytes.size() && FlushFileBuffers(file);
+        ok = CloseHandle(file) && ok;
+    }
+    if (ok) ok = MoveFileExW(temporary, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (!ok) DeleteFileW(temporary);
+    return ok;
+}
+
+bool startupIsCold(const StartupTimingState& state, std::string_view build,
+                   uint64_t driverVersion, bool coldShaderCache) noexcept {
+    return coldShaderCache || build.empty() || state.build != build ||
+           (driverVersion != 0 && state.driverVersion != driverVersion);
+}
+
+bool recordStartupTiming(StartupTimingState& state, std::string_view build,
+                         uint64_t driverVersion, bool coldShaderCache, double seconds) {
+    const bool changed = startupIsCold(state, build, driverVersion, false);
+    const bool cold = changed || coldShaderCache;
+    if (changed) state.warmSeconds.reset();
+    state.build = build;
+    state.driverVersion = driverVersion;
+    (cold ? state.coldSeconds : state.warmSeconds) = seconds;
+    return cold;
+}
+
+bool startupTimingShouldSave(const AppSettings& s) noexcept {
+    return !(s.startupTimingAutomation || s.noActivateWindow || s.autoExitSeconds > 0.0 ||
+             s.legacyM0Visual || s.forceWarp || s.warpFullPath || s.lowPowerGpu ||
+             s.slowDriverMs != 0 || s.forceSilentClock || s.physxRouteTest ||
+             s.injectMeshFail || s.injectShaderFail || s.injectAudioFail || s.injectVramPressure ||
+             s.injectNpuTimeout || s.injectDeviceLost || s.injectMediaFail || s.enableD3DDebug ||
+             s.headlessProbeOnly || s.validateCuesOnly || s.runBenchCliOnly || s.runBenchOnStart ||
+             !s.exportDiagnosticsPath.empty() || !s.exportBenchJsonPath.empty() || !s.exportBenchCsvPath.empty());
+}
 
 void applyTestRigProfile(AppSettings& s) noexcept {
     s.disableRT = s.disableCUDA = s.disableTensor = false;
@@ -257,6 +358,8 @@ bool parseCommandLineArgs(const std::vector<std::string>& args, AppSettings& ioS
 
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
+        if (a == "--duration-seconds" || a == "--start-seconds" || a == "--test-rig" ||
+            a == "--slow-driver-ms" || a == "--bench-iterations") ioSettings.startupTimingAutomation = true;
         if (a == "--help" || a == "-h") {
             ioSettings.showHelp = true;
         } else if (a == "--config") {

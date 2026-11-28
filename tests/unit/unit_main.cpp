@@ -20,11 +20,13 @@
 #include "../../src/render/bird_flight.hpp"
 #include "boo/ui_text.hpp"
 #include "boo/results_text.hpp"
+#include "boo/results_card.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -2268,6 +2270,70 @@ bool testUiTextLanguages() {
     return true;
 }
 
+bool testResultsStartupAndComparison() {
+    using namespace boo;
+    UiStrings::instance().clear();
+    StartupTimingState state;
+    BOO_CHECK(parseStartupTiming("BOO_STARTUP_1 \"2.1.1.0\" 123 58.0 7.0", state));
+    BOO_CHECK(state.coldSeconds && *state.coldSeconds == 58.0 && state.warmSeconds && *state.warmSeconds == 7.0);
+    BOO_CHECK(!startupIsCold(state, "2.1.1.0", 123, false));
+    BOO_CHECK(startupIsCold(state, "2.1.2.0", 123, false));
+    BOO_CHECK(startupIsCold(state, "2.1.1.0", 124, false));
+    BOO_CHECK(startupIsCold(state, "2.1.1.0", 123, true));
+    BOO_CHECK(!startupIsCold(state, "2.1.1.0", 0, false));
+    BOO_CHECK(startupIsCold(state, "2.1.2.0", 0, false));
+    BOO_CHECK(startupIsCold(state, "2.1.1.0", 0, true));
+
+    auto newBuild = state;
+    BOO_CHECK(recordStartupTiming(newBuild, "2.1.2.0", 123, false, 41.0));
+    BOO_CHECK(newBuild.build == "2.1.2.0" && newBuild.driverVersion == 123 &&
+              newBuild.coldSeconds == 41.0 && !newBuild.warmSeconds);
+    BOO_CHECK(!recordStartupTiming(newBuild, "2.1.2.0", 123, false, 6.0));
+    BOO_CHECK(newBuild.coldSeconds == 41.0 && newBuild.warmSeconds == 6.0);
+    auto newDriver = state;
+    BOO_CHECK(recordStartupTiming(newDriver, "2.1.1.0", 124, false, 42.0));
+    BOO_CHECK(newDriver.driverVersion == 124 && newDriver.coldSeconds == 42.0 && !newDriver.warmSeconds);
+    auto clearedCache = state;
+    BOO_CHECK(recordStartupTiming(clearedCache, "2.1.1.0", 123, true, 43.0));
+    BOO_CHECK(clearedCache.coldSeconds == 43.0 && clearedCache.warmSeconds == 7.0);
+    auto unknownDriver = state;
+    BOO_CHECK(!recordStartupTiming(unknownDriver, "2.1.1.0", 0, false, 8.0));
+    BOO_CHECK(unknownDriver.driverVersion == 0 && unknownDriver.coldSeconds == 58.0 &&
+              unknownDriver.warmSeconds == 8.0);
+    BOO_CHECK(!startupIsCold(unknownDriver, "2.1.1.0", 0, false));
+    BOO_CHECK(recordStartupTiming(unknownDriver, "2.1.2.0", 0, false, 44.0));
+    BOO_CHECK(unknownDriver.driverVersion == 0 && unknownDriver.coldSeconds == 44.0 &&
+              !unknownDriver.warmSeconds);
+
+    AppSettings normal{};
+    BOO_CHECK(startupTimingShouldSave(normal));
+    BOO_CHECK(parseCommandLineArgs({"--cold-shader-cache"}, normal));
+    BOO_CHECK(startupTimingShouldSave(normal));
+    const std::vector<std::vector<std::string>> automationArgs = {
+        {"--duration-seconds", "0"}, {"--duration-seconds", "5"}, {"--start-seconds", "0"},
+        {"--legacy-m0-visual"}, {"--force-warp"}, {"--no-activate"},
+        {"--no-activate", "--mute", "--windowed", "--preset", "safe", "--legacy-m0-visual"},
+        {"--inject-device-lost"}, {"--warp-full-path"}, {"--slow-driver-ms", "5"}
+    };
+    for (const auto& args : automationArgs) {
+        AppSettings automation{};
+        BOO_CHECK(parseCommandLineArgs(args, automation));
+        BOO_CHECK(!startupTimingShouldSave(automation));
+    }
+    BOO_CHECK(!parseStartupTiming("BOO_STARTUP_1 corrupt", state));
+    BOO_CHECK(startupIsCold(state, "2.1.1.0", 123, false));
+    BOO_CHECK(resultsComparisonLine(100, 104) == resultText(ResultText::SameAsReference));
+    BOO_CHECK(resultsComparisonLine(100, 105) == resultText(ResultText::SameAsReference));
+    BOO_CHECK(resultsComparisonLine(100, 95) == resultText(ResultText::SameAsReference));
+    BOO_CHECK(resultsComparisonLine(100, 105.1).find(L"faster") != std::wstring::npos);
+    BOO_CHECK(resultsComparisonLine(100, 94.9).find(L"slower") != std::wstring::npos);
+    BOO_CHECK(resultsComparisonLine(100, 106) == L"6% faster than the RTX 5080 reference");
+    BOO_CHECK(resultsComparisonLine(100, 94) == L"6% slower than the RTX 5080 reference");
+    BOO_CHECK(resultsComparisonLine(0, 1).empty());
+    BOO_CHECK(resultsComparisonLine(1, std::numeric_limits<double>::infinity()).empty());
+    return true;
+}
+
 // The string catalogs: every language has every key, protected tokens survive translation, every
 // caption the film can show has a catalog entry, and every HUD label fits its box in every language.
 bool testUiStringCatalogs() {
@@ -2303,8 +2369,9 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    // 97 interface strings, plus the 8 solo-wipe labels (B2), plus the results card's.
-    BOO_CHECK(keys.size() == 105 + static_cast<size_t>(ResultText::Count));
+    // 105 interface strings plus 85 results strings.
+    static_assert(static_cast<size_t>(ResultText::Count) == 85);
+    BOO_CHECK(keys.size() == 190);
     BOO_CHECK(std::find(keys.begin(), keys.end(), "win.preset_lite") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.wipe_dxr_on") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
@@ -2421,6 +2488,7 @@ int main() {
     runTest("AudioReactiveFollowerBeatAndFlashSafety", testAudioReactiveFollowerBeatAndFlashSafety);
     runTest("TimelineClockSwitchAndTaipei101FinaleFraming", testTimelineClockSwitchAndTaipei101FinaleFraming);
     runTest("UiTextLanguages", testUiTextLanguages);
+    runTest("ResultsStartupAndComparison", testResultsStartupAndComparison);
     runTest("UiStringCatalogs", testUiStringCatalogs);
 
     std::cout << "\nUnit Test Summary: " << (gTestsRun - gTestsFailed) << "/" << gTestsRun << " passed.\n";

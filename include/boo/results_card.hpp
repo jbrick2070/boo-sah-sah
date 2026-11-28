@@ -9,6 +9,8 @@
 namespace boo {
 ResultText resultsReasonText(BenchmarkReason reason);
 ResultText resultsModeText(BenchmarkMode mode);
+// Compares throughput derived from positive frame times; empty for invalid scores.
+std::wstring resultsComparisonLine(double runMs, double referenceMs);
 
 struct ResultCardCell {
     std::wstring text;

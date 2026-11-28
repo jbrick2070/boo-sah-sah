@@ -18,7 +18,11 @@ struct ResultsDialogContext {
     // A busy or unavailable viewer can open a card without starting a child.
     BenchmarkReason initialFailure = BenchmarkReason::None;
     bool closeOnly = false; // No film window exists after a fatal startup failure.
-    std::optional<double> viewerStartupSeconds;
+    struct Startup {
+        std::optional<double> coldSeconds, warmSeconds;
+        bool thisLaunchCold = false;
+        bool measuredThisLaunch = false;
+    } startup;
 };
 
 // Modal native message loop: caller suspends film rendering and audio. Returns

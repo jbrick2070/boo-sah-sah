@@ -196,7 +196,9 @@ int verifyFilmBenchmarkIfRequested(int argc, char** argv) {
         // This headless test does not present a viewer frame. Startup stays unavailable.
         const auto card = makeResultsCard(context, s);
         if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 9;
-        const bool saved = writeResultsFiles(argv[6], card, L"en-US", false);
+        const auto destination = std::filesystem::path(argv[6]);
+        const bool saved = writeResultsFile(destination / L"BOO-SAH-SAH-results.png", card, L"en-US", false, ResultsSaveKind::Picture) &&
+            writeResultsFile(destination / L"BOO-SAH-SAH-results.txt", card, L"en-US", false, ResultsSaveKind::Text);
         CoUninitialize();
         if (!saved) return 9;
     }

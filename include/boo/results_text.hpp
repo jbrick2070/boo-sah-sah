@@ -15,11 +15,11 @@ enum class ResultText {
     Cancel,              // Cancel
     Back,                // Back to film
     Close,               // Close
-    Save,                // Save picture and text
-    Report,              // Open report page
+    SavePicture, SaveText,
+    ReportButton,              // Open report page
     ConfirmReport,       // GitHub issues are public. You choose what to attach and submit. Open the report page?
-    SaveFailed,          // Could not save both files. Choose another local folder and try again.
-    Saved,               // Picture and text saved.
+    FileSaveFailed,          // Could not save both files. Choose another local folder and try again.
+    PictureSaved, TextSaved,
     Results,             // Benchmark results
     Completed,           // Completed
     Interrupted,         // Interrupted
@@ -53,7 +53,7 @@ enum class ResultText {
     Samples,             // Valid samples
     Typical,             // Typical GPU frame (ms)
     Worst,               // Worst GPU frame (ms)
-    Startup,             // Viewer startup (s)
+    ColdStart, WarmStart, NotMeasuredYet, ThisLaunch,
     Renderer,            // Film renderer
     Lighting,            // Lighting
     Particles,           // Particles
@@ -66,7 +66,7 @@ enum class ResultText {
     NotExercised,        // Not exercised
     Failed,              // Failed
     Scripted,            // Scripted
-    Conditions,          // Frame times cover this shot. Startup is for this launch.
+    ConditionsLatest,          // Frame times cover this shot. Startup is for this launch.
     SafeFamily,          // Safe preset · Family edition
     Community,           // Community reported
     Metric, // Measurement
@@ -75,6 +75,8 @@ enum class ResultText {
     NoReference, // No matching reference run
     LowerIsBetter, // A lower GPU frame time is faster.
     NoNpu, // No NPU detected
+    Details, HideDetails, DlssNote, DlssRanGpu, DlssDidNotRunGpu,
+    SameAsReference, Faster, Slower,
     Count
 };
 
