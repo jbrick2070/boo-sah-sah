@@ -2,6 +2,20 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 2.1.0.0 — A richer film, and smooth on integrated graphics
+
+- **The city lights up window by window** at 23-32 s of the opening, directly and in the pool.
+- **A photographic grade for each act**, switching on the cuts: warm dusk, a cool sanctuary, blue-green Shanghai, a harder signal intercept, a neutral orbit and a soft dawn. Evaluated once per frame.
+- **A night heron seen only in the obsidian mirror** at the 0:59.5 hold, a real bird in the ray-traced reflection; facing stelae now reflect each other up to three times.
+- **Authored focus pulls** (onto the reflected heron, along the canopy ribbons, through the dawn window to Taipei 101) with an oval anamorphic bokeh, using a depth-of-field distance that follows reflections and glass.
+- **Egrets leave at dawn** past the bathroom window; close-up material details on the enamel, Madame N's iris, the parcel latch and the canopy ribbon; steam that clears from the dawn mirror.
+- **Before/after wipes in the Hardware Solos**: LIVE DXR / SUB RAST, LIVE CUDA / SUB HLSL, LIVE NPU / SCRIPT LIGHT, rendered for real on both sides and shown only where the hardware runs the live path.
+- **GPUs without ray tracing**: glass now shows the scene behind it instead of a stand-in.
+- **Lite mode** for Intel HD/UHD 500-600 graphics and WARP (960x540, lighter effects), an automatic step down from Safe, and a 640x360 safety rung. Heavy services no longer start before the preset is chosen, and Safe and Lite allocate much less GPU memory.
+- **The on-screen dashboard is cached**: it cost 25 ms per frame on Intel Iris Xe; now about 0.3 ms. Lite on Iris Xe runs at 44-60 fps with the dashboard on.
+- **Testing**: a cross-GPU capture comparison with a pixel tolerance (`tools/compare_captures.py`), integration captures on the integrated GPU (`--low-power-gpu`), and bounds checks on every CPU write into mapped GPU buffers.
+- Known: the test-only `--force-warp --warp-full-path` mode still ends with a heap fault inside the first seconds; the shipping app does not use it.
+
 ## 2.0.0.0 — Measure your own PC
 
 Version 2.0 ships the film benchmark below together with everything in 1.1.13.0, which was not published separately.

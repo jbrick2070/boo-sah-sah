@@ -7,9 +7,9 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-2.0 FIXES both failures. 10.1.2.10 (froze at launch, Dell Inspiron 5379): start-up compiles no longer block the window, and the loading screen shows each step. 10.1.4.4: on GPUs without double-precision math (such as Intel Iris Xe) earlier versions showed only circles instead of the city; it now draws. NEW: a film benchmark (step 2). The first launch is the longest while the driver prepares shaders.
+2.1: richer visuals and smoother integrated graphics. Intel HD/UHD 500-600 graphics (such as the UHD 620 in a Dell Inspiron 5379) now start in a new Lite mode (960x540 inside, a cached dashboard, nothing heavy loaded at start-up) and any GPU steps down automatically if frames run long. Measured on Intel Iris Xe in Lite with the dashboard on: 44-60 fps. On GPUs without ray tracing, glass shows the scene behind it. The first launch is the longest while the driver prepares shaders.
 
-MINIMUM GRAPHICS: Intel Iris Xe, AMD Radeon Vega 8 or NVIDIA GTX 1050, or better. Older Intel UHD 6xx graphics (such as UHD 620) are below the minimum: 2.0 starts there in a light mode and keeps the window responding, but performance is not guaranteed.
+MINIMUM GRAPHICS: Intel Iris Xe, AMD Radeon Vega 8 or NVIDIA GTX 1050, or better. Intel UHD 6xx graphics start in Lite and stay responsive; we tested on Iris Xe, an RTX 4060 and an RTX 5080, not on a UHD 620 itself, so playback there may be modest.
 
 BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. No account, ads or purchases; it works offline in 25 languages.
 
