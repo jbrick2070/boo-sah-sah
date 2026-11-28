@@ -2126,8 +2126,10 @@ int main(int argc, char** argv) {
     // An AMD card hung on the ray-traced city (Radeon Pro V710: driver timeout, tested on 1.1.13): until ray
     // tracing is proven there, AMD graphics start with raster lighting. --preset still asks for everything.
     if (!d3d.integratedAdapter() && d3d.adapterVendorId() == 0x1002 && (!settings.presetFromCommandLine || settings.disableRT)) {
-        settings.disableRT = true;
-        BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting (RT can be enabled at runtime).");
+        // As in 2.0: ray tracing stays unavailable for the session (no RT pipelines or neural suite are
+        // built, and no key can turn it on), not merely off at start. --preset still asks for everything.
+        d3d.setRayTracingAllowed(false);
+        BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting.");
     }
     if (settings.coldShaderCache) {
         std::string reason;

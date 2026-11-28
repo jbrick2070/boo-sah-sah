@@ -4,8 +4,8 @@
   "strings": {
     "hud.wipe_dxr_on": "DXR 執行",
     "hud.wipe_raster_off": "替代光柵",
-    "hud.wipe_cuda_on": "CUDA 執行",
-    "hud.wipe_hlsl_off": "替代 HLSL",
+    "hud.wipe_cuda_on": "CUDA執行",
+    "hud.wipe_hlsl_off": "替代HLSL",
     "hud.wipe_neural_on": "張量開啟",
     "hud.wipe_neural_off": "著色關閉",
     "hud.wipe_npu_on": "NPU 執行",

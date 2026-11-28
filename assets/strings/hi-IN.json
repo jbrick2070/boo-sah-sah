@@ -3,7 +3,7 @@
   "name": "हिन्दी",
   "strings": {
     "hud.wipe_dxr_on": "DXR चालू",
-    "hud.wipe_raster_off": "विकल्प रास्टर",
+    "hud.wipe_raster_off": "विकल्प RAST",
     "hud.wipe_cuda_on": "CUDA चालू",
     "hud.wipe_hlsl_off": "विकल्प HLSL",
     "hud.wipe_neural_on": "टेंसर चालू",

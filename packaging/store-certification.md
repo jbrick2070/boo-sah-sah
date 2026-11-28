@@ -7,16 +7,16 @@ Paste each block into the matching Partner Center field. Limits are Partner Cent
 ## Notes for certification (Submission options)
 
 ```
-2.1: richer visuals and smoother integrated graphics. Intel HD/UHD 500-600 graphics (such as the UHD 620 in a Dell Inspiron 5379) now start in a new Lite mode (960x540 inside, a cached dashboard, nothing heavy loaded at start-up) and any GPU steps down automatically if frames run long. Measured on Intel Iris Xe in Lite with the dashboard on: 44-60 fps. On GPUs without ray tracing, glass shows the scene behind it. The first launch is the longest while the driver prepares shaders.
+2.1: film updates and a lighter mode for older integrated graphics. Intel HD/UHD 500-600 graphics (such as the UHD 620) now start in Lite: 960x540 rendering, lighter effects, and ray tracing, NPU, CUDA and PhysX are not started. Any GPU steps down if frames run long. Without ray tracing, glass shows the scene behind it. The first launch is the longest while the driver prepares shaders.
 
-MINIMUM GRAPHICS: Intel Iris Xe, AMD Radeon Vega 8 or NVIDIA GTX 1050, or better. Intel UHD 6xx graphics start in Lite and stay responsive; we tested on Iris Xe, an RTX 4060 and an RTX 5080, not on a UHD 620 itself, so playback there may be modest.
+MINIMUM GRAPHICS for intended playback: Intel Iris Xe, AMD Radeon Vega 8 or NVIDIA GTX 1050, or better. Measured on Intel Iris Xe in Lite with the dashboard on: 44-60 fps. Tested on Iris Xe, an RTX 4060 and an RTX 5080. UHD 6xx graphics start in Lite but were NOT tested; expect lower frame rates there.
 
 BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. No account, ads or purchases; it works offline in 25 languages.
 
 1. Press F to explore: W A S D fly, Q/E down/up, right-drag to look, Y drops marbles. F returns.
 2. Press Ctrl+B (or Run benchmark in Hardware Orchestra), choose Raster and run. The film pauses for a fixed shot; read the GPU frame times; Save picture and text writes to a folder you choose; Back to film resumes. The report form opens only after you confirm.
 3. Path tracing and DLSS Quality are separate tests; unavailable choices say why.
-4. Shift+Up / Down add or remove bird flocks; Shift+F changes formation (outside Explore).
+4. Outside Explore, in Safe or higher (in Lite press Q once): Shift+Up / Down add or remove bird flocks; Shift+F changes formation.
 5. Space pauses; Left / Right seek; N / P change acts; Z music; Tab panels; F11 full screen.
 
 Hardware: Direct3D 12 with Shader Model 6.0. Ray tracing, NVIDIA and an NPU are optional; integrated and AMD graphics start lighter. Unsupported PCs get a plain message.
@@ -44,7 +44,7 @@ Declared for one optional effect that mixes the live camera into the film. Off b
 | Privacy policy URL | `https://github.com/jbrick2070/boo-sah-sah/blob/main/PRIVACY.md` (required because of the camera capability) |
 | Website | `https://github.com/jbrick2070/boo-sah-sah` |
 | Support contact | `https://github.com/jbrick2070/boo-sah-sah/issues` (issues must be enabled on the repository) |
-| Minimum hardware | Windows 11 22H2 or newer, x64, Direct3D 12 GPU (Feature Level 11_0 or higher with Shader Model 6.0), stereo audio output |
+| Minimum hardware | Windows 11 22H2 or newer, x64, Direct3D 12 GPU (Feature Level 11_0 or higher with Shader Model 6.0), stereo audio output. Intended playback: Intel Iris Xe, AMD Radeon Vega 8 or NVIDIA GTX 1050 or better (older Intel UHD starts in Lite, untested) |
 | Recommended hardware | A ray-tracing GPU (NVIDIA RTX, AMD RDNA 2 or newer, Intel Arc) for the full image |
 | Copyright and trademark | (c) 2026 Jeffrey A Brick. Code MIT; soundtrack and cue sheets CC BY-NC 4.0. Scanned textures and models are CC0 (Poly Haven); see LICENSES.md |
 

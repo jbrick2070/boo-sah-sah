@@ -8,7 +8,7 @@ There is no gameplay, score, or combat: by default, sit back and watch the deter
 
 ## 1. System Requirements & Optional Runtimes
 
-- **Minimum (`BASE_ONLY` Safe / Balanced)**:
+- **Minimum (`BASE_ONLY` Lite / Safe / Balanced)**:
   - Windows 11 x64 (`22H2` or newer)
 - Any Direct3D 12 Feature Level `11_0+` GPU with Shader Model 6.0 (discrete or integrated).
 - On Microsoft WARP, the app displays a lightweight procedural orchid with a numerical HUD. It follows the film clock and selected edition, changes with each act, and supports reduced motion and reduced flash. Use `--force-warp` to test this software-rendered diagnostic mode.
@@ -69,14 +69,14 @@ Press keys `1`–`6` during playback to loop individual ranges, or launch dedica
 | `Left` / `Right` | Seek `-2 s` / `+2 s` (`Shift` + `Left`/`Right`: `-10 s` / `+10 s`) |
 | `,` / `.` (or `[` / `]`) | Step `-1` / `+1` frame (`800` samples @ `48 kHz`) while paused |
 | `G` | Jump to narrative reveal pre-roll |
-| `7` | Cycle effects detail from low to normal to high. The title bar shows levels 1–3. Safe uses level 1. |
+| `7` | Cycle effects detail from low to normal to high. The title bar shows levels 1–3. Lite and Safe use level 1. |
 | `1` – `6` | Mode: `1` Full Film, `2` RT Solo, `3` Tensor Solo, `4` NPU comparison, `5` CUDA Solo, `6` Finale Loop |
 | `L` | Toggle timeline loop |
 | `M` | Mute / Unmute audio |
 | `-` / `=` (or `Down` / `Up`) | Master volume `-5%` / `+5%` |
 | `E` | Switch **Family** / **Midnight** edition (palette, score voicing, and captions) |
 | `K` | Toggle lower-third captions (`--captions` / `--no-captions`; non-medical end card always shown) |
-| `Q` | Cycle Quality Preset, outside Explore (`Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`); after a light start on integrated graphics, ray tracing stays off |
+| `Q` | Cycle Quality Preset, outside Explore (`Lite 540p` -> `Safe 720p` -> `Balanced 1080p` -> `Showcase 1440p` -> `4K Experimental`); after a light start on integrated graphics, WARP or AMD, ray tracing stays off until the app restarts |
 | `Tab` / `F1` | Cycle HUD: `Full Telemetry` -> `Compact Strip` -> `A/B Split-Screen` -> `Off (Clean Cinema)` |
 | `A` | Cycle the split-screen comparison through RT, CUDA, Tensor, Codec, and the stage director. |
 | `X` / `C` / `T` / `U` / `V` | Live failover toggle for **RT** (`X`), **CUDA** (`C`), **Tensor** (`T`), **NPU** (`U`), **Codec** (`V`) |
@@ -128,7 +128,7 @@ Full screen is a borderless window that exactly covers the display, presented th
 
 ### Integrated graphics
 
-On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick and playback smooth. AMD graphics cards also start with raster lighting and without the neural suite, and if any card resets, the app comes back that way. Naming a preset with `--preset` (even `safe`) turns the light start off: the app then builds everything the chip supports, and a first start takes much longer.
+On a PC whose graphics share system memory (integrated graphics), the app starts lighter: the Safe preset (1280x720), raster lighting, and neither ray tracing nor the neural rendering suite is built, so the first start is quick. Older Intel HD and UHD graphics (500 and 600 series) and the WARP software renderer start one step lower, on Lite (960x540, lighter effects, no workout flock or PhysX), and any GPU steps down from Safe to Lite, and below that to 640x360, if frames stay slow. Integrated graphics never step back up above Safe on their own. AMD graphics cards start with raster lighting and without the neural suite, and if any card resets, the app comes back that way. `--preset lite` or `--preset safe` keeps ray tracing off; naming a higher preset turns the light start off, and the app then builds everything the chip supports, so a first start takes much longer.
 
 The Act 2 mirror shows ray-traced reflections only when hardware ray tracing is active.
 The night heron is absent when motion is reduced below full motion.
