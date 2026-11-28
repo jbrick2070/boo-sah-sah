@@ -1,6 +1,7 @@
 #include "boo/flow_smoke.hpp"
 
 #include "boo/logging.hpp"
+#include "boo/mapped_write.hpp"
 #include "boo/m1_scene.hpp"
 #include "boo/render.hpp"
 #include "boo/startup_progress.hpp"
@@ -608,6 +609,7 @@ void FlowSmoke::record(void* commandList, void* sceneHdr, void* sceneDistance, u
         gridSlot.serial = 0;
     }
     if (gridSlot.serial != m.gridSerial) {
+        if (!BOO_MAPPED_WRITE_OK(gridSlot.buffer.Get(), "Flow grid upload", 0, bytes)) return;
         std::memcpy(gridSlot.mapped, m.grid.data(), static_cast<size_t>(bytes));
         gridSlot.serial = m.gridSerial;
     }

@@ -972,10 +972,25 @@ float stelaBrassWeight(float2 uv, float coverage) {
 
 // The stelae and enamel columns have longitudinal, object-locked UVs. Retain
 // the same finish when the surface is seen in a mirror or through the flower.
-float3 cathedralFinish(uint material, uint part, float2 uv, float coverage,
+float3 enamelSheen(float2 uv, float2 uvWidth, float3 n, float3 v, float3 tangent) {
+    float grazing = pow(1.0f - saturate(dot(n, v)), 2.0f);
+    float band = 0.5f;
+    if (effectsDetail() > 0u) {
+        float phase = uv.x * 24.0f + 0.35f * sin(uv.y * kTwoPi * 3.0f);
+        float phaseWidth = 24.0f * uvWidth.x + (0.35f * kTwoPi * 3.0f) * uvWidth.y;
+        float visible = 1.0f - smoothstep(0.12f, 0.5f, phaseWidth);
+        band += 0.5f * cos(kTwoPi * phase) * visible;
+    }
+    // Opposite prism tilts exchange brightness as the viewing direction crosses the axis.
+    float chatoyance = (band - 0.5f) * dot(v, tangent);
+    return float3(0.12f, 0.30f, 0.40f) * grazing * (0.32f + 0.32f * chatoyance)
+         + float3(0.38f, 0.19f, 0.055f) * (0.04f + 0.14f * grazing) * smoothstep(0.50f, 0.95f, uv.x);
+}
+
+float3 cathedralFinish(uint material, uint part, float2 uv, float2 uvWidth, float3 n, float3 v, float3 tangent,
                        inout float3 base, inout float rough, inout float metallic) {
     if (material == 12u && part >= 200u && part <= 207u) {
-        float brass = stelaBrassWeight(uv, coverage);
+        float brass = stelaBrassWeight(uv, max(uvWidth.x, uvWidth.y));
         base = lerp(base, float3(0.51, 0.25, 0.082), brass);
         rough = lerp(0.048, 0.32, brass);
         metallic = lerp(metallic, 0.86, brass);
@@ -987,9 +1002,53 @@ float3 cathedralFinish(uint material, uint part, float2 uv, float coverage,
         float root = (1.0 - smoothstep(0.05, 0.66, height)) * (0.55 + 0.38 * rib);
         base *= lerp(1.0.xxx, float3(0.32, 0.62, 0.55), root);
         rough = lerp(rough, 0.28, root);
-        return 0.0.xxx;
+        return enamelSheen(uv, uvWidth, n, v, tangent);
     }
     return 0.0.xxx;
+}
+
+void parcelHardwareFinish(uint material, uint part, float2 uv, float footprint, inout float rough) {
+    if (part != 173u || material != 15u || effectsDetail() == 0u) return;
+    float2 d = (uv - float2(0.50f, 0.42f)) * float2(1.0f, 1.45f);
+    float thumb = 1.0f - smoothstep(0.008f, 0.055f, dot(d, d));
+    float edge = 1.0f - smoothstep(0.015f, 0.075f, min(min(uv.x, 1.0f - uv.x), min(uv.y, 1.0f - uv.y)));
+    float visible = 1.0f - smoothstep(0.012f, 0.045f, footprint);
+    rough = lerp(rough, 0.22f, thumb * visible * 0.65f);
+    rough = lerp(rough, 0.46f, edge * visible * 0.45f);
+}
+
+// Integral of a unit-period pulse with 13% duty cycle, used for exact box filtering.
+float threadIntegral(float x) {
+    return floor(x) * 0.13f + min(frac(x), 0.13f);
+}
+
+float filteredThread(float phase, float width) {
+    float x = phase + 0.065f;
+    if (width < 1e-4f) return frac(x) < 0.13f ? 1.0f : 0.0f;
+    return saturate((threadIntegral(x + 0.5f * width) - threadIntegral(x - 0.5f * width)) / width);
+}
+
+float3 wovenSpecular(float2 uv, float2 uvWidth, float3 n, float3 v, float3 l, float3 t, float3 b) {
+    if (effectsDetail() == 0u) return 0.0f.xxx;
+    float spread = dot(uvWidth, float2(56.0f, 3.0f));
+    float2 loom = float2(uv.x * 56.0f, uv.y * 3.0f);
+    float2 thread = float2(filteredThread(loom.x + loom.y, spread), filteredThread(loom.x - loom.y, spread));
+    float nv = saturate(dot(n, v));
+    float nl = saturate(dot(n, l));
+    float3 h = norm(v + l);
+    float3 fiberA = t * 0.82f + b * 0.57f;
+    float3 fiberB = t * 0.82f - b * 0.57f;
+    fiberA = norm(fiberA - n * dot(n, fiberA));
+    fiberB = norm(fiberB - n * dot(n, fiberB));
+    float a = dot(fiberA, h);
+    float c = dot(fiberB, h);
+    // Projected-hemisphere normalized fiber NDF; bounded Smith masking and 6% reflectance.
+    float2 lobes = 1.171689f * pow(saturate(1.0f.xx - float2(a * a, c * c)), 16.0f.xx);
+    float gv = nv / max(nv * 0.75f + 0.25f, 1e-4f);
+    float gl = nl / max(nl * 0.75f + 0.25f, 1e-4f);
+    float weight = 0.06f * gv * gl * nl / max(4.0f * nv * nl, 1e-4f);
+    return weight * (thread.x * lobes.x * float3(1.0f, 0.82f, 0.45f)
+                   + thread.y * lobes.y * float3(0.42f, 0.95f, 0.88f));
 }
 
 // Periodic lozenges follow the warp and weft of the exported ribbon. The
@@ -1747,6 +1806,39 @@ float3 evalGgxDirect(float3 n, float3 v, float3 l, float3 base, float rough, flo
     return (diff + spec + coatSpec) * nl;
 }
 
+// Replace only the isotropic metal lobe with a circularly brushed lobe. The
+// transformed object origin follows each vane's baked pivot motion.
+float3 irisDirect(uint material, uint part, float3 p, float3 centre, float footprint,
+                  float3 n, float3 v, float3 l, float3 base, float rough, float metallic, float coat) {
+    float3 ordinary = evalGgxDirect(n, v, l, base, rough, metallic, coat);
+    if (part < 220u || part > 223u || (material != 8u && material != 23u) || effectsDetail() == 0u) return ordinary;
+    float3 tangent = cross(n, p - centre);
+    float t2 = dot(tangent, tangent);
+    if (t2 < 1e-8f) return ordinary;
+    tangent *= rsqrt(t2);
+    float3 radial = cross(n, tangent);
+    float visible = 1.0f - smoothstep(0.002f, 0.02f, footprint);
+    float nl = saturate(dot(n, l));
+    float nv = max(dot(n, v), 0.001f);
+    float3 h = norm(v + l);
+    float nh = saturate(dot(n, h));
+    float alpha = max(rough * rough, 0.0012f);
+    float ax = lerp(alpha, max(alpha * 0.55f, 0.008f), visible);
+    float ay = lerp(alpha, min(alpha * 1.8f, 0.8f), visible);
+    float x = dot(tangent, h) / ax;
+    float y = dot(radial, h) / ay;
+    float den = x * x + y * y + nh * nh;
+    float dAniso = 1.0f / max(kPi * ax * ay * den * den, 1e-6f);
+    float dIsoDen = nh * nh * (alpha * alpha - 1.0f) + 1.0f;
+    float dIso = alpha * alpha / max(kPi * dIsoDen * dIsoDen, 1e-6f);
+    float k = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
+    float g = (nv / (nv * (1.0f - k) + k)) * (nl / (nl * (1.0f - k) + k));
+    float3 f0 = lerp(0.04f.xxx, base, metallic);
+    float3 f = f0 + (1.0f - f0) * pow(1.0f - saturate(dot(v, h)), 5.0f);
+    float3 common = g * f / max(4.0f * nv * nl, 0.004f);
+    return max(ordinary + (min(dAniso * common, 14.0f.xxx) - min(dIso * common, 14.0f.xxx)) * nl, 0.0f.xxx);
+}
+
 float2 envBrdfApprox(float rough, float nv) {
     const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
     const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
@@ -1874,7 +1966,7 @@ float3 traceDiffusePath(float3 origin, float3 normal, uint state, out float firs
     return radiance;
 }
 
-float3 traceShadowTransmittance(float3 origin, float3 direction, float distance, bool evalGlassCaustics, out bool hitOpaque) {
+float3 traceShadowTransmittance(float3 origin, float3 direction, float distance, bool evalGlassCaustics, bool disperseVanity, float footprint, out bool hitOpaque) {
     hitOpaque = traceShadow(origin, direction, distance);
     if (hitOpaque) {
         return (float3)0.0;
@@ -1914,7 +2006,18 @@ float3 traceShadowTransmittance(float3 origin, float3 direction, float distance,
             float3 beerTint = (gm == 35u) ? float3(0.96, 0.42, 0.08)
                             : ((gm == 4u) ? float3(0.56, 0.92, 0.78)
                             : ((gm == 18u) ? float3(0.24, 0.30, 0.38) : float3(0.95, 0.99, 1.02)));
-            trans *= beerTint * clamp(fresLoss * lensFocus, 0.06, 1.85);
+            uint glassPart = sceneInstances[gq.CommittedInstanceID()].flags & 0xffffu;
+            if (disperseVanity && glassPart == 233u && (gm == 35u || gm == 4u)) {
+                // Shift a peaked contribution around a shared baseline, producing opposite fringes.
+                float resolved = 1.0f - smoothstep(0.002f, 0.025f, footprint);
+                float3 x = (cosInc - float3(0.79f, 0.82f, 0.85f)) / 0.055f;
+                float center = (cosInc - 0.82f) / 0.055f;
+                float3 fringe = exp(-x * x) - exp(-center * center);
+                float3 focusRgb = lensFocus + 0.45f * resolved * fringe;
+                trans *= beerTint * clamp(fresLoss * focusRgb, 0.06f.xxx, 1.85f.xxx);
+            } else {
+                trans *= beerTint * clamp(fresLoss * lensFocus, 0.06, 1.85);
+            }
             ++hitGlasses;
         }
     }
@@ -2102,8 +2205,27 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         float hRough = clamp(hOrm.y, 0.03, 0.98);
         if (hm == 1u) hRough = lerp(hRough, 0.08, wetP);
         float hMetal = saturate(hOrm.z);
-        float hitUvWidth = coneSpread * (coneTravel + hitT) / max(0.2, abs(dot(hitNGeom, direction)));
-        float3 stageTrim = cathedralFinish(hm, hitPart, hitUv, hitUvWidth, hBase, hRough, hMetal);
+        float hitWorldWidth = coneSpread * (coneTravel + hitT) / max(0.2f, abs(dot(hitNGeom, direction)));
+        float2 hitUvWidths = hitWorldWidth.xx;
+        if ((hm == 20u && hitPart >= 210u && hitPart <= 215u) ||
+            (hm == 21u && hitPart >= 216u && hitPart <= 219u) || (hm == 15u && hitPart == 173u) ||
+            (hm == 3u && hitPart >= 10u && hitPart <= 16u)) {
+            float3 e1 = mul(o2w, v1.p.xyz - v0.p.xyz);
+            float3 e2 = mul(o2w, v2.p.xyz - v0.p.xyz);
+            float2 du1 = v1.uv.xy - v0.uv.xy;
+            float2 du2 = v2.uv.xy - v0.uv.xy;
+            float a = dot(e1, e1), b = dot(e1, e2), c = dot(e2, e2);
+            float det = a * c - b * b;
+            if (det > 1e-10f * max(a * c, 1e-20f)) {
+                float2 grad2 = (c * du1 * du1 - 2.0f * b * du1 * du2 + a * du2 * du2) / det;
+                hitUvWidths = hitWorldWidth * sqrt(max(grad2, 0.0f.xx));
+            } else {
+                hitUvWidths = 1.0f.xx; // Degenerate triangles have no reliable UV gradient.
+            }
+        }
+        float hitUvWidth = max(hitUvWidths.x, hitUvWidths.y);
+        float3 stageTrim = cathedralFinish(hm, hitPart, hitUv, hitUvWidths, hitN, -direction, T, hBase, hRough, hMetal);
+        parcelHardwareFinish(hm, hitPart, hitUv, hitUvWidth, hRough);
         if (act == 1u && hm == 11u && hitPart >= 100u && hitPart <= 115u) {
             float bodyY = v0.p.y + bary.x * (v1.p.y - v0.p.y) + bary.y * (v2.p.y - v0.p.y);
             aircraftPaint(hitPart, bodyY, coneSpread * (coneTravel + hitT) * length(w2o[1]), hBase, hRough, hMetal);
@@ -2163,7 +2285,36 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             sunVis2 = traceShadow(shOrig, sunDir, inBath ? 16.0f : 22.0f) ? 0.0f : 1.0f;
         }
 
-        float3 direct2 = evalGgxDirect(hitN, V2, sunDir, hBase, hRough, hMetal, hCoat) * sunRad * sunVis2;
+        float3 irisCentre = mul(q.CommittedObjectToWorld3x4(), float4(0.0f, 0.0f, 0.0f, 1.0f));
+        float3 direct2 = irisDirect(hm, hitPart, p, irisCentre, hitWorldWidth, hitN, V2, sunDir, hBase, hRough, hMetal, hCoat) * sunRad * sunVis2;
+        bool wovenRibbon = hm == 21u && hitPart >= 216u && hitPart <= 219u && effectsDetail() > 0u;
+        if (wovenRibbon) direct2 *= 1.0f - 0.06f * 0.26f;
+        if (wovenRibbon)
+            direct2 += wovenSpecular(hitUv, hitUvWidths, hitN, V2, sunDir, T, B) * sunRad * sunVis2;
+        if (effectsDetail() > 0u && sanctuarySpotsOn() &&
+            ((hitPart >= 220u && hitPart <= 223u && (hm == 8u || hm == 23u)) ||
+             (hitPart >= 216u && hitPart <= 219u && hm == 21u))) {
+            [unroll] for (uint fixture = 0u; fixture < 2u; ++fixture) {
+                SanctuarySpot spot = sanctuarySpot(fixture == 0u ? -1.0f : 1.0f);
+                float3 toLight = spot.origin - p;
+                float r2 = max(dot(toLight, toLight), 0.04f);
+                float3 l = toLight * rsqrt(r2);
+                float cone = smoothstep(0.89f, 0.985f, dot(-l, spot.axis));
+                float3 beamRight = norm(cross(spot.axis, float3(0.0f, 0.0f, 1.0f)));
+                float3 beamUp = cross(beamRight, spot.axis);
+                float2 projected = float2(dot(l, beamRight), dot(l, beamUp));
+                float radius = max(length(projected), 0.001f);
+                float c = projected.x / radius;
+                float c2 = c * c;
+                float boundary = 0.19f + 0.077f * c * (16.0f * c2 * c2 - 20.0f * c2 + 5.0f);
+                cone *= 0.28f + 0.72f * (1.0f - smoothstep(boundary - 0.025f, boundary + 0.025f, radius));
+                float3 incident = spot.radiance * (48.0f * cone / (1.0f + r2));
+                if (hm == 21u)
+                    direct2 += wovenSpecular(hitUv, hitUvWidths, hitN, V2, l, T, B) * incident;
+                else
+                    direct2 += irisDirect(hm, hitPart, p, irisCentre, hitWorldWidth, hitN, V2, l, hBase, hRough, hMetal, hCoat) * incident;
+            }
+        }
         if (hTrans > 0.05) {
             float back2 = saturate(dot(-hitN, sunDir) * 0.65 + 0.35);
             direct2 += hBase * sunRad * (back2 * hTrans * (0.30 + 0.70 * sunVis2) * 0.48);
@@ -2201,6 +2352,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
 
         float3 kd2 = (1.0 - f0_2) * (1.0 - hMetal);
         float3 ibl2 = (kd2 * hBase * diffEnv2 + specEnv2 * (f0_2 * brdf2.x + brdf2.y)) * hOrm.x;
+        if (wovenRibbon) ibl2 *= 1.0f - 0.06f * 0.26f;
         ibl2 += egretFeatherScatter(hitPart, hm, hitNGeom);
         ibl2 += policeAirframeFill(hitPart, hm, hitNGeom, V2);
 
@@ -2209,6 +2361,12 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
             float3 beer2 = (hm == 35u) ? float3(0.62, 0.22, 0.04) : ((hm == 4u) ? float3(0.68, 0.92, 0.82) : hBase);
             float3 trans2 = sampleIblEnv(direction, 0.10, inBath) * beer2;
             color = lerp(trans2, specEnv2, clamp(fres2, 0.045, 0.88)) + direct2;
+            if (isGrandTutti() && hm == 3u && hitPart >= 10u && hitPart <= 16u) {
+                float growth = smoothstep(276.0f, 328.0f, time) * (1.0f - smoothstep(333.0f, 337.5f, time));
+                float blade = saturate(hitUv.x) + 0.38f * abs(hitUv.y * 2.0f - 1.0f);
+                float mineral = growth * (1.0f - smoothstep(growth - 0.16f, growth + 0.18f, blade));
+                color += enamelSheen(hitUv, hitUvWidths, hitN, V2, T) * mineral * (diffEnv2 + sunRad * sunVis2 * saturate(dot(hitN, sunDir)));
+            }
             if (hitPart == 184u && hm == 18u)
                 color = policeGlazing(trans2, specEnv2, p, hitN, V2) + direct2;
             return true;
@@ -2220,7 +2378,7 @@ bool traceSceneEx(float3 origin, float3 direction, float distance, uint mask, fl
         if (!hitGlows) hitEmission = 0.0.xxx;
         if (hitPart == 62u && hm == 15u && abs(hitNGeom.y) < 0.55)
             hitEmission = shopLightbox(hitUv, hitUvWidth * taipeiKit.w / 0.08, sceneInstances[q.CommittedInstanceID()].buildingSeed);
-        float3 hitCol = direct2 + ibl2 + stageTrim + streetLight + hitEmission;
+        float3 hitCol = direct2 + ibl2 + stageTrim * (hm == 20u ? (diffEnv2 + sunRad * sunVis2 * saturate(dot(hitN, sunDir))) : 1.0f.xxx) + streetLight + hitEmission;
         float fogTransmission = 1.0f;
         if (cityExterior()) {
             float haze = cityHazeWeight(hitT, origin.y, p.y);
@@ -2548,6 +2706,7 @@ struct VOut {
     nointerpolation uint seed : TEXCOORD6;
     float localY : TEXCOORD7;
     float2 roomMeters : TEXCOORD8;
+    nointerpolation float3 objectOrigin : TEXCOORD9;
 };
 
 VOut VSMain(uint id : SV_VertexID, uint instanceId : SV_InstanceID) {
@@ -2564,6 +2723,7 @@ VOut VSMain(uint id : SV_VertexID, uint instanceId : SV_InstanceID) {
     o.flags = data.flags;
     o.seed = data.buildingSeed;
     o.localY = v.p.y;
+    o.objectOrigin = float3(data.world[0].w, data.world[1].w, data.world[2].w);
     o.tangentSign = float4(norm(mul(worldBasis,v.tangent.xyz)), v.tangent.w);
     o.roomMeters = 0.0.xx;
     if ((data.flags & (1u << 24)) && (o.mat == 5u || o.mat == 13u || o.mat == 14u)) {
@@ -2629,20 +2789,10 @@ float2 PSSceneMotion(MotionVertex i) : SV_Target0 {
     return pixelMotion(ndc, i.prevClip);
 }
 
-// Match the camera-to-surface distance written by PSMain for flat panes.
-[earlydepthstencil]
-float PSPaneDistance(VOut i) : SV_Target0 {
-    return length(i.world - eye);
-}
-
 struct Targets {
     float4 color   : SV_Target0;
-#if defined(BOO_GLASS_PANE)
-    float4 transmittance : SV_Target1;
-#else
     float distance : SV_Target1;
     float dofDistance : SV_Target7;
-#endif
 #if defined(M2_RT)
     float4 normRough  : SV_Target2;
     float4 diffRadHit : SV_Target3;
@@ -2793,7 +2943,22 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float metallic = saturate(ormSample.z);
     float auxVal = ormSample.w;
     float2 uvWidth = fwidth(i.uv.xy);
-    float3 stageTrim = cathedralFinish(matId, partId, i.uv.xy, max(uvWidth.x, uvWidth.y), base, rough, metallic);
+    float mirrorSteam = 0.0f;
+    if (isDawnFinale() && matId == 34u && partId == 230u) {
+        float2 mirrorPos = i.world.xy - i.objectOrigin.xy;
+        float px = max(worldFootprint.x, worldFootprint.y);
+        float progress = smoothstep(338.5f, 355.0f, time);
+        float2 core = lerp(float2(0.18f, 0.31f), float2(0.24f, 0.40f), progress);
+        float2 d = max(abs(mirrorPos - float2(-0.18f, 4.39f)) - core, 0.0f.xx);
+        float visible = 1.0f - smoothstep(0.015f, 0.08f, px);
+        float noise = sin(mirrorPos.x * 28.0f) * cos(mirrorPos.y * 22.0f) * (0.025f * visible);
+        float aa = max(px, 0.005f);
+        mirrorSteam = smoothstep(0.015f - aa, 0.14f + aa, length(d) + noise);
+        mirrorSteam *= 0.55f + 0.45f * (1.0f - smoothstep(3.90f, 4.90f, mirrorPos.y));
+        rough = lerp(rough, 0.32f, mirrorSteam);
+    }
+    float3 stageTrim = cathedralFinish(matId, partId, i.uv.xy, uvWidth, n, v, T, base, rough, metallic);
+    parcelHardwareFinish(matId, partId, i.uv.xy, max(uvWidth.x, uvWidth.y), rough);
     if (aircraft && matId == 11u && partId <= 115u) {
         aircraftPaint(partId, i.localY, fwidth(i.localY), base, rough, metallic);
     }
@@ -2892,6 +3057,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 refrDir = norm(lerp(-v, refract(-v, n, 1.0 / ior), refrBend));
 
     float3 sunTrans = 1.0.xxx;
+    float ribbonSunVis = 0.0f;
     float rtContactAO = 1.0;
     float3 reflected = sampleIblEnv(reflect(-v, n), rough, inBath);
     float3 transmitted = 0.0f.xxx;
@@ -2908,7 +3074,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         ssrRed = transmitted;
         ssrBlue = transmitted;
     }
-#elif !defined(BOO_GLASS_PANE)
+#else
     if (!liteMode() || isGlass)
         transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06f, true) : skyImpl(refrDir, i.world, !liteMode());
 #endif
@@ -3105,18 +3271,20 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float maxShadowDist = isDawnFinale() ? 18.0f : 28.0f;
             float3 shOrigin = i.world + nGeom * 0.015 + ((matId == 29u || matId == 36u) ? (sunDir * 0.022) : 0.0.xxx);
             bool evalCaustics = inBath || (act == 2u && dist < 8.5);
+            bool disperseVanity = inBath && partId == 231u && matId == 31u && effectsDetail() > 0u && !liteMode();
+            float causticFootprint = max(worldFootprint.x, max(worldFootprint.y, worldFootprint.z));
             uint qPerShadow = evalCaustics ? 2u : 1u;
 
             if (accumulating() && accumFrame >= 2u) {
                 float r = sqrt(accumJit) * sunRadius;
                 float3 jitDir = norm(sunDir + (sT1 * cos(rotPhi) + sT2 * sin(rotPhi)) * r);
                 bool occ = false;
-                sunTrans = traceShadowTransmittance(shOrigin, jitDir, maxShadowDist, evalCaustics, occ);
+                sunTrans = traceShadowTransmittance(shOrigin, jitDir, maxShadowDist, evalCaustics, disperseVanity, causticFootprint, occ);
                 if (occ || dot(sunTrans, float3(0.333, 0.334, 0.333)) < 0.85) ++shadowHits;
                 queries += qPerShadow;
             } else if (maxShadowSamples == 1u) {
                 bool occ = false;
-                sunTrans = traceShadowTransmittance(shOrigin, sunDir, maxShadowDist, evalCaustics, occ);
+                sunTrans = traceShadowTransmittance(shOrigin, sunDir, maxShadowDist, evalCaustics, disperseVanity, causticFootprint, occ);
                 if (occ || dot(sunTrans, float3(0.333, 0.334, 0.333)) < 0.85) ++shadowHits;
                 queries += qPerShadow;
             } else {
@@ -3124,8 +3292,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 float th0 = tempSamp ? rotPhi : rotPhi * 0.18;
                 bool occ0 = false;
                 bool occ1 = false;
-                float3 tr0 = traceShadowTransmittance(shOrigin, norm(sunDir + (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist, evalCaustics, occ0);
-                float3 tr1 = traceShadowTransmittance(shOrigin, norm(sunDir - (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist, evalCaustics, occ1);
+                float3 tr0 = traceShadowTransmittance(shOrigin, norm(sunDir + (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist, evalCaustics, disperseVanity, causticFootprint, occ0);
+                float3 tr1 = traceShadowTransmittance(shOrigin, norm(sunDir - (sT1 * cos(th0) + sT2 * sin(th0)) * rProbe), maxShadowDist, evalCaustics, disperseVanity, causticFootprint, occ1);
                 bool glassMod0 = (dot(tr0, float3(0.333, 0.334, 0.333)) < 0.92);
                 bool glassMod1 = (dot(tr1, float3(0.333, 0.334, 0.333)) < 0.92);
                 if (occ0 || glassMod0) ++shadowHits;
@@ -3144,7 +3312,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                         float theta = (float)s * 2.3999632 + (tempSamp ? rotPhi : rotPhi * 0.18);
                         float3 jitDir = norm(sunDir + (sT1 * cos(theta) + sT2 * sin(theta)) * r);
                         bool occS = false;
-                        float3 trS = traceShadowTransmittance(shOrigin, jitDir, maxShadowDist, evalCaustics, occS);
+                        float3 trS = traceShadowTransmittance(shOrigin, jitDir, maxShadowDist, evalCaustics, disperseVanity, causticFootprint, occS);
                         if (occS || dot(trS, float3(0.333, 0.334, 0.333)) < 0.92) ++shadowHits;
                         trAcc += trS;
                         queries += qPerShadow;
@@ -3152,6 +3320,14 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                     sunTrans = trAcc / (float)maxShadowSamples;
                 }
             }
+        }
+
+        // Ribbon shading otherwise skips the general sun shadow path.
+        if (matId == 21u && partId >= 216u && partId <= 219u && effectsDetail() > 0u && dot(n, sunDir) > 0.0f) {
+            bool ribbonOccluded = traceShadow(i.world + nGeom * 0.015f, sunDir, 28.0f);
+            ribbonSunVis = ribbonOccluded ? 0.0f : 1.0f;
+            ++queries;
+            if (ribbonOccluded) ++shadowHits;
         }
 
         // Bathroom: Cosine-Weighted DXR Hemisphere GI + Multi-Scale Contact AO (4mm crevices -> 3.85m window portal!)
@@ -3296,8 +3472,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
 
     // 1. Direct Sun / Key GGX + Clearcoat + Curved-Glass Caustics (restirDirect routed to denoised path!)
     float3 diffConservBase = (translucency > 0.02) ? (base * (1.0 - 0.24 * translucency)) : base;
-    float3 directSunOnly = evalGgxDirect(n, v, sunDir, diffConservBase, rough, metallic, clearcoat) * sunRad * sunTrans;
+    float3 directSunOnly = irisDirect(matId, partId, i.world, i.objectOrigin, length(worldFootprint), n, v, sunDir, diffConservBase, rough, metallic, clearcoat) * sunRad * sunTrans;
     float3 stageIrradiance = 0.0.xxx;
+    float3 ribbonSpot = 0.0f.xxx;
     if (sanctuarySpotsOn()) {
         [unroll] for (uint fixture = 0; fixture < 2; ++fixture) {
             SanctuarySpot spot = sanctuarySpot(fixture == 0u ? -1.0f : 1.0f);
@@ -3318,7 +3495,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float cut = 1.0 - smoothstep(boundary - 0.025, boundary + 0.025, radius);
             cone *= 0.28 + 0.72 * cut;
             float3 incident = spot.radiance * (48.0 * cone / (1.0 + radiusSq));
-            directSunOnly += evalGgxDirect(n, v, lightDirection, diffConservBase, rough, metallic, clearcoat) * incident;
+            directSunOnly += irisDirect(matId, partId, i.world, i.objectOrigin, length(worldFootprint), n, v, lightDirection, diffConservBase, rough, metallic, clearcoat) * incident;
+            if (matId == 21u && partId >= 216u && partId <= 219u)
+                ribbonSpot += wovenSpecular(i.uv.xy, uvWidth, n, v, lightDirection, T, B) * incident;
             stageIrradiance += incident * (0.28 + 0.72 * abs(dot(nGeom, lightDirection)));
         }
     }
@@ -3432,6 +3611,12 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         rayConfidence = hasTracedReflection ? saturate(1.0 - rough * 0.55) : 0.0;
     }
     float3 specRadiance = lerp(iblSpecEnv, reflected, rayConfidence);
+    if (mirrorSteam > 0.0f) {
+        // Ray cones filter textures, not silhouettes; rough IBL supplies stable fog scatter.
+        float3 mistEnv = sampleIblEnv(reflect(-v, n), 0.52f, true);
+        specRadiance = lerp(specRadiance, mistEnv, 0.78f * mirrorSteam);
+        specRadiance += mistEnv * float3(0.20f, 0.15f, 0.10f) * (0.12f + 0.08f * (1.0f - ndotv)) * mirrorSteam;
+    }
 
     float3 kd = (1.0 - f0) * (1.0 - metallic);
     float diffOcclusion = (inBath && hasTracedBathGi) ? (texAO * (0.16 + 0.84 * rtContactAO)) : combinedAO;
@@ -3446,7 +3631,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 coatRefl = hasTracedReflection ? lerp(reflected, iblSpecEnv, 0.12) : sampleIblEnv(reflect(-v, n), 0.06, inBath);
     float3 specIndirectTerm = (specRadiance * (f0 * envBrdf.x + envBrdf.y) + coatRefl * coatWeight) * specOcclusion;
 
-    float3 emissiveTerm = stageTrim + streetLight + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
+    float3 sheenIrradiance = diffIrr * diffOcclusion + sunRad * sunTrans * saturate(dot(n, sunDir)) + stageIrradiance;
+    float3 emissiveTerm = (matId == 12u ? stageTrim : 0.0f.xxx) + streetLight + (districtFacade ? facadeLight : emissive(matId, i.world, dist * 0.0022));
     if (!furnitureGlows) emissiveTerm = 0.0.xxx;
     if (partId >= 86u && partId <= 88u) emissiveTerm = relayLight(partId, matId, nGeom, v);
     if (partId == 172u) emissiveTerm = blimpEmission(matId);
@@ -3457,7 +3643,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         emissiveTerm = ((partId & 1u) == 0u ? float3(2.4, 0.08, 0.025) : float3(0.045, 1.9, 0.72))
                      * (lampsOff() ? 0.0 : lerp(1.0, 0.28, daylight));
     }
-    float3 nonIndirectColor = directSunOnly + emissiveTerm;
+    float3 nonIndirectColor = directSunOnly + emissiveTerm + (matId == 20u ? stageTrim * sheenIrradiance : 0.0f.xxx);
     if (partId == 191u) {
         // Thin silk lets the low sun through: lit from behind, the banner glows.
         float3 L = sceneSunDir();
@@ -3509,9 +3695,6 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     float3 color = nonIndirectColor + indirectColor;
-#if defined(BOO_GLASS_PANE)
-    float3 paneTransmittance = 0.0f.xxx;
-#endif
 
     // 5. Solid 2-Interface & Thin-Walled Dielectric Glass: Crystal (3), Celadon (4), Smoked Canopy (18), Amber Bottle (35), Float Glass (40), Droplets & Marbles
     if (isGlass) {
@@ -3550,16 +3733,8 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
             float thickPane = clamp(i.uv.z, 0.008, 0.04) / max(ndotv, 0.28);
             float3 beerLowIron = exp(-float3(0.28, 0.10, 0.14) * thickPane * 1.8);
             float paneReflMix = clamp(0.018 + 0.54 * fres, 0.018, 0.60);
-#if defined(BOO_GLASS_PANE)
-            // The blend lets the real scene through (destination times paneTransmittance), so the pane
-            // adds only its reflection and highlight. Adding the environment's guess at what is behind
-            // the glass as well laid a blurred copy of the sky over the sharp skyline.
-            paneTransmittance = beerLowIron * (1.0f - paneReflMix);
-            color = specRadiance * 0.88f * paneReflMix + specKey * sunRad * 0.95f;
-#else
             color = lerp(transmitted * beerLowIron, specRadiance * 0.88, paneReflMix)
                   + specKey * sunRad * 0.95;
-#endif
         } else if (isWaterDroplet) {
             float dropReflMix = clamp(0.026 + 0.88 * fres, 0.026, 0.88);
             color = lerp(transmitted * float3(0.98, 0.99, 1.0) * tirBoost, specRadiance, dropReflMix)
@@ -3617,6 +3792,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                 float3 nacre = lerp(float3(0.09, 0.34, 0.30), float3(0.87, 0.65, 0.40),
                                      saturate(0.20 + 0.55 * ribs + 0.22 * n.y));
                 glassTrans = lerp(glassTrans, nacre * (0.45 + 0.42 * saturate(dot(n, sunDir))), mineral * 0.76);
+                glassTrans += enamelSheen(i.uv.xy, uvWidth, n, v, T) * mineral * sheenIrradiance;
             }
             float reflMix = isThinCrystalPetal
                 ? clamp(0.032 + 0.48 * fres, 0.032, 0.56)
@@ -3679,6 +3855,11 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         color = silk * 0.68 * (0.55 + 0.55 * velvetRim)
               + specRadiance * (0.34 * fres)
               + float3(0.95, 0.74, 0.38) * (velvetRim * 0.18);
+        if (partId >= 216u && partId <= 219u && effectsDetail() > 0u) {
+            // Reserve the mean thread reflectance from the underlying silk and IBL.
+            color *= 1.0f - 0.06f * 0.26f;
+            color += wovenSpecular(i.uv.xy, uvWidth, n, v, sunDir, T, B) * sunRad * ribbonSunVis + ribbonSpot;
+        }
     }
 
     if (matId == 17u) {
@@ -3739,11 +3920,6 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     }
 
     Targets o;
-#if defined(BOO_GLASS_PANE)
-    // Debug AOVs replace the underlying image, except the glass-color AOV.
-    if (curAov != 0u && curAov != 6u) paneTransmittance = 0.0f.xxx;
-    o.transmittance = float4(paneTransmittance * transScale, 1.0f);
-#else
     o.distance = dist;
     o.dofDistance = dist;
 #if defined(M2_RT)
@@ -3752,7 +3928,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float virtualDistance = reflHit ? dist + rrHitDistance : kSceneFar;
         float brass = (matId == 12u && partId >= 200u && partId <= 207u)
             ? stelaBrassWeight(i.uv.xy, max(uvWidth.x, uvWidth.y)) : 0.0f;
-        o.dofDistance = lerp(virtualDistance, dist, brass);
+        o.dofDistance = lerp(virtualDistance, dist, max(brass, mirrorSteam));
     } else if (matId == 40u) {
         // The flat pane traces straight through; the eye-to-hit distance is physical.
         o.dofDistance = refrHit ? length(i.world - nGeom * 0.018f - v * paneHitT - eye) : kSceneFar;
@@ -3762,7 +3938,6 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         float behind = gSceneDepthCopy.Load(int3(int2(i.pos.xy), 0));
         o.dofDistance = behind >= dist ? behind : dist;
     }
-#endif
 #endif
 
 #if defined(M2_RT)
@@ -4104,12 +4279,8 @@ Targets PSSky(SkyOut i) {
 #endif
     Targets o;
     o.color = float4(skyCol, 1.0);
-#if defined(BOO_GLASS_PANE)
-    o.transmittance = 0.0f.xxxx;
-#else
     o.distance = kSceneFar;
     o.dofDistance = kSceneFar;
-#endif
 #if defined(M2_RT)
     o.normRough  = float4(0.0, 1.0, 0.0, 1.0);
     o.diffRadHit = float4(0.0, 0.0, 0.0, 0.0);

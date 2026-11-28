@@ -1,5 +1,6 @@
 #include "boo/benchmark.hpp"
 #include "boo/logging.hpp"
+#include "boo/mapped_write.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -267,9 +268,21 @@ BenchResultEntry runDxrHardwareBench(
         out.notes = "Failed to allocate BLAS geometry buffers.";
         return out;
     }
-    void* ptr = nullptr;
-    vbUpload->Map(0, nullptr, &ptr); std::memcpy(ptr, verts, sizeof(verts)); vbUpload->Unmap(0, nullptr);
-    ibUpload->Map(0, nullptr, &ptr); std::memcpy(ptr, indices, sizeof(indices)); ibUpload->Unmap(0, nullptr);
+    auto uploadGeometry = [](ID3D12Resource* resource, const char* name, const void* source, size_t size) {
+        void* ptr = nullptr;
+        D3D12_RANGE noRead{0, 0};
+        if (FAILED(resource->Map(0, &noRead, &ptr)) || !ptr) return false;
+        const bool fits = BOO_MAPPED_WRITE_OK(resource, name, 0, size);
+        if (fits) std::memcpy(ptr, source, size);
+        resource->Unmap(0, nullptr);
+        return fits;
+    };
+    if (!uploadGeometry(vbUpload.Get(), "Benchmark BLAS vertices", verts, sizeof(verts)) ||
+        !uploadGeometry(ibUpload.Get(), "Benchmark BLAS indices", indices, sizeof(indices))) {
+        out.status = BackendStatus::Faulted;
+        out.notes = "Failed to write BLAS geometry buffers.";
+        return out;
+    }
 
     D3D12_RAYTRACING_GEOMETRY_DESC geomDesc{};
     geomDesc.Type  = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -298,7 +311,19 @@ BenchResultEntry runDxrHardwareBench(
     constexpr uint32_t kNumInstances = 64; // 8x8 Glass Orchid crystal lattice
     auto instUpload = h.createBuffer(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * kNumInstances, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
     D3D12_RAYTRACING_INSTANCE_DESC* instMapped = nullptr;
-    instUpload->Map(0, nullptr, reinterpret_cast<void**>(&instMapped));
+    D3D12_RANGE noRead{0, 0};
+    if (!instUpload || FAILED(instUpload->Map(0, &noRead, reinterpret_cast<void**>(&instMapped))) || !instMapped) {
+        out.status = BackendStatus::Faulted;
+        out.notes = "Failed to map benchmark instance buffer.";
+        return out;
+    }
+    if (!BOO_MAPPED_WRITE_OK(instUpload.Get(), "Benchmark TLAS instances", 0,
+                             sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * kNumInstances)) {
+        instUpload->Unmap(0, nullptr);
+        out.status = BackendStatus::Faulted;
+        out.notes = "Benchmark instances exceed upload buffer.";
+        return out;
+    }
     for (uint32_t i = 0; i < kNumInstances; ++i) {
         auto& inst = instMapped[i];
         std::memset(&inst, 0, sizeof(inst));

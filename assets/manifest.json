@@ -158,7 +158,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "adacbf19b1c3f5050bdaef1832dedc65e62fef230fb1344d72b6a30ec71346e3"
+      "sha256": "43272fb6597223a320efbceb2a85acf32c14acc481908ae7e89909df52d3e959"
     },
     {
       "id": "model_madame_n_director_xml",

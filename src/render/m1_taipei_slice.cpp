@@ -5,6 +5,7 @@
 #include "boo/city_modules.hpp"
 #include "boo/cues.hpp"
 #include "boo/logging.hpp"
+#include "boo/mapped_write.hpp"
 #include "boo/m1_scene.hpp"
 #include "boo/neural_rendering.hpp"
 #include "boo/flow_smoke.hpp"
@@ -2287,15 +2288,22 @@ bool M1TaipeiSliceEffect::Impl::buildDxrResourcesAndWarmUp(D3D12Context& d3d, ui
     }
 
     void* ptr = nullptr;
-    blasVbUpload->Map(0, nullptr, &ptr);
-    std::memcpy(ptr, allVerts.data(), allVerts.size() * sizeof(GpuM1Vertex));
+    const size_t vbBytes = allVerts.size() * sizeof(GpuM1Vertex);
+    if (!BOO_MAPPED_WRITE_OK(blasVbUpload.Get(), "M1 BLAS vertices", 0, vbBytes) ||
+        FAILED(blasVbUpload->Map(0, nullptr, &ptr)) || !ptr) return false;
+    std::memcpy(ptr, allVerts.data(), vbBytes);
     blasVbUpload->Unmap(0, nullptr);
 
-    blasIbUpload->Map(0, nullptr, &ptr);
-    std::memcpy(ptr, allIndices.data(), allIndices.size() * sizeof(uint32_t));
+    ptr = nullptr;
+    const size_t ibBytes = allIndices.size() * sizeof(uint32_t);
+    if (!BOO_MAPPED_WRITE_OK(blasIbUpload.Get(), "M1 BLAS indices", 0, ibBytes) ||
+        FAILED(blasIbUpload->Map(0, nullptr, &ptr)) || !ptr) return false;
+    std::memcpy(ptr, allIndices.data(), ibBytes);
     blasIbUpload->Unmap(0, nullptr);
 
-    zeroUploadBuf->Map(0, nullptr, &ptr);
+    ptr = nullptr;
+    if (!BOO_MAPPED_WRITE_OK(zeroUploadBuf.Get(), "M1 zero upload", 0, 256) ||
+        FAILED(zeroUploadBuf->Map(0, nullptr, &ptr)) || !ptr) return false;
     std::memset(ptr, 0, 256);
     zeroUploadBuf->Unmap(0, nullptr);
 
@@ -2308,7 +2316,9 @@ bool M1TaipeiSliceEffect::Impl::buildDxrResourcesAndWarmUp(D3D12Context& d3d, ui
     }
 
     uint8_t* instMapped = nullptr;
-    if (FAILED(tlasInstanceUpload->Map(0, nullptr, reinterpret_cast<void**>(&instMapped))) || !instMapped) {
+    if (!BOO_MAPPED_WRITE_OK(tlasInstanceUpload.Get(), "M1 TLAS instances", 0,
+                             kNumTlasInstances * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) ||
+        FAILED(tlasInstanceUpload->Map(0, nullptr, reinterpret_cast<void**>(&instMapped))) || !instMapped) {
         return false;
     }
     populateTaipei96Instances(
@@ -3792,8 +3802,11 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             if (tPixels != nullptr) {
                 uint8_t* dstMapped = nullptr;
                 D3D12_RANGE emptyRead{0, 0};
-                if (SUCCEEDED(tensorUploadBuf[slot]->Map(0, &emptyRead, reinterpret_cast<void**>(&dstMapped))) && dstMapped) {
-                    const size_t srcRowBytes = static_cast<size_t>(LiveAcceleratorOrchestra::kTensorWidth) * 8u;
+                const size_t srcRowBytes = static_cast<size_t>(LiveAcceleratorOrchestra::kTensorWidth) * 8u;
+                const size_t tensorLastRow = static_cast<size_t>(tensorFootprint.Offset) +
+                    static_cast<size_t>(LiveAcceleratorOrchestra::kTensorHeight - 1u) * tensorFootprint.Footprint.RowPitch;
+                if (BOO_MAPPED_WRITE_OK(tensorUploadBuf[slot].Get(), "M1 tensor upload", tensorLastRow, srcRowBytes) &&
+                    SUCCEEDED(tensorUploadBuf[slot]->Map(0, &emptyRead, reinterpret_cast<void**>(&dstMapped))) && dstMapped) {
                     const auto* srcBytes = reinterpret_cast<const uint8_t*>(tPixels);
                     for (uint32_t y = 0; y < LiveAcceleratorOrchestra::kTensorHeight; ++y) {
                         std::memcpy(
@@ -3913,7 +3926,9 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
             const size_t sliceOffset = static_cast<size_t>(slot) * kNumTlasInstances * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
             uint8_t* mappedInst = nullptr;
             D3D12_RANGE emptyRead{0, 0};
-            if (SUCCEEDED(tlasInstanceUpload->Map(0, &emptyRead, reinterpret_cast<void**>(&mappedInst))) && mappedInst) {
+            if (BOO_MAPPED_WRITE_OK(tlasInstanceUpload.Get(), "M1 TLAS instances", sliceOffset,
+                                    kNumTlasInstances * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) &&
+                SUCCEEDED(tlasInstanceUpload->Map(0, &emptyRead, reinterpret_cast<void**>(&mappedInst))) && mappedInst) {
                 std::array<D3D12_GPU_VIRTUAL_ADDRESS, kNumBlasMeshes> blasVas{};
                 for (uint32_t m = 0; m < kNumBlasMeshes; ++m) {
                     blasVas[m] = blasResults[m]->GetGPUVirtualAddress();
@@ -4039,7 +4054,11 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                                       LiveAcceleratorOrchestra::kMaxCudaParticleCount);
     }
 
-    const uint32_t subParticleCount = ctx.qualityPreset == QualityPresetId::Lite ? 2048u : LiveAcceleratorOrchestra::kSubParticleCount;
+    reqCudaParticles = (std::min)(reqCudaParticles, particleCapacity);
+    // The substitute shader dispatches whole 64-thread groups and has a fixed
+    // 8192-element limit. Never round a reduced allocation up past its end.
+    const uint32_t subParticleCount = (std::min)(particleCapacity & ~63u,
+        ctx.qualityPreset == QualityPresetId::Lite ? 2048u : LiveAcceleratorOrchestra::kSubParticleCount);
     uint32_t activeParticleCount = subParticleCount;
     if (!skipSharedCudaUpdate) {
         bool uploadedHwParticles = false;
@@ -4052,7 +4071,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
                 void* dstMapped = nullptr;
                 D3D12_RANGE emptyRead{0, 0};
                 const size_t byteCount = static_cast<size_t>(reqCudaParticles) * sizeof(LiveParticleState);
-                if (SUCCEEDED(particleUploadBuf[slot]->Map(0, &emptyRead, &dstMapped)) && dstMapped) {
+                if (BOO_MAPPED_WRITE_OK(particleUploadBuf[slot].Get(), "M1 particle upload", 0, byteCount) &&
+                    SUCCEEDED(particleUploadBuf[slot]->Map(0, &emptyRead, &dstMapped)) && dstMapped) {
                     std::memcpy(dstMapped, pStates, byteCount);
                     D3D12_RANGE written{0, byteCount};
                     particleUploadBuf[slot]->Unmap(0, &written);
@@ -4091,7 +4111,8 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         }
     } else {
         activeParticleCount = livePillars[1].hardwareVerified
-                                  ? std::max(LiveAcceleratorOrchestra::kCudaParticleCount, livePillars[1].workloadItems)
+                                  ? (std::min)(particleCapacity, std::max(LiveAcceleratorOrchestra::kCudaParticleCount,
+                                                                          livePillars[1].workloadItems))
                                   : subParticleCount;
     }
 
@@ -4225,10 +4246,13 @@ void M1TaipeiSliceEffect::Impl::uploadCodecRgbaToGpu(
 
     uint8_t* dstMapped = nullptr;
     D3D12_RANGE emptyRead{0, 0};
-    if (FAILED(codecRgbaUploadBuf[uploadSlot]->Map(0, &emptyRead, reinterpret_cast<void**>(&dstMapped))) || !dstMapped) {
+    const size_t srcRowBytes = static_cast<size_t>(LiveAcceleratorOrchestra::kCodecWidth) * 4u;
+    const size_t codecLastRow = static_cast<size_t>(codecFootprint.Offset) +
+        static_cast<size_t>(LiveAcceleratorOrchestra::kCodecHeight - 1u) * codecFootprint.Footprint.RowPitch;
+    if (!BOO_MAPPED_WRITE_OK(codecRgbaUploadBuf[uploadSlot].Get(), "M1 codec upload", codecLastRow, srcRowBytes) ||
+        FAILED(codecRgbaUploadBuf[uploadSlot]->Map(0, &emptyRead, reinterpret_cast<void**>(&dstMapped))) || !dstMapped) {
         return;
     }
-    const size_t srcRowBytes = static_cast<size_t>(LiveAcceleratorOrchestra::kCodecWidth) * 4u;
     for (uint32_t y = 0; y < LiveAcceleratorOrchestra::kCodecHeight; ++y) {
         std::memcpy(
             dstMapped + codecFootprint.Offset + static_cast<size_t>(y) * codecFootprint.Footprint.RowPitch,
@@ -4299,6 +4323,9 @@ void M1TaipeiSliceEffect::Impl::uploadUiText(ID3D12Device* dev, ID3D12GraphicsCo
     if (labels)  bands[bandCount++] = {0u, UiTextAtlasLayout::kCaptionTop};
     if (caption) bands[bandCount++] = {UiTextAtlasLayout::kCaptionTop, UiTextAtlasLayout::kCaptionMaxH};
 
+    for (uint32_t b = 0; b < bandCount; ++b) {
+        if (!BOO_MAPPED_WRITE_OK(buf.Get(), "M1 UI text upload", kPitch * bands[b].top, kPitch * bands[b].rows)) return;
+    }
     uint8_t* mapped = nullptr;
     D3D12_RANGE noRead{0, 0};
     if (FAILED(buf->Map(0, &noRead, reinterpret_cast<void**>(&mapped))) || !mapped) return;
@@ -4615,7 +4642,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     const size_t cbOffset = static_cast<size_t>(cbSlot) * 512u;
     uint8_t* mappedCb = nullptr;
     D3D12_RANGE emptyRead{0, 0};
-    if (SUCCEEDED(presentCbUpload->Map(0, &emptyRead, reinterpret_cast<void**>(&mappedCb))) && mappedCb) {
+    if (BOO_MAPPED_WRITE_OK(presentCbUpload.Get(), "M1 present constants", cbOffset, sizeof(pc)) &&
+        SUCCEEDED(presentCbUpload->Map(0, &emptyRead, reinterpret_cast<void**>(&mappedCb))) && mappedCb) {
         std::memcpy(mappedCb + cbOffset, &pc, sizeof(pc));
         D3D12_RANGE written{cbOffset, cbOffset + sizeof(pc)};
         presentCbUpload->Unmap(0, &written);

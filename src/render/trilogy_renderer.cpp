@@ -14,6 +14,7 @@
 #include "boo/wind_banner.hpp"
 #include "boo/nrd_bridge.hpp"
 #include "boo/logging.hpp"
+#include "boo/mapped_write.hpp"
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -51,7 +52,13 @@ ComPtr<ID3D12Resource> buffer(ID3D12Device* d,uint64_t size,D3D12_HEAP_TYPE heap
     D3D12_HEAP_PROPERTIES hp{};hp.Type=heap;D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;rd.Width=std::max<uint64_t>(size,256);rd.Height=1;rd.DepthOrArraySize=1;rd.MipLevels=1;rd.SampleDesc.Count=1;rd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;rd.Flags=flags;
     ComPtr<ID3D12Resource> r;check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,state,nullptr,IID_PPV_ARGS(&r)));return r;
 }
-void upload(ID3D12Resource* resource,const void* data,size_t size,size_t offset=0) {void* p=nullptr;D3D12_RANGE rr{0,0};check(resource->Map(0,&rr,&p));std::memcpy(static_cast<uint8_t*>(p)+offset,data,size);D3D12_RANGE wr{offset,offset+size};resource->Unmap(0,&wr);}
+void uploadImpl(ID3D12Resource* resource,const char* name,const void* data,size_t size,size_t offset=0) {
+    if (!BOO_MAPPED_WRITE_OK(resource,name,offset,size)) return;
+    void* p=nullptr; D3D12_RANGE rr{0,0}; check(resource->Map(0,&rr,&p));
+    std::memcpy(static_cast<uint8_t*>(p)+offset,data,size);
+    D3D12_RANGE wr{offset,offset+size}; resource->Unmap(0,&wr);
+}
+#define upload(resource, ...) uploadImpl((resource), #resource, __VA_ARGS__)
 void transition(ID3D12GraphicsCommandList* cmd,ID3D12Resource* r,D3D12_RESOURCE_STATES before,D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,before,after};cmd->ResourceBarrier(1,&b);
 }
@@ -433,11 +440,12 @@ ComPtr<ID3D12Resource> uploadBtexArray(ID3D12Device* d, D3D12Context& ctx, const
         const auto& sub = tex.subresources[i];
         const auto& fp = footprints[i];
         const uint8_t* srcBase = tex.payload.data() + sub.byteOffset;
-        uint8_t* dstBase = mapped + fp.Offset;
         const size_t copyBytes = std::min<size_t>(sub.rowBytes, static_cast<size_t>(fp.Footprint.RowPitch));
         const UINT rows = std::min<UINT>(sub.numRows, numRows[i]);
         for (UINT r = 0; r < rows; ++r) {
-            std::memcpy(dstBase + size_t(r) * fp.Footprint.RowPitch, srcBase + size_t(r) * sub.rowBytes, copyBytes);
+            const size_t offset = fp.Offset + size_t(r) * fp.Footprint.RowPitch;
+            if (BOO_MAPPED_WRITE_OK(upBuf.Get(), "BTEX upload", offset, copyBytes))
+                std::memcpy(mapped + offset, srcBase + size_t(r) * sub.rowBytes, copyBytes);
         }
     }
     D3D12_RANGE wr{0, static_cast<SIZE_T>(totalUploadBytes)};
@@ -475,8 +483,6 @@ struct TrilogyMeshRenderer::Impl {
         std::array<float,3> detailCenter{};
         std::array<float,3> glassBoundsMin{}, glassBoundsMax{};
         bool glassBoundsValid=false;
-        struct PaneSurface { uint32_t firstVertex=0, vertexCount=0; std::array<float,3> center{}; };
-        std::vector<PaneSurface> paneSurfaces;
     };
     std::vector<Part> parts;
     std::array<std::vector<Part>,3> birdTemplates;
@@ -494,14 +500,14 @@ struct TrilogyMeshRenderer::Impl {
         std::vector<SelectedPlacement> visible;
         std::vector<SelectedPlacement> rayOnly;
     };
-    struct DrawBatch { uint32_t first, count, indexCount, meshId; bool cutout; bool twoSided=false; float sortDepth=0.f; uint32_t firstVertex=0; };
+    struct DrawBatch { uint32_t first, count, indexCount, meshId; bool cutout; bool twoSided=false; };
     CityModuleLayout city;
     std::vector<Chunk> chunks;
     std::vector<std::vector<Part>> moduleParts;
     std::vector<ModuleSelection> selectedModules;
     std::vector<InstanceData> frameInstances;
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> rayInstances;
-    std::vector<DrawBatch> batches, glassBatches, paneBatches;
+    std::vector<DrawBatch> batches, glassBatches;
     ComPtr<ID3D12Resource> instanceBuffer, meshOffsets, compactBlasPool;
     size_t maxSceneInstances = 0;
     uint64_t blasBytes = 0, tlasBytes = 0;
@@ -520,7 +526,7 @@ struct TrilogyMeshRenderer::Impl {
     ComPtr<ID3D12Resource> rrHitDistance;
     bool rrReadable=false;
     float rrWorldToView[16]{}, rrViewToClip[16]{};
-    ComPtr<ID3D12PipelineState> rasterGlass, rasterGlassTwoSided, rasterPane, rasterPaneDistance, motionGlass, motionGlassTwoSided, motionPane;
+    ComPtr<ID3D12PipelineState> rasterGlass, rasterGlassTwoSided, motionGlass, motionGlassTwoSided;
     ComPtr<ID3D12Resource> glassColor, glassDistance, glassPlaceholder;
     uint32_t glassWidth=0, glassHeight=0;
     bool glassAllocationFailed=false;
@@ -840,18 +846,22 @@ struct TrilogyMeshRenderer::Impl {
         // Only the fabric's own vertices move; anything between its parts keeps its loaded copy.
         for (uint32_t index : c.partIndices) {
             const auto& sub = parts[index].sub;
-            std::memcpy(c.uploadMapped + slot * bytes + size_t(sub.firstVertex - c.first) * sizeof(BmeshVertex),
-                        c.current.data() + (sub.firstVertex - c.first), size_t(sub.vertexCount) * sizeof(BmeshVertex));
+            const size_t offset = slot * bytes + size_t(sub.firstVertex - c.first) * sizeof(BmeshVertex);
+            const size_t size = size_t(sub.vertexCount) * sizeof(BmeshVertex);
+            if (BOO_MAPPED_WRITE_OK(c.upload.Get(), "deforming vertex upload", offset, size))
+                std::memcpy(c.uploadMapped + offset, c.current.data() + (sub.firstVertex - c.first), size);
         }
         // Last frame's positions for motion vectors, then this frame's.
         const size_t previousBytes = (size_t(c.count) + 1u) * 16u;
-        uint8_t* previous = c.previousMapped + slot * previousBytes;
+        const size_t previousOffset = slot * previousBytes;
+        uint8_t* previous = BOO_MAPPED_WRITE_OK(c.previous.Get(), "deforming previous positions", previousOffset, previousBytes)
+            ? c.previousMapped + previousOffset : nullptr;
         const uint32_t header[4] = {c.first, c.count, 0u, 0u};
-        std::memcpy(previous, header, 16);
+        if (previous) std::memcpy(previous, header, 16);
         const auto& prior = (c.haveLast && !dlssReset) ? c.lastPositions : c.positions;
         for (uint32_t v = 0; v < c.count; ++v) {
             const float pp[4] = {prior[size_t(v) * 3], prior[size_t(v) * 3 + 1], prior[size_t(v) * 3 + 2], 1.f};
-            std::memcpy(previous + 16u * (v + 1u), pp, 16);
+            if (previous) std::memcpy(previous + 16u * (v + 1u), pp, 16);
         }
         std::swap(c.lastPositions, c.positions);
         c.haveLast = true;
@@ -898,7 +908,10 @@ struct TrilogyMeshRenderer::Impl {
     }
     // Part k's positions for ring slot `slot`, from the surface's current pose.
     void writeDeformRayPositions(DeformingSurface& c, uint32_t slot) {
-        float* out = reinterpret_cast<float*>(c.rayPositionsMapped + size_t(slot) * c.rayVertices * 12u);
+        const size_t offset = size_t(slot) * c.rayVertices * 12u;
+        const size_t size = size_t(c.rayVertices) * 12u;
+        if (!BOO_MAPPED_WRITE_OK(c.rayPositions.Get(), "deforming ray positions", offset, size)) return;
+        float* out = reinterpret_cast<float*>(c.rayPositionsMapped + offset);
         for (size_t k = 0; k < c.partIndices.size(); ++k) {
             const auto& sub = parts[c.partIndices[k]].sub;
             float* dst = out + size_t(c.partPositionStart[k]) * 3u;
@@ -1564,33 +1577,6 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
                     }
                 }
                 part->glassBoundsValid=true;
-                // A material-40 submesh can contain several panes. Split consecutive
-                // coplanar triangles into surfaces so each can be sorted independently.
-                if (part->sub.material==40u) {
-                    float normal[3]{}, plane=0.f;
-                    std::array<float,3> lo{}, hi{};
-                    for (uint32_t i=0; i+2<part->sub.indexCount; i+=3) {
-                        const auto& a=vertices[indices[part->sub.firstIndex+i]].positionMaterial;
-                        const auto& b=vertices[indices[part->sub.firstIndex+i+1]].positionMaterial;
-                        const auto& c=vertices[indices[part->sub.firstIndex+i+2]].positionMaterial;
-                        const float ab[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]};
-                        const float ac[3]={c[0]-a[0],c[1]-a[1],c[2]-a[2]};
-                        float n[3];cross(ab,ac,n);normalize(n);
-                        const float planeDistance=n[0]*a[0]+n[1]*a[1]+n[2]*a[2];
-                        const float alignment=n[0]*normal[0]+n[1]*normal[1]+n[2]*normal[2];
-                        if (part->paneSurfaces.empty() || std::abs(alignment)<.9999f || std::abs(planeDistance-alignment*plane)>.001f) {
-                            part->paneSurfaces.push_back({i,0,{}});
-                            std::copy_n(n,3,normal);plane=planeDistance;
-                            lo.fill(std::numeric_limits<float>::max());hi.fill(std::numeric_limits<float>::lowest());
-                        }
-                        auto& surface=part->paneSurfaces.back();surface.vertexCount+=3;
-                        for (int axis=0; axis<3; ++axis) {
-                            lo[axis]=std::min({lo[axis],a[axis],b[axis],c[axis]});
-                            hi[axis]=std::max({hi[axis],a[axis],b[axis],c[axis]});
-                            surface.center[axis]=(lo[axis]+hi[axis])*.5f;
-                        }
-                    }
-                }
             }
         }
         s.meshOffsets = buffer(d, firstIndices.size()*sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -1795,8 +1781,6 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
             check(gfxPso("m2_motion_ps.cso (two-sided glass)",glassMotion,s.motionGlassTwoSided));
             glassMotion.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
             check(gfxPso("m2_motion_ps.cso (glass)",glassMotion,s.motionGlass));
-            glassMotion.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
-            check(gfxPso("m2_motion_ps.cso (pane)",glassMotion,s.motionPane));
             md.PS={mvCut.data(),mvCut.size()};
             check(gfxPso("m2_motion_cutout_ps.cso",md,s.motionCutout));
             md.VS={skyvs.data(),skyvs.size()};md.PS={mvSky.data(),mvSky.size()};
@@ -1816,8 +1800,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         pd.RTVFormats[2]=pd.RTVFormats[3]=pd.RTVFormats[4]=DXGI_FORMAT_R16G16B16A16_FLOAT;
         pd.RTVFormats[5]=DXGI_FORMAT_R32G32B32A32_UINT;pd.RTVFormats[6]=DXGI_FORMAT_R16G16B16A16_FLOAT;pd.RTVFormats[7]=DXGI_FORMAT_R32_FLOAT;pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;pd.SampleDesc.Count=1;
         check(gfxPso("m2_mesh_ps.cso",pd,s.raster));
-        const auto psGlass=shader("m2_mesh_glass_ps.cso"), psPane=shader("m2_mesh_pane_ps.cso"),
-                   psPaneDistance=shader("m2_mesh_pane_distance_ps.cso");
+        const auto psGlass=shader("m2_mesh_glass_ps.cso");
         std::vector<uint8_t> rps,rpsCut,skyRtPs;
         std::atomic<bool> rrSkyOk{false},rrOpaqueOk{false}, glassPipelinesOk{false};
         PipelineCompiler rtCompiler;
@@ -1828,24 +1811,8 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         pane.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;
         check(gfxPso("m2_mesh_glass_ps.cso",pane,s.rasterGlass));
         pane.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
-        auto flat=pane;
-        flat.PS={psPane.data(),psPane.size()};
-        flat.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
-        flat.NumRenderTargets=1;
-        for (UINT i=1;i<8;++i) flat.RTVFormats[i]=DXGI_FORMAT_UNKNOWN;
-        flat.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
-        auto& blend=flat.BlendState.RenderTarget[0];
-        blend.BlendEnable=TRUE;blend.SrcBlend=D3D12_BLEND_ONE;blend.DestBlend=D3D12_BLEND_SRC1_COLOR;
-        blend.BlendOp=D3D12_BLEND_OP_ADD;blend.SrcBlendAlpha=D3D12_BLEND_ONE;
-        blend.DestBlendAlpha=D3D12_BLEND_ZERO;blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
-        auto paneDistance=flat;
-        paneDistance.PS={psPaneDistance.data(),psPaneDistance.size()};
-        paneDistance.RTVFormats[0]=DXGI_FORMAT_R32_FLOAT;
-        paneDistance.BlendState=pd.BlendState;
-        rtCompiler.start("M2 glass variants",vs.size()+psGlass.size()+psPane.size()+psPaneDistance.size(),[&s,d,pane,flat,paneDistance,&glassPipelinesOk] {
-            if (FAILED(d->CreateGraphicsPipelineState(&pane,IID_PPV_ARGS(&s.rasterGlassTwoSided)))) return true;
-            if (FAILED(d->CreateGraphicsPipelineState(&flat,IID_PPV_ARGS(&s.rasterPane)))) return true;
-            glassPipelinesOk=SUCCEEDED(d->CreateGraphicsPipelineState(&paneDistance,IID_PPV_ARGS(&s.rasterPaneDistance)));
+        rtCompiler.start("M2 glass variants",vs.size()+psGlass.size(),[&s,d,pane,&glassPipelinesOk] {
+            glassPipelinesOk=SUCCEEDED(d->CreateGraphicsPipelineState(&pane,IID_PPV_ARGS(&s.rasterGlassTwoSided)));
             return true;
         });
         s.glassBatches.reserve(128);
@@ -2303,7 +2270,6 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     s.frameInstances.clear();
     s.batches.clear();
     s.glassBatches.clear();
-    s.paneBatches.clear();
     auto& inst = s.rayInstances;
     inst.clear();
     CityDrawStats stats{};
@@ -2364,23 +2330,6 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             BOO_LOG_WARN("M2Mesh",std::string("Raster glass snapshots unavailable; drawing opaque: ")+e.what());
             return false;
         }
-    };
-    auto glassSortDepth = [&](const Impl::Part& part,const float* rows,const std::array<float,3>* center=nullptr) {
-        float local[3]{};
-        if (center) std::copy_n(center->data(),3,local);
-        else if (part.glassBoundsValid)
-            for (int axis=0; axis<3; ++axis) local[axis]=(part.glassBoundsMin[axis]+part.glassBoundsMax[axis])*.5f;
-        float depth=0.f;
-        for (int axis=0; axis<3; ++axis)
-            depth+=(rows[axis*4]*local[0]+rows[axis*4+1]*local[1]+rows[axis*4+2]*local[2]+rows[axis*4+3]-camera.eye[axis])*glassForward[axis];
-        return depth;
-    };
-    struct PaneCandidate { const Impl::Part* part; uint32_t id; std::array<float,12> rows; };
-    std::vector<PaneCandidate> paneCandidates;
-    auto appendPane = [&](const Impl::Part& part,uint32_t id,const float* rows) {
-        PaneCandidate candidate{&part,id,{}};
-        std::copy_n(rows,12,candidate.rows.begin());
-        paneCandidates.push_back(candidate);
     };
     auto append = [&](const Impl::Part& part, const DrawConstants& draw, uint32_t seed, bool visible, bool city, uint32_t actor=0u) {
         const uint32_t id=static_cast<uint32_t>(s.frameInstances.size());
@@ -2700,6 +2649,15 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const size_t instanceOffset=frameSlot*s.maxSceneInstances*sizeof(InstanceData);
     const size_t rayOffset=frameSlot*s.maxTlasInstances*sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
     const bool flockRays=useRt && rayMapped;
+    // Validate whole contiguous slices before parallel workers form pointers into them.
+    if (!BOO_MAPPED_WRITE_OK(instanceResource, "city instances", instanceOffset,
+                             (appended+flockInstances+bodyInstances)*sizeof(InstanceData))) return false;
+    if (flockRays && !BOO_MAPPED_WRITE_OK(rayResource, "city ray instances", rayOffset,
+                             (inst.size()+flockInstances+bodyInstances)*sizeof(D3D12_RAYTRACING_INSTANCE_DESC))) return false;
+    if (writeMotion && s.motionMapped && !BOO_MAPPED_WRITE_OK(s.previousTransforms.Get(), "city previous transforms",
+                             frameSlot*s.maxSceneInstances*sizeof(MotionRows),
+                             (appended+flockInstances+bodyInstances)*sizeof(MotionRows))) return false;
+    if (flockParts > kMaxBirdParts) throw std::runtime_error("Bird part count exceeds local array capacity");
     if (flockBirds) {
         // The workout flock. Every bird is posed and written on all cores, straight into this
         // pass's slice of the upload buffers, after everything that went through append().
@@ -2886,16 +2844,6 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             }
             auto& target=rasterGlass ? s.glassBatches : s.batches;
             target.push_back({static_cast<uint32_t>(first+b0),static_cast<uint32_t>(b1-b0),tpl.sub.indexCount,tpl.meshId,isCutoutMaterial(tpl.sub.material)});
-        }
-    }
-    for (const auto& candidate:paneCandidates) {
-        const auto& part=*candidate.part;
-        if (s.glassAllocationFailed) {
-            s.batches.push_back({candidate.id,1,part.sub.indexCount,part.meshId,false});
-        } else {
-            for (const auto& surface:part.paneSurfaces)
-                s.paneBatches.push_back({candidate.id,1,surface.vertexCount,part.meshId,false,true,
-                                         glassSortDepth(part,candidate.rows.data(),&surface.center),surface.firstVertex});
         }
     }
     if (canonical && flockPlan.shown) {
@@ -3154,37 +3102,6 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             bindTargets(false);
         }
-    }
-
-    if (!s.paneBatches.empty()) {
-        std::stable_sort(s.paneBatches.begin(),s.paneBatches.end(),[](const auto& a,const auto& b) { return a.sortDepth>b.sortDepth; });
-        cmd->OMSetRenderTargets(1,&handle,FALSE,&depthHandle);
-        cmd->SetPipelineState(s.rasterPane.Get());
-        for (const auto& batch:s.paneBatches) {
-            cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
-            cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
-        }
-        // Dual-source blending limits the color pass to one target. Replay the
-        // same far-to-near panes into distance, leaving the nearest pane last.
-        auto distanceRtv=handle;distanceRtv.ptr+=rtvInc;
-        cmd->OMSetRenderTargets(1,&distanceRtv,FALSE,&depthHandle);
-        cmd->SetPipelineState(s.rasterPaneDistance.Get());
-        for (const auto& batch:s.paneBatches) {
-            cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
-            cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
-        }
-        if (writeMotion) {
-            auto mvRtv=handle;mvRtv.ptr+=SIZE_T(8)*rtvInc;
-            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmd->OMSetRenderTargets(1,&mvRtv,FALSE,&depthHandle);
-            cmd->SetPipelineState(s.motionPane.Get());
-            for (const auto& batch:s.paneBatches) {
-                cmd->SetGraphicsRoot32BitConstant(1,batch.first,4);
-                cmd->DrawInstanced(batch.indexCount,batch.count,batch.firstVertex,0);
-            }
-            transition(cmd,s.dlssMotion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        }
-        bindTargets(false);
     }
 
     const UINT srvInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);

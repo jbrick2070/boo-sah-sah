@@ -3,6 +3,7 @@
 #include "boo/startup_progress.hpp"
 
 #include "boo/logging.hpp"
+#include "boo/mapped_write.hpp"
 #include "boo/render.hpp"
 
 #ifdef BOO_HAS_LINALG
@@ -344,9 +345,12 @@ bool NeuralRenderingSuite::Impl::initialize(std::string* error) {
     uint8_t* mapped = nullptr;
     D3D12_RANGE none{0, 0};
     if (FAILED(upload->Map(0, &none, reinterpret_cast<void**>(&mapped))) || !mapped) return fail("Upload map failed", error);
-    std::memcpy(mapped, weightsSrc, blobBytes);
-    std::memcpy(mapped + blobBytes, f16.data(), 2ull * kF16NetBytes);
+    const bool blobFits = BOO_MAPPED_WRITE_OK(upload.Get(), "Neural weights upload", 0, blobBytes);
+    const bool f16Fits = BOO_MAPPED_WRITE_OK(upload.Get(), "Neural weights upload", blobBytes, 2ull * kF16NetBytes);
+    if (blobFits) std::memcpy(mapped, weightsSrc, blobBytes);
+    if (f16Fits) std::memcpy(mapped + blobBytes, f16.data(), 2ull * kF16NetBytes);
     upload->Unmap(0, nullptr);
+    if (!blobFits || !f16Fits) return fail("Weight upload exceeds buffer", error);
     std::string copyError;
     const bool copied = d3d.executeSingleCommandListAndWait([&](void* raw) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);

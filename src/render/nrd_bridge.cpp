@@ -1,3 +1,4 @@
+#include "boo/mapped_write.hpp"
 #include "boo/nrd_bridge.hpp"
 #include "boo/api.hpp"
 #include "boo/logging.hpp"
@@ -650,8 +651,9 @@ bool NrdBridge::recordAccumulation(
         cmd->SetPipelineState(pe.pso.Get());
 
         if (pe.hasCbv) {
-            const uint32_t cbOff = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
-            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride) {
+            const uint64_t cbOff = (uint64_t(slotIdx) * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
+            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride &&
+                BOO_MAPPED_WRITE_OK(s.cbUpload.Get(), "NRD constant upload", cbOff, dd.constantBufferDataSize)) {
                 std::memcpy(s.cbMapped + cbOff, dd.constantBufferData, dd.constantBufferDataSize);
             }
             cmd->SetComputeRootConstantBufferView(pe.cbvParamIdx, s.cbUpload->GetGPUVirtualAddress() + cbOff);
@@ -869,8 +871,9 @@ bool NrdBridge::recordReblurMotion(
         cmd->SetPipelineState(pe.pso.Get());
 
         if (pe.hasCbv) {
-            const uint32_t cbOff = (slotIdx * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
-            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride) {
+            const uint64_t cbOff = (uint64_t(slotIdx) * Impl::kMaxDispatchesPerFrame + dIdx) * s.cbStride;
+            if (dd.constantBufferData && dd.constantBufferDataSize > 0 && dd.constantBufferDataSize <= s.cbStride &&
+                BOO_MAPPED_WRITE_OK(s.cbUpload.Get(), "NRD constant upload", cbOff, dd.constantBufferDataSize)) {
                 std::memcpy(s.cbMapped + cbOff, dd.constantBufferData, dd.constantBufferDataSize);
             }
             cmd->SetComputeRootConstantBufferView(pe.cbvParamIdx, s.cbUpload->GetGPUVirtualAddress() + cbOff);
