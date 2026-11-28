@@ -186,6 +186,7 @@ struct InteractiveView {
 
     bool exploreActive = false;          // Active interactive Explore session
     float blendWeight = 0.0f;            // [0..1] camera blend (1=Explore, (0,1)=smooth cubic return to film)
+    float exploreGradeWeight = 0.0f;     // [0..1] Explore only (the bird camera leaves it 0): fades the act grade to neutral
     float eye[3]{0.0f, 0.0f, 0.0f};
     float target[3]{0.0f, 0.0f, 1.0f};
     float up[3]{0.0f, 1.0f, 0.0f};

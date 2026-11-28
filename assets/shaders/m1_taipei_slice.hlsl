@@ -1602,6 +1602,11 @@ cbuffer M1PostCB : register(b0)
     float  gBloomIntensity;
     float  gFocusDistance;
     float  gFocusWeight;
+    float2 gPostPadding;
+    float4 gGrade0; // slope.xyz, saturation
+    float4 gGrade1; // offset.xyz, power.x
+    float4 gGrade2; // power.yz, shadow.xy
+    float4 gGrade3; // shadow.z, highlight.xyz
 };
 
 Texture2D<float>  gSceneDistTex : register(t0);
@@ -1693,6 +1698,27 @@ float3 bokehDepthOfField(float2 pxPos, int2 size, float3 centerColor, float cent
         wsum += w;
     }
     return acc / wsum;
+}
+
+float3 applyActPrintGrade(float3 combinedHdr)
+{
+    float3 slope = gGrade0.xyz;
+    float3 offset = gGrade1.xyz;
+    float3 power = float3(gGrade1.w, gGrade2.xy);
+    float3 shadowTint = float3(gGrade2.zw, gGrade3.x);
+    float3 highlightTint = gGrade3.yzw;
+    float3 cdlLin = max(combinedHdr * slope + offset, 0.0f.xxx);
+    float3 cdlPow = max(pow(cdlLin + 1e-6f.xxx, power) - pow(1e-6f.xxx, power), 0.0f.xxx);
+    float3 sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(cdlPow));
+    float lumGrade = dot(sdr, float3(0.2126f, 0.7152f, 0.0722f));
+    sdr = saturate(lerp(lumGrade.xxx, sdr, gGrade0.w));
+
+    // Multiplicative dye cannot subtract a fixed amount and clip near-black detail.
+    float lumSplit = dot(sdr, float3(0.2126f, 0.7152f, 0.0722f));
+    float shMask = (1.0f - lumSplit) * (1.0f - lumSplit) * smoothstep(0.0f, 0.06f, lumSplit);
+    float hiMask = lumSplit * lumSplit;
+    return saturate(sdr * lerp(1.0f.xxx, shadowTint, shMask)
+                        * lerp(1.0f.xxx, highlightTint, hiMask));
 }
 
 float4 PSCompositeCanvas(VSOut pin) : SV_Target
@@ -1793,11 +1819,8 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         // Film halation: highlights scatter a warm red fringe back through the emulsion base.
         float3 halation = bloom * float3(0.050, 0.012, 0.002);
 
-        float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.012 + halation) * gPreExposure * vignette;
-        sdr = linearToSrgbExact(tonemapChromaPreservingFilmic(combined));
-        // A gentle print saturation, as a film grade adds: colour holds up through the haze.
-        float lumGrade = dot(sdr, float3(0.2126, 0.7152, 0.0722));
-        sdr = saturate(lerp(lumGrade.xxx, sdr, 1.12));
+        float3 combined = (hdr + bloom * gBloomIntensity + flare * 0.012f + halation) * gPreExposure * vignette;
+        sdr = applyActPrintGrade(combined);
 
         // Luminance-weighted film grain (strongest in the mid-tones, absent in pure black and white).
         float lumS = dot(sdr, float3(0.2126, 0.7152, 0.0722));
@@ -2822,7 +2845,10 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
                 // Codec A/B: Left = Live Hardware H.264 Encoded+Decoded (or Shader Quant Sub), Right = Pristine 10-bit CanvasClean
                 if (canvasUv.x < splitRatio)
                 {
-                    sdr = sampleCodecView(canvasUv, codecHwTexValid, externalMediaValid);
+                    // External media is a different ungraded source. Compare the same graded
+                    // canvas on both sides in this case, using the shader codec substitute.
+                    sdr = externalMediaValid ? sampleShaderCodecSubstitute(canvasUv, false)
+                                             : sampleCodecView(canvasUv, codecHwTexValid, false);
                 }
                 else
                 {
@@ -4016,7 +4042,11 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
             rc0 = 83u; rc1 = 85u; rc2 = 66u; rc3 = 32u; rc4 = 72u; rc5 = 76u; rc6 = 83u; rc7 = 76u; // SUB HLSL
         }
         if (abEngine == 3u) {
-            lc0 = 67u; lc1 = 79u; lc2 = 68u; lc3 = 67u; lc4 = 32u; lc5 = 49u; lc6 = 77u; lc7 = 66u; // CODC 1MB
+            if (externalMediaValid) {
+                lc0 = 83u; lc1 = 85u; lc2 = 66u; lc3 = 32u; lc4 = 72u; lc5 = 76u; lc6 = 83u; lc7 = 76u; // SUB HLSL
+            } else {
+                lc0 = 67u; lc1 = 79u; lc2 = 68u; lc3 = 67u; lc4 = 32u; lc5 = 49u; lc6 = 77u; lc7 = 66u; // CODC 1MB
+            }
             rc0 = 67u; rc1 = 76u; rc2 = 69u; rc3 = 65u; rc4 = 78u; rc5 = 49u; rc6 = 48u; rc7 = 66u; // CLEAN10B
         }
         const bool cpuDirector = gLivePillarMeta.y == 3u && gLivePillarMeta.z > 0u &&
@@ -4031,8 +4061,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                 lTxt = directorStateLabel(px, at, 1.8 * uiScale, 4u);
             }
         }
-        float lMs  = sampleFixedMs6(px, leftBoxMin + float2(96.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, pm.x);
-        float lVal = sampleFixedNumber6(px, leftBoxMin + float2(168.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, (abEngine == 3u) ? pm.w : pm.y);
+        float lMs  = (abEngine == 3u && externalMediaValid) ? 0.0f : sampleFixedMs6(px, leftBoxMin + float2(96.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, pm.x);
+        float lVal = (abEngine == 3u && externalMediaValid) ? 0.0f : sampleFixedNumber6(px, leftBoxMin + float2(168.0 * uiScale, 8.0 * uiScale), 1.8 * uiScale, (abEngine == 3u) ? pm.w : pm.y);
         sdr = hudOver(uiAlpha, sdr, abLeftHwVerified ? colJade : colAmber, lTxt);
         if (directorCompare) {
             float2 at = leftBoxMin + float2(112.0, 8.0) * uiScale;

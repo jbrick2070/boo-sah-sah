@@ -1497,6 +1497,7 @@ struct InteractiveExploreController {
 
         ioCtx.interactive.exploreActive = exploreActive;
         ioCtx.interactive.blendWeight = smoothBlend;
+        ioCtx.interactive.exploreGradeWeight = smoothBlend;
         for (int c = 0; c < 3; ++c) {
             ioCtx.interactive.eye[c] = eye[c];
             ioCtx.interactive.target[c] = eye[c] + fwd[c] * 2.5f;

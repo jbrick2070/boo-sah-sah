@@ -126,8 +126,82 @@ struct alignas(16) GpuM1PostConstants {
     float focusDistance = 0.0f;
     float focusWeight = 0.0f;
     float padding[2]{};
+    // Four packed float4s; see M1PostCB in the composite shader.
+    float grade[16]{};
 };
-static_assert(sizeof(GpuM1PostConstants) == 48, "GpuM1PostConstants must match the composite shader");
+static_assert(sizeof(GpuM1PostConstants) == 112, "GpuM1PostConstants must match the composite shader");
+static_assert(sizeof(GpuM1PostConstants) <= sizeof(GpuM1SceneConstants), "Post constants exceed the root signature");
+
+// Packed as slope.xyz/saturation, offset.xyz/power.x, power.yz/shadow.xy,
+// shadow.z/highlight.xyz. The only grade table lives on the CPU.
+using ActGrade = std::array<float, 16>;
+constexpr ActGrade kGradeNeutral{1.f,1.f,1.f,1.f, 0.f,0.f,0.f,1.f, 1.f,1.f,1.f,1.f, 1.f,1.f,1.f,1.f};
+constexpr ActGrade kGradeDusk{1.10f,0.99f,0.85f,1.14f, 0.f,0.0002f,0.0012f,0.97f, 0.99f,1.03f,0.89f,0.95f, 1.09f,1.09f,1.01f,0.85f};
+constexpr ActGrade kGradeSanctuary{0.90f,0.93f,0.99f,1.10f, 0.0010f,0.0013f,0.0018f,0.98f, 0.98f,0.97f,0.93f,0.99f, 1.06f,0.98f,1.01f,1.04f};
+constexpr ActGrade kGradeShanghai{0.86f,0.90f,0.94f,1.06f, 0.f,0.f,0.0002f,1.03f, 1.02f,1.01f,0.90f,1.03f, 1.06f,1.12f,0.99f,0.80f};
+constexpr ActGrade kGradeEcology{0.90f,0.93f,0.98f,1.09f, 0.0010f,0.0012f,0.0016f,1.f, 1.f,0.98f,0.92f,0.99f, 1.06f,0.99f,1.01f,1.03f};
+constexpr ActGrade kGradeFlock{0.88f,0.92f,0.97f,1.08f, 0.f,0.0002f,0.0006f,1.02f, 1.02f,1.01f,0.93f,0.99f, 1.08f,1.02f,1.01f,0.98f};
+constexpr ActGrade kGradeSignal{0.86f,0.88f,0.90f,1.04f, -0.0003f,-0.0002f,0.f,1.04f, 1.03f,1.02f,0.92f,0.98f, 1.07f,1.06f,1.01f,0.93f};
+constexpr ActGrade kGradeTerrace{0.89f,0.92f,0.97f,1.08f, 0.0008f,0.0010f,0.0014f,1.02f, 1.02f,1.f,0.92f,0.99f, 1.06f,0.99f,1.01f,1.03f};
+constexpr ActGrade kGradeCrown{0.88f,0.91f,0.96f,1.08f, 0.f,0.0002f,0.0006f,1.03f, 1.02f,1.01f,0.93f,0.99f, 1.07f,1.06f,1.01f,0.92f};
+constexpr ActGrade kGradeDawn{0.97f,0.94f,0.88f,1.07f, 0.0016f,0.0013f,0.0008f,0.85f, 0.86f,0.89f,1.03f,1.01f, 0.96f,1.05f,1.01f,0.94f};
+struct ActGradeKey { float time; const ActGrade* grade; };
+constexpr ActGradeKey kActGrades[] = {
+    {0.f,&kGradeDusk}, {20.f,&kGradeDusk}, {34.f,&kGradeSanctuary},
+    {82.f,&kGradeSanctuary}, {82.f,&kGradeShanghai},
+    {90.f,&kGradeShanghai}, {90.f,&kGradeEcology},
+    {190.f,&kGradeEcology}, {202.f,&kGradeFlock},
+    {245.f,&kGradeFlock}, {245.f,&kGradeSignal},
+    {275.f,&kGradeSignal}, {275.f,&kGradeTerrace},
+    {295.f,&kGradeTerrace}, {295.f,&kGradeNeutral},
+    {301.f,&kGradeNeutral}, {301.f,&kGradeCrown},
+    {331.f,&kGradeCrown}, {331.f,&kGradeTerrace},
+    {335.5f,&kGradeTerrace}, {341.5f,&kGradeDawn}
+};
+
+ActGrade blendActGrades(const ActGrade& a, const ActGrade& b, float w) noexcept {
+    ActGrade result{};
+    for (size_t i = 0; i < result.size(); ++i) result[i] = a[i] + (b[i] - a[i]) * w;
+    return result;
+}
+
+ActGrade evalActGrade(float time) noexcept {
+    // Duplicate-time keys implement cuts: the last key at the cut is selected.
+    size_t i = 0;
+    while (i + 1 < std::size(kActGrades) && time >= kActGrades[i + 1].time) ++i;
+    if (i + 1 == std::size(kActGrades)) return *kActGrades[i].grade;
+    const auto& a = kActGrades[i];
+    const auto& b = kActGrades[i + 1];
+    const float u = std::clamp((time - a.time) / (b.time - a.time), 0.f, 1.f);
+    const float w = u * u * u * (u * (u * 6.f - 15.f) + 10.f);
+    return blendActGrades(*a.grade, *b.grade, w);
+}
+
+ActGrade evalFrameGrade(ShowVisualMode visualMode, const FrameContext& ctx) noexcept {
+    const float exactTimeSec = static_cast<float>(
+        static_cast<double>(ctx.samplePosition) / static_cast<double>(std::max<int32_t>(1, ctx.sampleRate)));
+    ActGrade grade = evalActGrade(exactTimeSec);
+    if (visualMode == ShowVisualMode::SoloRT || visualMode == ShowVisualMode::M1Slice60s || visualMode == ShowVisualMode::LegacyM0) {
+        grade = evalActGrade(60.0f);
+    } else if (visualMode == ShowVisualMode::SoloTensor) {
+        grade = evalActGrade(120.0f);
+    } else if (visualMode == ShowVisualMode::SoloNPU) {
+        grade = evalActGrade(175.0f);
+    } else if (visualMode == ShowVisualMode::SoloCUDA) {
+        grade = evalActGrade(220.0f);
+    } else if (visualMode == ShowVisualMode::M2Trilogy180s) {
+        if (exactTimeSec < 60.0f) grade = kGradeShanghai;
+        else if (exactTimeSec < 120.0f) {
+            // Shenzhen starts in daylight, then the renderer's day falls linearly from 72 to 104 s.
+            const float night = std::clamp((exactTimeSec - 72.0f) / 32.0f, 0.0f, 1.0f);
+            grade = blendActGrades(kGradeNeutral, kGradeSignal, night);
+        } else grade = kGradeSanctuary;
+    }
+    // Only Explore fades the print: the bird camera also drives blendWeight, but the film's grade carries on under it.
+    const float exploreWeight = ctx.interactive.sunOverride ? 1.0f : std::clamp(ctx.interactive.exploreGradeWeight, 0.0f, 1.0f);
+    grade = blendActGrades(grade, kGradeNeutral, exploreWeight);
+    return grade;
+}
 
 struct alignas(16) GpuM1TensorSubConstants {
     float filmTime = 0.0f;
@@ -1349,6 +1423,7 @@ struct M1TaipeiSliceEffect::Impl {
         ID3D12GraphicsCommandList* cmd,
         const FrameContext& ctx,
         const M1CameraState& cam,
+        const ActGrade& grade,
         ID3D12Resource* targetCanvas,
         uint32_t targetRtvIndex,
         D3D12Context* timestampCtx);
@@ -1357,6 +1432,7 @@ struct M1TaipeiSliceEffect::Impl {
         D3D12Context& d3d,
         ID3D12GraphicsCommandList* cmd,
         const FrameContext& ctx,
+        const ActGrade& grade,
         bool useDxr,
         bool useCuda,
         bool useTensor,
@@ -3299,6 +3375,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
     ID3D12GraphicsCommandList* cmd,
     const FrameContext& ctx,
     const M1CameraState& cam,
+    const ActGrade& grade,
     ID3D12Resource* targetCanvas,
     uint32_t targetRtvIndex,
     D3D12Context* timestampCtx) {
@@ -3387,6 +3464,7 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * cam.revealOpen01);
         pc.focusDistance = cam.focusDistance;
         pc.focusWeight = cam.focusWeight;
+        std::copy(grade.begin(), grade.end(), pc.grade);
         if (curAov == 0u &&
             (visualMode == ShowVisualMode::SoloNPU ||
              (visualMode == ShowVisualMode::FullFilm360s && ctx.filmTimeSeconds >= 150.0 && ctx.filmTimeSeconds < 195.0))) {
@@ -3417,6 +3495,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     D3D12Context& d3d,
     ID3D12GraphicsCommandList* cmd,
     const FrameContext& frame,
+    const ActGrade& grade,
     bool useDxr,
     bool useCuda,
     bool useTensor,
@@ -3829,6 +3908,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
         cmd,
         ctx,
         cam,
+        grade,
         targetCanvas,
         targetRtvIndex,
         recordTimestamps ? &d3d : nullptr);
@@ -3994,7 +4074,8 @@ void M1TaipeiSliceEffect::Impl::recordSwapchainPresentPass(
     case AbCompareEngine::RT:     abLeftHwVerified = (liveRtStatus.status == BackendStatus::Accelerated); break;
     case AbCompareEngine::CUDA:   abLeftHwVerified = livePillars[1].hardwareVerified; break;
     case AbCompareEngine::Tensor: abLeftHwVerified = livePillars[2].hardwareVerified; break;
-    case AbCompareEngine::Codec:  abLeftHwVerified = livePillars[3].hardwareVerified && codecHwTexValid; break;
+    case AbCompareEngine::Codec:  abLeftHwVerified = livePillars[3].hardwareVerified && codecHwTexValid &&
+                                                       !(codecSplitActive && externalNv12Active && externalTexUploaded); break;
     case AbCompareEngine::NPU:    abLeftHwVerified = hud.directorBackend == DirectorHudBackend::Npu &&
                                                       !hud.mood.isScriptedFallback && hud.npuCompletedInferences > 0; break;
     default: break;
@@ -4290,9 +4371,10 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
         impl_->ensureLiveAccelerators(d3d_, false, false, true);
     }
 
+    const ActGrade frameGrade = evalFrameGrade(impl_->visualMode, ctx);
     // 1. Render canonical CanvasClean once (timestamps 1..3 measure canonical live scene + particles + bloom + composite)
     impl_->recordScenePipelineToCanvas(
-        d3d_, cmd, ctx,
+        d3d_, cmd, ctx, frameGrade,
         canonDxr, canonCuda, canonTensor,
         false, false,
         impl_->canvasClean.Get(), 5u,
@@ -4357,25 +4439,25 @@ void M1TaipeiSliceEffect::render(const FrameContext& ctx) {
     if (abSplitActive) {
         if (abCompareEngine_ == AbCompareEngine::NPU) {
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx, canonDxr, canonCuda, canonTensor, true, true,
+                d3d_, cmd, ctx, frameGrade, canonDxr, canonCuda, canonTensor, true, true,
                 impl_->canvasAbCompare.Get(), 6u, slot, false, false, true);
         } else if (abCompareEngine_ == AbCompareEngine::RT && impl_->liveRtStatus.status == BackendStatus::Accelerated) {
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx,
+                d3d_, cmd, ctx, frameGrade,
                 false, canonCuda, canonTensor,
                 true, true,
                 impl_->canvasAbCompare.Get(), 6u,
                 slot, false, false);
         } else if (abCompareEngine_ == AbCompareEngine::CUDA && impl_->livePillars[1].hardwareVerified) {
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx,
+                d3d_, cmd, ctx, frameGrade,
                 canonDxr, false, canonTensor,
                 false, true,
                 impl_->canvasAbCompare.Get(), 6u,
                 slot, false, false);
         } else if (abCompareEngine_ == AbCompareEngine::Tensor && impl_->livePillars[2].hardwareVerified) {
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx,
+                d3d_, cmd, ctx, frameGrade,
                 canonDxr, canonCuda, false,
                 true, false,
                 impl_->canvasAbCompare.Get(), 6u,
@@ -4426,10 +4508,11 @@ BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
     constexpr auto visibilityOffset = kResultsMeasuredCount * 2 * sizeof(uint64_t);
     scene.particleQueryRecorded = false;
     const bool trace = frame.pathTracing != PathTracingLevel::Off;
+    const ActGrade frameGrade = evalFrameGrade(scene.visualMode, frame);
     if (!d3d_.executeSingleCommandListAndWait([&](void* raw) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);
         if (measured) cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query);
-        scene.recordScenePipelineToCanvas(d3d_, cmd, frame, trace, false, false, false, false,
+        scene.recordScenePipelineToCanvas(d3d_, cmd, frame, frameGrade, trace, false, false, false, false,
             scene.canvasClean.Get(), 5u, kHeadlessSlot, true, false, false);
         if (measured) {
             cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
@@ -4551,10 +4634,11 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
     impl_->slotPending = {};
     ++impl_->dxrGeneration;
 
+    const ActGrade frameGrade = evalFrameGrade(impl_->visualMode, ctx);
     const bool execOk = d3d_.executeSingleCommandListAndWait([&](void* rawCmd) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(rawCmd);
         impl_->recordScenePipelineToCanvas(
-            d3d_, cmd, ctx,
+            d3d_, cmd, ctx, frameGrade,
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
@@ -4565,7 +4649,7 @@ bool M1TaipeiSliceEffect::renderHeadlessCanvasForTest(
             const bool abCuda   = (abCompareEngine_ == AbCompareEngine::CUDA)   ? false : canonCuda;
             const bool abTensor = (abCompareEngine_ == AbCompareEngine::Tensor) ? false : canonTensor;
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx,
+                d3d_, cmd, ctx, frameGrade,
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
@@ -4822,17 +4906,18 @@ bool M1TaipeiSliceEffect::renderHeadlessAbCompareForTest(
     impl_->slotPending = {};
     ++impl_->dxrGeneration;
 
+    const ActGrade frameGrade = evalFrameGrade(impl_->visualMode, ctx);
     const bool execOk = d3d_.executeSingleCommandListAndWait([&](void* rawCmd) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(rawCmd);
         impl_->recordScenePipelineToCanvas(
-            d3d_, cmd, ctx,
+            d3d_, cmd, ctx, frameGrade,
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
             kHeadlessSlot, true, false, abCompareEngine_ == AbCompareEngine::NPU, true);
 
         impl_->recordScenePipelineToCanvas(
-            d3d_, cmd, ctx,
+            d3d_, cmd, ctx, frameGrade,
             abDxr, abCuda, abTensor,
             abCuda == canonCuda, abTensor == canonTensor,
             impl_->canvasAbCompare.Get(), 6u,
@@ -4918,11 +5003,12 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
     impl_->slotPending = {};
     ++impl_->dxrGeneration;
 
+    const ActGrade frameGrade = evalFrameGrade(impl_->visualMode, ctx);
     // Phase A: Render canonical CanvasClean (+ single-variable A/B or NV12 pack) and resolve exact GPU timestamps
     const bool phaseAOk = d3d_.executeSingleCommandListAndWait([&](void* rawCmd) {
         auto* cmd = static_cast<ID3D12GraphicsCommandList*>(rawCmd);
         impl_->recordScenePipelineToCanvas(
-            d3d_, cmd, ctx,
+            d3d_, cmd, ctx, frameGrade,
             canonDxr, canonCuda, canonTensor,
             false, false,
             impl_->canvasClean.Get(), 5u,
@@ -4933,7 +5019,7 @@ bool M1TaipeiSliceEffect::renderHeadlessPresentedFrameForTest(
             const bool abCuda   = (abCompareEngine_ == AbCompareEngine::CUDA)   ? false : canonCuda;
             const bool abTensor = (abCompareEngine_ == AbCompareEngine::Tensor) ? false : canonTensor;
             impl_->recordScenePipelineToCanvas(
-                d3d_, cmd, ctx,
+                d3d_, cmd, ctx, frameGrade,
                 abDxr, abCuda, abTensor,
                 abCuda == canonCuda, abTensor == canonTensor,
                 impl_->canvasAbCompare.Get(), 6u,
