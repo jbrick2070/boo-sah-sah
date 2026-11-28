@@ -61,10 +61,13 @@ Texture2DArray<float4> roomFaces : register(t10);
 SamplerState linearClamp     : register(s0);
 SamplerState anisoWrap       : register(s1);
 SamplerState equirectSampler : register(s2);
+SamplerState linearWrap      : register(s3);
 
 static const float kPi = 3.14159265;
 static const float kTwoPi = 6.28318530;
 static const float kSceneFar = 3200.0; // Includes Taipei's surveyed northern mountain range.
+
+bool liteMode() { return (interFlags & (1u << 20u)) != 0u; }
 
 float3 norm(float3 v) {
     return v * rsqrt(max(dot(v, v), 1e-10));
@@ -786,6 +789,14 @@ float3 cityCloudsLit(float3 skyColor, float3 origin, float3 d, float3 sunDir, Cl
     float3 broad = cloudNoise(p);
     float2 midP = cloudLobeDomain(p);
     float3 lobe = cloudNoise(midP);
+    if (liteMode()) {
+        float density = 0.64f * broad.x + 0.36f * lobe.x;
+        float cover = smoothstep(0.465f, 0.64f, density);
+        float2 light = normalize(sunDir.xz + float2(0.0001f, 0.0f));
+        float slope = dot(broad.yz, light) * 0.54f + dot(lobe.yz, mul(kCloudTurn, light)) * 0.66f;
+        float rim = saturate(0.45f - slope * 0.78f - (density - 0.55f) * 1.1f);
+        return lerp(skyColor, lerp(lit.base, lit.edge, rim), visible * cover * 0.84f);
+    }
     // Curl the smaller tufts along the large lobes. Thin, sheared remnants
     // reach past the bank's edge and break up its outline against clear sky.
     float2 curl = float2(lobe.y + broad.x, broad.z - lobe.x);
@@ -2577,7 +2588,8 @@ float3 evalAovHeatmap(float t) {
 #if defined(BOO_DEPTH_CUTOUT_PS)
 void PSDepthCutout(VOut i) {
     uint matId = min(i.mat, 41u);
-    float alpha = gAlbedoAlphaTex.Sample(anisoWrap, float3(i.uv.xy, (float)matId)).a;
+    float alpha = liteMode() ? gAlbedoAlphaTex.Sample(linearWrap, float3(i.uv.xy, (float)matId)).a
+                             : gAlbedoAlphaTex.Sample(anisoWrap, float3(i.uv.xy, (float)matId)).a;
     if (alpha < 0.44) {
         discard;
     }
@@ -2595,9 +2607,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 texCoord = float3(i.uv.xy, (float)matId);
 
     // Unconditional anisotropic texture-array fetches (strictly uniform before any cutout discard)
-    float4 albSample = gAlbedoAlphaTex.Sample(anisoWrap, texCoord);
-    float2 norSample = gNormalTex.Sample(anisoWrap, texCoord).xy;
-    float4 ormSample = gOrmtTex.Sample(anisoWrap, texCoord);
+    float4 albSample = liteMode() ? gAlbedoAlphaTex.Sample(linearWrap, texCoord) : gAlbedoAlphaTex.Sample(anisoWrap, texCoord);
+    float2 norSample = liteMode() ? gNormalTex.Sample(linearWrap, texCoord).xy : gNormalTex.Sample(anisoWrap, texCoord).xy;
+    float4 ormSample = liteMode() ? gOrmtTex.Sample(linearWrap, texCoord) : gOrmtTex.Sample(anisoWrap, texCoord);
 
 #if defined(BOO_ALPHA_CUTOUT)
     if (albSample.a < 0.44) {
@@ -2684,7 +2696,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
         n = norm(n + float3(wx * ripScale, 0.0, wz * ripScale));
         // Rain-impact rings on upward-facing wet exterior surfaces, faded out before they can alias.
         float ringAmt = ((matId == 7u) ? 0.010f : 0.016f * wetPuddle) * saturate(1.0 - dist / 55.0) * saturate(n.y * 4.0 - 2.8) * (1.0 + 0.55 * audioLow()) * calm;
-        if (ringAmt > 0.0 && !inBath) {
+        if (ringAmt > 0.0 && !inBath && !liteMode()) {
             // Projected pixel footprint on the surface, scaled by the real canvas height and field of view.
             // 3.4888 = 1440 / (900 * tan(0.43)): identical to the hand-tuned value at the 1440p, 0.86 rad
             // reference, while 4K now keeps ripple detail it can resolve and 720p filters a little harder.
@@ -2728,7 +2740,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float ndotv = saturate(dot(n, v));
     float fres = 0.04 + 0.96 * pow(1.0 - ndotv, 5.0);
     float3 sunDir = sceneSunDir();
-    float3 sunRad = sceneSunRadiance() * cloudKeyTransmission(i.world, sunDir);
+    float3 sunRad = sceneSunRadiance() * (liteMode() ? 1.0f : cloudKeyTransmission(i.world, sunDir));
     float3 rimDir = isDawnFinale() ? norm(float3(-0.62, 0.42, -0.66)) : norm(float3(0.58, 0.28, 0.76));
     float3 upSanctuaryDir = norm(float3(0.08, -0.86, -0.48));
 
@@ -2743,7 +2755,9 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 sunTrans = 1.0.xxx;
     float rtContactAO = 1.0;
     float3 reflected = sampleIblEnv(reflect(-v, n), rough, inBath);
-    float3 transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06, true) : skyImpl(refrDir, i.world, true);
+    float3 transmitted = 0.0f.xxx;
+    if (!liteMode() || isGlass)
+        transmitted = (inBath && matId != 40u) ? sampleIblEnv(refrDir, 0.06f, true) : skyImpl(refrDir, i.world, !liteMode());
     bool hasTracedReflection = false;
     bool hasTracedBathGi = false;
     float3 tracedBathGi = (float3)0.0;
@@ -3254,7 +3268,7 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
     float3 weatherRay = reflect(-v, n);
     float skyWeight = smoothstep(0.008, 0.17, weatherRay.y) * (1.0 - smoothstep(0.20, 0.42, rough));
     if (cityWeatherLighting() && skyWeight > 0.01) {
-        iblSpecEnv = lerp(iblSpecEnv, skyImpl(weatherRay, i.world, true), skyWeight);
+        iblSpecEnv = lerp(iblSpecEnv, skyImpl(weatherRay, i.world, !liteMode()), skyWeight);
     }
 #endif
     if (inBath) iblSpecEnv *= (0.18 + 0.82 * rtContactAO);
@@ -3411,9 +3425,12 @@ Targets PSMain(VOut i, bool front : SV_IsFrontFace) {
                             * (edgeRim + 0.40 * crispMargin) * (inBath ? 0.32f : 1.0f);
             float3 nectarGlow = float3(0.32, 0.19, 0.07) * heartWarmth * (1.0 + 0.65 * audioBeat());
 
-            float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.488), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.488)));
-            float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0 / 1.512), 0.08, true) : sky(norm(refract(-v, n, 1.0 / 1.512)));
-            float3 dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.07 * edgeRim);
+            float3 dispersion = 0.0f.xxx;
+            if (!liteMode()) {
+                float3 redSky  = inBath ? sampleIblEnv(refract(-v, n, 1.0f / 1.488f), 0.08f, true) : sky(norm(refract(-v, n, 1.0f / 1.488f)));
+                float3 blueSky = inBath ? sampleIblEnv(refract(-v, n, 1.0f / 1.512f), 0.08f, true) : sky(norm(refract(-v, n, 1.0f / 1.512f)));
+                dispersion = float3(redSky.r - transmitted.r, 0.0, blueSky.b - transmitted.b) * (0.07 * edgeRim);
+            }
             float3 glassTrans = max(transmitted * tirBoost + dispersion, 0.0.xxx) * beer + bodyScatter * (1.0 - beer) + nectarGlow;
             if (matId == 3u && partId >= 10u && partId <= 16u) {
                 glassTrans += stageIrradiance * (0.014 + 0.085 * midribDepth + 0.045 * crispMargin);
@@ -3689,6 +3706,7 @@ float orbitalNoise(float2 p) {
 float orbitalFbm(float2 p) {
     float v = 0.0, w = 0.53;
     [unroll] for (int octave = 0; octave < 5; ++octave) {
+        if (liteMode() && octave >= 2) break;
         v += w*orbitalNoise(p);
         p = float2(1.63*p.x+1.19*p.y,-1.19*p.x+1.63*p.y)+float2(7.34,4.47);
         w *= 0.48;

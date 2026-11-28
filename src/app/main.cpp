@@ -1961,6 +1961,7 @@ int main(int argc, char** argv) {
         if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
         return s;
     };
+    const std::string titleLite = titleWord("win.preset_lite", L"Lite");
     const std::string titleAct = titleWord("win.act", L"Act");
     const std::string titleExplore = titleWord("win.explore", L"Explore");
     const std::string titleWipe = titleWord("win.wipe", L"Wipe");
@@ -2042,16 +2043,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 3b. Launch non-blocking background OpenVINO NPU/CPU neural stage-director while D3D12 initializes
+    // Choose the adapter before starting services controlled by the preset.
     QualityLadder qualityLadder(settings.qualityPreset, 60);
     QualityPresetSpec startupSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
     AsyncDirectorController asyncDirector;
-    asyncDirector.start(
-        cueSheet.seed,
-        resolveResourcePath("assets/models/madame_n_director.xml"),
-        settings.disableNPU || !startupSpec.allowNpu,
-        settings.injectNpuTimeout,
-        !settings.forceWarp);
 
     // 4. Triple-buffered D3D12 swap chain on the window created above
     (void)window.pumpMessages();
@@ -2064,6 +2059,22 @@ int main(int argc, char** argv) {
     // Graphics setup runs on a loader thread while this thread only paints and answers the window: no
     // driver call, however long it takes, can make the window look frozen.
     D3D12Context d3d;
+    if (!settings.exportDiagnosticsPath.empty()) {
+        // This immutable snapshot is safe even if a WARP failure occurs on a loader or recovery thread.
+        const AppSettings fatalSettings = settings;
+        const SystemCapabilities fatalCaps = caps;
+        d3d.setFatalRetirementHandler([fatalSettings, fatalCaps] {
+            RuntimeDiagnosticsSummary fatal{};
+            fatal.settings = fatalSettings;
+            fatal.capabilities = fatalCaps;
+            fatal.finalQualityPreset = fatalSettings.qualityPreset;
+            fatal.graphicsUnavailable = true;
+            FallbackOrchestrator snapshot;
+            std::string error;
+            if (!exportDiagnosticsJson(fatalSettings.exportDiagnosticsPath, fatal, snapshot, &error))
+                BOO_LOG_ERROR("Diagnostics", "Fatal WARP diagnostics export failed: " + error);
+        });
+    }
     std::string d3dInitErr;
     d3d.preferLowPowerAdapter(settings.lowPowerGpu);
     bool d3dReady = false;
@@ -2096,19 +2107,27 @@ int main(int argc, char** argv) {
         return 1;
     }
     StartupProgress::instance().setGpuProbe([&d3d] { return d3d.queryEstimatedAppVramBytes(); });
-    // Integrated graphics share the PC's memory and are many times slower. The standard preset runs them at a
-    // few frames a second and building ray tracing takes minutes on a first start, so they begin light.
-    if (d3d.integratedAdapter() && !settings.presetFromCommandLine) {
-        d3d.setRayTracingAllowed(false);
-        qualityLadder.setPreset(QualityPresetId::Safe);
-        startupSpec = findQualityPresetSpec(presets, QualityPresetId::Safe);
-        BOO_LOG_INFO("Render", "Integrated graphics: starting light (Safe preset, raster lighting).");
+    const bool integrated = d3d.integratedAdapter();
+    qualityLadder.setIntegratedGraphics(integrated || d3d.isWarp());
+    const QualityPresetId selected = selectStartupPreset(settings.qualityPreset, settings.presetFromCommandLine,
+        integrated, d3d.isWarp(), d3d.adapterVendorId(), d3d.adapterDeviceId());
+    qualityLadder.setPreset(selected);
+    startupSpec = findQualityPresetSpec(presets, selected);
+    if (integrated || d3d.isWarp()) d3d.setRayTracingAllowed(false);
+    if (integrated || d3d.isWarp()) {
+        BOO_LOG_INFO("Render", std::string("Graphics startup preset: ") + toString(selected));
     }
+    asyncDirector.start(
+        cueSheet.seed,
+        resolveResourcePath("assets/models/madame_n_director.xml"),
+        settings.disableNPU || !startupSpec.allowNpu,
+        settings.injectNpuTimeout,
+        !d3d.isWarp());
     // An AMD card hung on the ray-traced city (Radeon Pro V710: driver timeout, tested on 1.1.13): until ray
     // tracing is proven there, AMD graphics start with raster lighting. --preset still asks for everything.
     if (!d3d.integratedAdapter() && d3d.adapterVendorId() == 0x1002 && (!settings.presetFromCommandLine || settings.disableRT)) {
-        d3d.setRayTracingAllowed(false);
-        BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting.");
+        settings.disableRT = true;
+        BOO_LOG_INFO("Render", "AMD graphics: starting with raster lighting (RT can be enabled at runtime).");
     }
     if (settings.coldShaderCache) {
         std::string reason;
@@ -2121,7 +2140,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<PhysxMarbles> physxMarbles;  // the Explore marbles' scene, once the runtime is ready
     std::unique_ptr<PhysxSoftGenre> physxSoft;   // exists only while the soft-body genre is dialled in
     std::unique_ptr<PhysxFluidGenre> physxFluid; // likewise for fluids
-    if (physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart(); // loads beside the scene; see below
+    if (startupSpec.id != QualityPresetId::Lite && physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart(); // loads beside the scene; see below
     startupStep("D3D12 device, Streamline and swap chain");
     startupCheckpoint();
 
@@ -2143,10 +2162,14 @@ int main(int argc, char** argv) {
         startupCheckpoint();
         visualInit = orchestrator.initializeEffects(false);
     });
+    if (integrated) {
+        BOO_LOG_INFO("D3D12", "Estimated GPU memory after startup: " +
+            std::to_string(d3d.queryEstimatedAppVramBytes() / (1024ULL * 1024ULL)) + " MiB");
+    }
     startupStep("show effects initialised");
     startupCheckpoint();
     if (settings.physxRouteTest) physxRuntime.requestStart();
-    if (!window.closeRequested() && (physxGenreInfo(settings.physxGenre).usesPhysxSdk || settings.physxRouteTest)) {
+    if (!window.closeRequested() && ((startupSpec.id != QualityPresetId::Lite && physxGenreInfo(settings.physxGenre).usesPhysxSdk) || settings.physxRouteTest)) {
         // Opening on a PhysX genre: the runtime loaded alongside the scene; let it finish inside the
         // loading screen, so its libraries are on the bar and the first frame does not wait for them.
         runWhilePainting(StartupWork::Scene, "PhysX", [&] { physxRuntime.waitUntilSettled(30000); });
@@ -2494,6 +2517,8 @@ int main(int argc, char** argv) {
         retiredDebugWarnings += d3d.debugWarningCount();
         const HWND recoveryWindow = window.hwnd();
         const uint32_t recoveryW = window.clientWidth(), recoveryH = window.clientHeight();
+        const uint32_t oldVendor = d3d.adapterVendorId(), oldDevice = d3d.adapterDeviceId();
+        const bool oldWarp = d3d.isWarp();
         std::string recoveryError = mayRecover ? std::string{} : "The single graphics recovery attempt was already used.";
         bool rebuilt = false;
         // Releasing a lost device and building a new one can take many seconds: another thread does it while
@@ -2509,9 +2534,16 @@ int main(int argc, char** argv) {
         d3d.shutdown();
         if (mayRecover && recoveryWindow && !window.closeRequested()) {
             BOO_LOG_WARN("D3D12", "Attempting single D3D12 device recovery with bounded fence waits...");
-            const auto spec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
             if (d3d.initialize(recoveryWindow, recoveryW, recoveryH,
                                settings.forceWarp, settings.enableD3DDebug, &recoveryError)) {
+                const bool newIntegrated = d3d.integratedAdapter();
+                qualityLadder.setIntegratedGraphics(newIntegrated || d3d.isWarp());
+                if (d3d.isWarp() || oldWarp != d3d.isWarp() || oldVendor != d3d.adapterVendorId() || oldDevice != d3d.adapterDeviceId()) {
+                    qualityLadder.setPreset(selectStartupPreset(qualityLadder.currentPreset(), settings.presetFromCommandLine,
+                        newIntegrated, d3d.isWarp(), d3d.adapterVendorId(), d3d.adapterDeviceId()));
+                }
+                const auto spec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
+                asyncDirector.setDisableNpu(settings.disableNPU || !spec.allowNpu);
                 liveM1Ptr = createAndRegisterShowEffects(d3d, settings, cueSheet, spec, orchestrator);
                 const auto result = orchestrator.initializeEffects(false);
                 if (result.status != BackendStatus::Faulted && result.status != BackendStatus::Unavailable &&
@@ -2616,6 +2648,8 @@ int main(int argc, char** argv) {
         window.showGraphicsFailure(visualInit.humanReadableReason);
     }
     bool fallbackReported = false;
+    uint64_t hudInteractionSerial = 0;
+    float lastHudMouseX = -1.0f, lastHudMouseY = -1.0f;
     while (running && window.pumpMessages()) {
         auto cpuFrameT0 = std::chrono::steady_clock::now();
         bool manualPresetChanged = false;
@@ -2624,6 +2658,12 @@ int main(int argc, char** argv) {
         const auto presentation = d3d.frameGenerationStats();
         maxFramesPresentedPerRender = std::max(maxFramesPresentedPerRender, presentation.framesActuallyPresented);
         const WindowInputSnapshot winInput = window.consumeInputSnapshot();
+        if (winInput.mouseX != lastHudMouseX || winInput.mouseY != lastHudMouseY ||
+            winInput.lmbDown || winInput.rmbDown || winInput.mmbJustPressed || winInput.wheelNotches != 0.0f ||
+            winInput.moveForward != 0.0f || winInput.moveRight != 0.0f || winInput.moveUp != 0.0f ||
+            winInput.sunAzimKey != 0.0f || winInput.sunElevKey != 0.0f) ++hudInteractionSerial;
+        lastHudMouseX = winInput.mouseX;
+        lastHudMouseY = winInput.mouseY;
         BooXInputGamepad padState{};
         bool hasGamepad = false;
         interactiveCtrl.handlePreTickInput(winInput, window, settings, hudMode,
@@ -2690,6 +2730,7 @@ int main(int argc, char** argv) {
 
         TransportCommand cmd = TransportCommand::None;
         while (window.popCommand(cmd)) {
+            ++hudInteractionSerial;
             // The neural networks may not be built (a light start on integrated graphics, or a GPU without a
             // feature they need): their controls then say why and change nothing, never showing the suite as on.
             const bool neuralControl = cmd == TransportCommand::ToggleNeuralRendering ||
@@ -2908,7 +2949,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case TransportCommand::CycleQualityPreset: {
-                    const uint8_t nextP = (static_cast<uint8_t>(qualityLadder.currentPreset()) + 1u) % 4u;
+                    const uint8_t nextP = (static_cast<uint8_t>(qualityLadder.currentPreset()) + 1u) % 5u;
                     qualityLadder.setPreset(static_cast<QualityPresetId>(nextP));
                     manualPresetChanged = true;
                     break;
@@ -3538,17 +3579,21 @@ int main(int argc, char** argv) {
                                      : d3d.queryEstimatedAppVramBytes();
         viewerLocalUsage = appVram;
         peakVramBytes = std::max(peakVramBytes, appVram);
-        const QualityPresetSpec prevSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
+        const QualityPresetSpec prevSpec = qualityLadder.effectiveSpec(findQualityPresetSpec(presets, qualityLadder.currentPreset()));
+        const bool hadSafetyResolution = qualityLadder.safetyResolutionActive();
         const bool comparingDirector = settings.showOverlay && hudMode == 2u && abCompareEngine == AbCompareEngine::NPU;
         // A comparison draws the scene twice. Keep these timings out of the film's
         // preset decisions, but keep the memory-pressure response active throughout.
         if (!comparingDirector || appVram > prevSpec.softVramLimitBytes || qualityLadder.memoryPressureActive()) {
-            qualityLadder.pushFrameSample(lastGpuMs, appVram, prevSpec.softVramLimitBytes, sceneChanged);
+            const float elapsed = previousFrameStart
+                ? std::chrono::duration<float>(cpuFrameT0 - *previousFrameStart).count() : 0.0f;
+            qualityLadder.pushFrameSample(lastGpuMs, appVram, prevSpec.softVramLimitBytes, sceneChanged, elapsed);
         }
 
-        const QualityPresetSpec activeSpec = findQualityPresetSpec(presets, qualityLadder.currentPreset());
+        const QualityPresetSpec activeSpec = qualityLadder.effectiveSpec(findQualityPresetSpec(presets, qualityLadder.currentPreset()));
         const bool allowImmediateCanvasResize =
-            manualPresetChanged || sceneChanged || qualityLadder.memoryPressureActive();
+            manualPresetChanged || sceneChanged || qualityLadder.memoryPressureActive() ||
+            hadSafetyResolution != qualityLadder.safetyResolutionActive();
         if (!graphicsUnavailable) {
             orchestrator.syncPresetBeforeFrame(activeSpec, allowImmediateCanvasResize, tick.filmTimeSeconds);
             if (!d3d.checkDeviceHealthy(&d3dInitErr)) recoverGraphics(d3dInitErr);
@@ -3567,6 +3612,7 @@ int main(int argc, char** argv) {
                                             : computeAnalyticalAudioBands(tick.samplePosition, cueSheet.sampleRate, cueSheet.durationSamples, settings.edition);
 
         FrameContext fctx{};
+        fctx.hudInteractionSerial = hudInteractionSerial;
         fctx.presentationFrame = frameCounter;
         fctx.samplePosition = tick.samplePosition;
         fctx.sampleRate = cueSheet.sampleRate;
@@ -3595,9 +3641,9 @@ int main(int argc, char** argv) {
         fctx.frameGeneration = settings.frameGeneration;
         fctx.reflex = settings.reflex;
         fctx.neural = settings.neural;
-        fctx.gpuWorkout = settings.gpuWorkout;
-        fctx.physxGenre = settings.physxGenre;
-        if (physxGenreInfo(settings.physxGenre).usesPhysxSdk) physxRuntime.requestStart();
+        fctx.gpuWorkout = activeSpec.id == QualityPresetId::Lite ? 0u : settings.gpuWorkout;
+        fctx.physxGenre = activeSpec.id == QualityPresetId::Lite ? 0u : settings.physxGenre;
+        if (physxGenreInfo(fctx.physxGenre).usesPhysxSdk) physxRuntime.requestStart();
         // The Explore marbles move onto PhysX as soon as its runtime is ready, mid-roll if need be.
         if (interactiveCtrl.marbleCount > 0u && !physxMarbles) {
             const PhysxRuntimeState state = physxRuntime.info().state;
@@ -3615,7 +3661,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Rigid) && liveM1Ptr && !graphicsUnavailable) {
+        if (fctx.physxGenre == static_cast<uint32_t>(PhysxGenre::Rigid) && liveM1Ptr && !graphicsUnavailable) {
             if (!physxRigid) physxRigid = std::make_unique<PhysxRigidGenre>(physxRuntime);
             uint32_t cityAct = UINT32_MAX;
             const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
@@ -3625,7 +3671,7 @@ int main(int argc, char** argv) {
         } else if (physxRigid) {
             physxRigid.reset(); // releases the scene and its GPU memory
         }
-        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Fluid) && liveM1Ptr && !graphicsUnavailable) {
+        if (fctx.physxGenre == static_cast<uint32_t>(PhysxGenre::Fluid) && liveM1Ptr && !graphicsUnavailable) {
             if (!physxFluid) physxFluid = std::make_unique<PhysxFluidGenre>(physxRuntime);
             uint32_t cityAct = UINT32_MAX;
             const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
@@ -3636,7 +3682,7 @@ int main(int argc, char** argv) {
         } else if (physxFluid) {
             physxFluid.reset();
         }
-        if (settings.physxGenre == static_cast<uint32_t>(PhysxGenre::Soft) && liveM1Ptr && !graphicsUnavailable) {
+        if (fctx.physxGenre == static_cast<uint32_t>(PhysxGenre::Soft) && liveM1Ptr && !graphicsUnavailable) {
             if (!physxSoft) physxSoft = std::make_unique<PhysxSoftGenre>(physxRuntime);
             uint32_t cityAct = UINT32_MAX;
             const auto& buildings = liveM1Ptr->cityCollision(&cityAct);
@@ -3657,7 +3703,7 @@ int main(int argc, char** argv) {
             gin.frameSeconds = previousFrameStart
                 ? std::chrono::duration<double>(cpuFrameT0 - *previousFrameStart).count() : 0.0;
             gin.gpuSeconds = lastGpuMs * 0.001;
-            gin.requested = m1Live ? workoutBirdCount(settings.gpuWorkout) : 0u;
+            gin.requested = m1Live ? workoutBirdCount(fctx.gpuWorkout) : 0u;
             gin.limit = workoutLimit;
             gin.floorFps = settings.workoutFloorFps;
             // Shots with no birds at all (the orbital views, the last seconds) teach it nothing.
@@ -3682,7 +3728,7 @@ int main(int argc, char** argv) {
                 BOO_LOG_DEBUG("Workout", line);
                 workoutTraceBirds = workoutGovernor.released();
             }
-            fctx.workout.birds = workoutGovernor.birds();
+            fctx.workout.birds = activeSpec.id == QualityPresetId::Lite ? 0u : workoutGovernor.birds();
             fctx.workout.grown = workoutGovernor.grown();
             fctx.workout.front = workoutGovernor.front();
             fctx.workout.band = workoutGovernor.band();
@@ -3792,20 +3838,20 @@ int main(int argc, char** argv) {
             if (liveM1Ptr) hud.neural = liveM1Ptr->neuralRenderingStats();
             hud.dashboardPanel = settings.dashboardPanel;
             hud.gpuSensors = gpuSensors.latest();
-            hud.gpuWorkout = settings.gpuWorkout;
+            hud.gpuWorkout = fctx.gpuWorkout;
             hud.flockFormation = settings.flockFormation;
             hud.birdCam = settings.birdCam;
             if (liveM1Ptr) hud.flockSpecies = liveM1Ptr->flockFocus().species;
             if (liveM1Ptr) hud.birdCount = liveM1Ptr->birdCount();
             hud.fullscreen = window.isFullscreen();
-            hud.physxGenre = settings.physxGenre;
+            hud.physxGenre = fctx.physxGenre;
             hud.bakedCloth = liveM1Ptr ? liveM1Ptr->bakedCloth() : BakedClothInfo{};
-            hud.physx = physxStatsFor(settings.physxGenre, liveM1Ptr ? liveM1Ptr->physxSmokeStats() : FlowSmokeStats{}, physxRuntime.info(),
+            hud.physx = physxStatsFor(fctx.physxGenre, liveM1Ptr ? liveM1Ptr->physxSmokeStats() : FlowSmokeStats{}, physxRuntime.info(),
                                       physxRigid.get(), physxFluid.get(), physxSoft.get());
             hud.fullscreenPill = interactiveCtrl.fullscreenPillOpacity;
             hud.workoutFloorFps = static_cast<uint32_t>(std::lround(settings.workoutFloorFps));
-            hud.workoutState = workoutGovernor.atFloor() ? 2u
-                : (workoutGovernor.releasing() || workoutGovernor.released() < workoutBirdCount(settings.gpuWorkout)) ? 1u : 0u;
+            hud.workoutState = fctx.gpuWorkout == 0u ? 0u : workoutGovernor.atFloor() ? 2u
+                : (workoutGovernor.releasing() || workoutGovernor.released() < workoutBirdCount(fctx.gpuWorkout)) ? 1u : 0u;
             uint64_t mediaFrameSeq = 0;
             if (mediaIngest.isActive() && mediaIngest.copyLatestNv12Frame(latestMediaNv12, mediaFrameSeq)) {
                 if (liveM1Ptr) {
@@ -3915,7 +3961,7 @@ int main(int argc, char** argv) {
                 smoothFps,
                 lastGpuMs,
                 d3d.swapchainChannelBits(),
-                toString(qualityLadder.currentPreset()),
+                qualityLadder.currentPreset() == QualityPresetId::Lite ? titleLite.c_str() : toString(qualityLadder.currentPreset()),
                 titleDetail.c_str(), effectiveEffectsDetail(fctx) + 1u,
                 titleExplore.c_str(),
                 titleWipe.c_str(),

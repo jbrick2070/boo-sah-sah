@@ -168,6 +168,7 @@
     "hud.ost.synth":       { "text": "PROCEDURAL RTX SYNTH", "note": "Now-playing notice: the built-in computer-generated synthesizer score. Keep RTX.", "max": 34, "maxWide": 20 },
     "hud.ost.custom":      { "text": "CUSTOM EXTERNAL MP3+", "note": "Now-playing notice: the viewer's own music file. Keep 'MP3+'.", "max": 34, "maxWide": 20 },
 
+    "win.preset_lite": {"text":"Lite","note":"Name of the lowest graphics quality preset.","max":16,"maxWide":8},
     "win.act":     { "text": "Act",     "note": "Window title bar: 'Act 3/7'.", "max": 12, "maxWide": 6 },
     "win.explore": { "text": "Explore", "note": "Window title bar key hint: [F]=Explore (free camera).", "max": 14, "maxWide": 6 },
     "win.wipe":    { "text": "Wipe",    "note": "Window title bar key hint: [H]=Wipe (split-screen comparison).", "max": 14, "maxWide": 6 },

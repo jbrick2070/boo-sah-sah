@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 
 namespace boo {
 
@@ -92,8 +93,31 @@ const char* toString(Edition edition) noexcept {
     return "family";
 }
 
+bool isIntelGen9Gpu(uint32_t vendorId, uint32_t deviceId) noexcept {
+    // Skylake and Apollo Lake (Gen9); Kaby, Amber, Gemini, Coffee, Whiskey and Comet Lake (Gen9.5).
+    static constexpr uint32_t ids[] = {
+        0x1902, 0x1906, 0x190A, 0x190B, 0x190E, 0x1912, 0x1913, 0x1915, 0x1916, 0x1917, 0x191A, 0x191B, 0x191D, 0x191E,
+        0x1921, 0x1923, 0x1926, 0x1927, 0x192A, 0x192B, 0x192D, 0x1932, 0x193A,
+        0x193B, 0x193D, 0x5A84, 0x5A85, 0x5902, 0x5906, 0x5908, 0x590A, 0x590B, 0x590E, 0x5912, 0x5913, 0x5915,
+        0x5916, 0x5917, 0x591A, 0x591B, 0x591C, 0x591D, 0x591E, 0x5921, 0x5923,
+        0x5926, 0x5927, 0x593B, 0x87C0, 0x87CA, 0x3184, 0x3185, 0x3E90, 0x3E91,
+        0x3E92, 0x3E93, 0x3E94, 0x3E96, 0x3E98, 0x3E99, 0x3E9A, 0x3E9B, 0x3E9C,
+        0x3EA0, 0x3EA1, 0x3EA2, 0x3EA3, 0x3EA4, 0x3EA5, 0x3EA6, 0x3EA7,
+        0x3EA8, 0x3EA9, 0x9B21, 0x9B41, 0x9BCA, 0x9BCC, 0x9BA2, 0x9BA4, 0x9BAA, 0x9BAC,
+        0x9BC2, 0x9BC5, 0x9BC8, 0x9BC4, 0x9BC6, 0x9BE6, 0x9BF6, 0x9BA5, 0x9BA8
+    };
+    return vendorId == 0x8086u && std::find(std::begin(ids), std::end(ids), deviceId) != std::end(ids);
+}
+
+QualityPresetId selectStartupPreset(QualityPresetId requested, bool explicitPreset, bool integrated, bool warp, uint32_t vendorId, uint32_t deviceId) noexcept {
+    if (warp || requested == QualityPresetId::Lite) return QualityPresetId::Lite;
+    if (explicitPreset || !integrated) return requested;
+    return isIntelGen9Gpu(vendorId, deviceId) ? QualityPresetId::Lite : QualityPresetId::Safe;
+}
+
 const char* toString(QualityPresetId preset) noexcept {
     switch (preset) {
+        case QualityPresetId::Lite:           return "lite";
         case QualityPresetId::Safe:           return "safe";
         case QualityPresetId::Balanced:       return "balanced";
         case QualityPresetId::Showcase:       return "showcase";
@@ -147,6 +171,7 @@ bool parseEdition(std::string_view text, Edition& out) noexcept {
 
 bool parseQualityPreset(std::string_view text, QualityPresetId& out) noexcept {
     const std::string k = toLowerAscii(text);
+    if (k == "lite")            { out = QualityPresetId::Lite; return true; }
     if (k == "safe")            { out = QualityPresetId::Safe; return true; }
     if (k == "balanced")        { out = QualityPresetId::Balanced; return true; }
     if (k == "showcase")        { out = QualityPresetId::Showcase; return true; }

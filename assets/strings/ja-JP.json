@@ -165,6 +165,7 @@
     "hud.live_camera": "カメラ使用中",
     "hud.ost.synth": "プロシージャルRTXシンセ",
     "hud.ost.custom": "外部カスタムMP3+",
+    "win.preset_lite": "Lite",
     "win.act": "幕",
     "win.explore": "探索",
     "win.wipe": "ワイプ",

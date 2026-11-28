@@ -67,7 +67,7 @@
       "author": "Jeffrey A Brick",
       "license": "MIT",
       "attribution_required": true,
-      "sha256": "be8c8c6788b6c9eae66db71f4627034808dd14f8431b333e4e6e96c5466aedb4"
+      "sha256": "1939077278681130ff3b833a41dbd85ae105d46fe075bf49f1a81aaf59810fa2"
     },
     {
       "id": "cue_m1_taipei_60s",
@@ -158,7 +158,7 @@
       "upstream_sources": [
         "https://github.com/NVIDIA-RTX/RTXDI"
       ],
-      "sha256": "42bf63a9c91c2d52762b714e21c9a4ecbe1ca77a9047af7878b87ba1e6fb9561"
+      "sha256": "487f9651d78778d4fbf89c083fbd42a84da8275c8d69d30e16e78eafa80a0a29"
     },
     {
       "id": "model_madame_n_director_xml",

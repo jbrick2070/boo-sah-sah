@@ -130,6 +130,8 @@ struct HudTelemetrySnapshot {
 class D3D12Context {
 public:
     static constexpr uint32_t kFrameCount = 3; // Triple-buffered flip-model swap chain (Section 3.1)
+    // Fatal WARP queue retirement failure; resources may still be in use.
+    static constexpr uint32_t kWarpRetirementFailureExitCode = 4319;
 
     D3D12Context();
     ~D3D12Context();
@@ -187,6 +189,8 @@ public:
     // a synchronization failure. If draining fails, remove this D3D12 device
     // before callers release its resources. True means drained; false means removed.
     bool retireGpuForShutdown() noexcept;
+    // Best-effort diagnostics export before the fatal WARP retirement exit.
+    void setFatalRetirementHandler(std::function<void()> handler) { fatalRetirementHandler_ = std::move(handler); }
 
     // Deterministic lifecycle fault; drains submitted work and simulates removal
     // without resetting the physical GPU or affecting other applications.
@@ -212,6 +216,7 @@ public:
     bool debugLayerActive() const noexcept;
 
     const std::string& adapterName() const noexcept { return adapterName_; }
+    uint32_t adapterDeviceId() const noexcept { return deviceId_; }
     uint32_t adapterVendorId() const noexcept { return vendorId_; } // PCI vendor; 0x10DE is NVIDIA
     int32_t adapterLuidLow() const noexcept { return luidLow_; }
     int32_t adapterLuidHigh() const noexcept { return luidHigh_; }
@@ -228,10 +233,12 @@ private:
     int32_t luidLow_ = 0;
     int32_t luidHigh_ = 0;
     uint32_t vendorId_ = 0;
+    uint32_t deviceId_ = 0;
     bool isWarp_ = false;
     bool lowPowerAdapter_ = false;
     std::optional<BenchmarkRequest> benchmark_;
     bool rayTracingAllowed_ = true;
+    std::function<void()> fatalRetirementHandler_;
     uint64_t presentCount_ = 0;
     uint64_t presentStallCount_ = 0;
 };

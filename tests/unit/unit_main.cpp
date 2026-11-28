@@ -366,6 +366,103 @@ bool testQualityLadderHysteresisAndVramPressure() {
     return true;
 }
 
+bool testLiteStartupAndLadder() {
+    using namespace boo;
+    BOO_CHECK(isIntelGen9Gpu(0x8086u, 0x5917u));
+    BOO_CHECK(isIntelGen9Gpu(0x8086u, 0x1902u));
+    constexpr uint32_t addedGen9Ids[] = {
+        0x190A, 0x190E, 0x1913, 0x1915, 0x1917, 0x191A, 0x192A,
+        0x5908, 0x590A, 0x590E, 0x5913, 0x5915, 0x591A, 0x593B,
+        0x3E9C, 0x3EA9, 0x9BA2, 0x9BC2
+    };
+    for (const auto id : addedGen9Ids) BOO_CHECK(isIntelGen9Gpu(0x8086u, id));
+    BOO_CHECK(isIntelGen9Gpu(0x8086u, 0x9B41u));
+    BOO_CHECK(!isIntelGen9Gpu(0x8086u, 0x9A49u)); // Iris Xe
+    BOO_CHECK(!isIntelGen9Gpu(0x10DEu, 0x5917u));
+    BOO_CHECK(!isIntelGen9Gpu(0x8086u, 0x59FFu)); // not an enumerated device
+    BOO_CHECK(selectStartupPreset(QualityPresetId::Balanced, false, true, false, 0x8086u, 0x5917u) == QualityPresetId::Lite);
+    BOO_CHECK(selectStartupPreset(QualityPresetId::Balanced, false, true, false, 0x8086u, 0x9A49u) == QualityPresetId::Safe);
+    BOO_CHECK(selectStartupPreset(QualityPresetId::Lite, false, true, false, 0x8086u, 0x9A49u) == QualityPresetId::Lite);
+    BOO_CHECK(selectStartupPreset(QualityPresetId::Showcase, true, true, false, 0x8086u, 0x5917u) == QualityPresetId::Showcase);
+    BOO_CHECK(selectStartupPreset(QualityPresetId::Balanced, false, false, true, 0u, 0u) == QualityPresetId::Lite);
+    QualityPresetId parsed{};
+    BOO_CHECK(parseQualityPreset("lite", parsed) && parsed == QualityPresetId::Lite);
+    QualityLadder ladder(QualityPresetId::Safe, 60);
+    ladder.setIntegratedGraphics(true);
+    for (int i = 0; i < 120; ++i) ladder.pushFrameSample(45.0f, 0, 0, true);
+    BOO_CHECK(ladder.currentPreset() == QualityPresetId::Lite);
+    for (int i = 0; i < 299; ++i) ladder.pushFrameSample(10.0f, 0, 0, true, 0.02f);
+    BOO_CHECK(ladder.currentPreset() == QualityPresetId::Lite);
+    ladder.pushFrameSample(10.0f, 0, 0, true, 0.02f);
+    BOO_CHECK(ladder.currentPreset() == QualityPresetId::Safe);
+    QualityLadder offWindowCut(QualityPresetId::Lite, 60);
+    offWindowCut.setIntegratedGraphics(true);
+    for (int i = 0; i < 300; ++i) offWindowCut.pushFrameSample(10.0f, 0, 0, false, 0.02f);
+    for (int i = 0; i < 3; ++i) offWindowCut.pushFrameSample(30.0f, 0, 0, false);
+    offWindowCut.pushFrameSample(30.0f, 0, 0, true);
+    BOO_CHECK(offWindowCut.currentPreset() == QualityPresetId::Lite); // cut is no longer fast
+    for (int i = 0; i < 360; ++i) offWindowCut.pushFrameSample(10.0f, 0, 0, false, 0.02f);
+    offWindowCut.pushFrameSample(10.0f, 0, 0, true, 0.02f); // not aligned to an evaluation
+    BOO_CHECK(offWindowCut.currentPreset() == QualityPresetId::Safe);
+    QualityLadder veryFast(QualityPresetId::Lite, 60);
+    veryFast.setIntegratedGraphics(true);
+    for (int i = 0; i < 300; ++i) veryFast.pushFrameSample(1.0f, 0, 0, true, 0.001f);
+    BOO_CHECK(veryFast.currentPreset() == QualityPresetId::Lite); // 300 frames are not five seconds
+    for (int i = 0; i < 240; ++i) veryFast.pushFrameSample(1.0f, 0, 0, true, 0.02f);
+    BOO_CHECK(veryFast.currentPreset() == QualityPresetId::Safe);
+    // The final safety rung needs two sustained windows above 55 ms, and
+    // changes the actual requested canvas without adding a selectable preset.
+    QualityLadder emergency(QualityPresetId::Lite, 10);
+    for (int i = 0; i < 20; ++i) emergency.pushFrameSample(54.0, 0, 0, false);
+    BOO_CHECK(!emergency.safetyResolutionActive());
+    for (int i = 0; i < 20; ++i) emergency.pushFrameSample(56.0, 0, 0, false);
+    BOO_CHECK(emergency.safetyResolutionActive());
+    QualityPresetSpec liteSpec{};
+    liteSpec.id = QualityPresetId::Lite;
+    liteSpec.renderWidth = 960;
+    liteSpec.renderHeight = 540;
+    const auto emergencySpec = emergency.effectiveSpec(liteSpec);
+    BOO_CHECK(emergencySpec.renderWidth == 640 && emergencySpec.renderHeight == 360);
+    for (int i = 0; i < 100; ++i) emergency.pushFrameSample(1.0, 0, 0, true);
+    BOO_CHECK(emergency.safetyResolutionActive());
+    QualityLadder pressuredLite(QualityPresetId::Lite, 10);
+    for (int i = 0; i < 20; ++i) pressuredLite.pushFrameSample(101.0, 2, 1, true);
+    BOO_CHECK(pressuredLite.memoryPressureActive());
+    BOO_CHECK(pressuredLite.safetyResolutionActive());
+    QualityLadder pressuredFast(QualityPresetId::Lite, 10);
+    for (int i = 0; i < 100; ++i) pressuredFast.pushFrameSample(1.0, 2, 1, true);
+    BOO_CHECK(pressuredFast.memoryPressureActive());
+    BOO_CHECK(pressuredFast.currentPreset() == QualityPresetId::Lite);
+    BOO_CHECK(!pressuredFast.safetyResolutionActive());
+    emergency.setPreset(QualityPresetId::Lite);
+    BOO_CHECK(!emergency.safetyResolutionActive());
+    BOO_CHECK(emergency.effectiveSpec(liteSpec).renderWidth == 960);
+
+    QualityLadder capped(QualityPresetId::Safe, 10);
+    capped.setIntegratedGraphics(true);
+    for (int i = 0; i < 400; ++i) capped.pushFrameSample(1.0, 0, 0, true, 0.02f);
+    BOO_CHECK(capped.currentPreset() == QualityPresetId::Safe);
+    QualityLadder failedUpgrade(QualityPresetId::Lite, 10);
+    for (int i = 0; i < 30; ++i) failedUpgrade.pushFrameSample(1.0, 0, 0, true);
+    BOO_CHECK(failedUpgrade.currentPreset() == QualityPresetId::Safe);
+    for (int i = 0; i < 20; ++i) failedUpgrade.pushFrameSample(50.0, 0, 0, true);
+    BOO_CHECK(failedUpgrade.currentPreset() == QualityPresetId::Lite);
+    for (int i = 0; i < 100; ++i) failedUpgrade.pushFrameSample(1.0, 0, 0, true);
+    BOO_CHECK(failedUpgrade.currentPreset() == QualityPresetId::Lite);
+    failedUpgrade.setPreset(QualityPresetId::Lite);
+    for (int i = 0; i < 30; ++i) failedUpgrade.pushFrameSample(1.0, 0, 0, true);
+    BOO_CHECK(failedUpgrade.currentPreset() == QualityPresetId::Safe);
+
+    QualityPresetSpec unsafe{};
+    unsafe.id = QualityPresetId::Lite;
+    const auto safeSpec = findQualityPresetSpec({unsafe}, QualityPresetId::Lite);
+    BOO_CHECK(!safeSpec.allowDxr && !safeSpec.allowCuda && !safeSpec.allowTensor && !safeSpec.allowNpu);
+    const auto missingSafe = findQualityPresetSpec({unsafe}, QualityPresetId::Safe);
+    BOO_CHECK(missingSafe.id == QualityPresetId::Safe && missingSafe.renderWidth == 1280u && missingSafe.renderHeight == 720u);
+    BOO_CHECK(!missingSafe.allowDxr && !missingSafe.allowCuda && !missingSafe.allowTensor && !missingSafe.allowNpu);
+    return true;
+}
+
 class MockEffect final : public boo::IEffect {
 public:
     MockEffect(const char* nm, bool failInit, int* renderCounter)
@@ -1736,6 +1833,48 @@ bool testShadersRunOnEveryGpu() {
     if (_get_pgmptr(&program) == 0 && program) folder = std::filesystem::path(program).parent_path() / "assets" / "shaders";
     std::error_code ec;
     if (!std::filesystem::exists(folder, ec)) folder = boo::resolveResourcePath("assets/shaders");
+    // The raster film, Safe and Lite load these even on GPUs without optional
+    // shader features. Include the M1 fallback and Explore accumulation paths.
+    constexpr const char* rasterShaders[] = {
+        "m0_test_vs.cso", "m0_test_ps.cso", "m1_raster_scene.cso",
+        "m1_bloom_down.cso", "m1_bloom_up.cso", "m1_composite.cso",
+        "m1_present_hud.cso", "m1_present_clean.cso", "m1_hud_cache.cso", "m1_hud_cache_clean.cso",
+        "m1_present_cached.cso", "m1_present_cached_frame_generation.cso", "m1_present_frame_generation.cso",
+        "m1_present_clean_frame_generation.cso", "m1_particles_sub_cs.cso",
+        "m1_particles_vs.cso", "m1_particles_ps.cso", "m1_tensor_sub_cs.cso",
+        "m1_nv12_pack_cs.cso", "m2_mesh_vs.cso", "m2_depth_cutout_ps.cso",
+        "m2_mesh_ps.cso", "m2_mesh_cutout_ps.cso", "m2_sky_vs.cso", "m2_sky_ps.cso",
+        "m2_accum_vs.cso", "m2_accum_blend_ps.cso", "m2_accum_resolve_ps.cso",
+        "m2_motion_vs.cso", "m2_motion_ps.cso", "m2_motion_cutout_ps.cso", "m2_sky_motion_ps.cso"
+    };
+    for (const char* name : rasterShaders) {
+        std::ifstream file(folder / name, std::ios::binary);
+        const std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
+        if (bytes.size() <= 32 || std::memcmp(bytes.data(), "DXBC", 4) != 0) {
+            std::cout << "  Missing or invalid raster shader: " << name << std::endl;
+            BOO_CHECK(false);
+        }
+        const auto read32 = [&](size_t at) { uint32_t v = 0; if (at + 4 <= bytes.size()) std::memcpy(&v, bytes.data() + at, 4); return v; };
+        bool foundFeatures = false, foundDxil = false;
+        uint64_t features = 0;
+        uint32_t version = 0;
+        for (uint32_t part = 0, parts = read32(28); part < parts && part < 64; ++part) {
+            const size_t at = read32(32 + 4 * static_cast<size_t>(part));
+            if (at + 16 > bytes.size()) continue;
+            if (std::memcmp(bytes.data() + at, "SFI0", 4) == 0 && read32(at + 4) >= 8) {
+                std::memcpy(&features, bytes.data() + at + 8, 8);
+                foundFeatures = true;
+            }
+            if (std::memcmp(bytes.data() + at, "DXIL", 4) == 0 && read32(at + 4) >= 8) {
+                version = read32(at + 8);
+                foundDxil = true;
+            }
+        }
+        if (!foundFeatures || !foundDxil || features != 0 || (version & 0xffu) != 0x60u) {
+            std::cout << "  Raster shader requires optional features or is not SM 6.0: " << name << std::endl;
+            BOO_CHECK(false);
+        }
+    }
     size_t checked = 0;
     for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
         if (entry.path().extension() != ".cso") continue;
@@ -1824,7 +1963,8 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    BOO_CHECK(keys.size() == 96 + static_cast<size_t>(ResultText::Count));
+    BOO_CHECK(keys.size() == 97 + static_cast<size_t>(ResultText::Count));
+    BOO_CHECK(std::find(keys.begin(), keys.end(), "win.preset_lite") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.play_again") != keys.end());
 
@@ -1927,6 +2067,7 @@ int main() {
     runTest("TimelineClockArithmeticAndFailover", testTimelineClockArithmeticAndFailover);
     runTest("PrecisionTransport", testPrecisionTransport);
     runTest("QualityLadderHysteresisAndVramPressure", testQualityLadderHysteresisAndVramPressure);
+    runTest("LiteStartupAndLadder", testLiteStartupAndLadder);
     runTest("FallbackOrchestratorFaultIsolation", testFallbackOrchestratorFaultIsolation);
     runTest("ScriptedDirectorDeterminismAndBounds", testScriptedDirectorDeterminismAndBounds);
     runTest("SettingsAndPathRedaction", testSettingsAndPathRedaction);

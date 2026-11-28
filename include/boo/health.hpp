@@ -89,13 +89,17 @@ public:
         size_t windowFrames = 60);
 
     void setPreset(QualityPresetId preset) noexcept;
+    void setIntegratedGraphics(bool integrated) noexcept { integratedGraphics_ = integrated; }
     QualityPresetId currentPreset() const noexcept { return currentPreset_; }
+    bool safetyResolutionActive() const noexcept { return safetyResolutionActive_; }
+    QualityPresetSpec effectiveSpec(QualityPresetSpec spec) const noexcept;
 
     void pushFrameSample(
         double gpuFrameMs,
         uint64_t estimatedVramBytes,
         uint64_t softVramCapBytes,
-        bool atSafeSceneCut = false);
+        bool atSafeSceneCut = false,
+        float elapsedSeconds = 1.0f / 60.0f);
 
     FrametimeStats recentStats() const;
     uint32_t downgradeCount() const noexcept { return downgradeCount_; }
@@ -115,6 +119,11 @@ private:
     uint32_t downgradeCount_ = 0;
     uint32_t upgradeCount_ = 0;
     bool memoryPressure_ = false;
+    bool integratedGraphics_ = false;
+    float fastSeconds_ = 0.0f;
+    bool safetyResolutionActive_ = false;
+    int lastAutoUpgradeRank_ = -1;
+    int maxAutoUpgradeRank_ = 3;
 };
 
 } // namespace boo

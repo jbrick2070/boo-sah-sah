@@ -200,6 +200,8 @@ uint8_t* mapForWriting(ID3D12Resource* resource) {
 }
 // The workout flock starts with room for one flock unit and grows when the dial asks for more.
 constexpr uint32_t kInitialWorkoutBirds = kFlockUnit;
+constexpr uint32_t kInitialRasterBirds = 64;
+static_assert(kInitialRasterBirds >= kLastLightKites);
 constexpr uint32_t kMaxBirdParts = 8;
 constexpr uint32_t kFlockChunk = 256; // birds one task poses and writes
 // Taipei 101's tuned mass damper, split out of the tower at load time so it can swing on its baked
@@ -523,6 +525,7 @@ struct TrilogyMeshRenderer::Impl {
     // Workout flock. Its instances are posed on every core and written straight into the upload
     // buffers, never through append(), so the frame's vectors hold everything else.
     size_t baseSceneInstances = 0;        // everything except the workout flock
+    size_t physxCapacity = 0;
     uint32_t workoutBirdCapacity = 0;     // birds the buffers have room for
     uint32_t birdParts = 0;               // mesh parts in one bird
     uint8_t* instanceMapped = nullptr;    // instanceBuffer
@@ -1512,12 +1515,13 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         const size_t orchidParts = std::count_if(s.parts.begin(),s.parts.end(),[](const auto& p){ return p.kit==3; });
         const size_t taipeiPlaneParts = std::count_if(s.parts.begin(),s.parts.end(),[](const auto& p){return p.kit==2 && p.sub.part==kSkyPlane;});
         s.birdParts = static_cast<uint32_t>(std::max({s.birdTemplates[0].size(),s.birdTemplates[1].size(),s.birdTemplates[2].size()}));
+        s.physxCapacity = s.context.rayTracingAllowed() ? kMaxPhysxBodies : 0u;
         s.baseSceneInstances = s.parts.size() + InteractiveView::kMaxMarbles
             + kPlanterOrchids*orchidParts + kMaxDriftingPetals + taipeiPlaneParts
-            + size_t(kCityBirdCount + 1u) * s.birdParts + kMaxPhysxBodies
+            + size_t(kCityBirdCount + 1u) * s.birdParts + s.physxCapacity
             + *std::max_element(cityCapacity.begin(),cityCapacity.end());
-        // The flock begins with room for one unit; reserveWorkoutBirds() makes more when asked.
-        s.workoutBirdCapacity = kInitialWorkoutBirds;
+        // Keep the authored opening kettle on raster, and grow on demand for workouts.
+        s.workoutBirdCapacity = s.context.rayTracingAllowed() ? kInitialWorkoutBirds : kInitialRasterBirds;
         s.maxSceneInstances = s.baseSceneInstances + size_t(s.workoutBirdCapacity) * s.birdParts;
         if (s.baseSceneInstances + size_t(kMaxWorkoutBirds) * s.birdParts > (1u<<24))
             throw std::runtime_error("City instances exceed the DXR 24-bit identifier range");
@@ -1671,7 +1675,7 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[10].Descriptor.ShaderRegister=2;
         params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[11].Descriptor.ShaderRegister=12; // last frame's deformed vertices
 
-        D3D12_STATIC_SAMPLER_DESC samplers[3]{};
+        D3D12_STATIC_SAMPLER_DESC samplers[4]{};
         samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0;
@@ -1694,7 +1698,16 @@ bool TrilogyMeshRenderer::initialize(bool fault,std::string* error,ShowVisualMod
         samplers[2].MaxLOD = D3D12_FLOAT32_MAX;
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=12;rs.pParameters=params;rs.NumStaticSamplers=3;rs.pStaticSamplers=samplers;
+        // Lite uses a separate trilinear wrap sampler so changing presets never
+        // changes the established anisotropic sampler used by the other tiers.
+        samplers[3].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[3].AddressU = samplers[3].AddressV = samplers[3].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplers[3].MipLODBias = 0.25f;
+        samplers[3].ShaderRegister = 3;
+        samplers[3].MaxLOD = D3D12_FLOAT32_MAX;
+        samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=12;rs.pParameters=params;rs.NumStaticSamplers=4;rs.pStaticSamplers=samplers;
         ComPtr<ID3DBlob> blob,err;check(D3D12SerializeRootSignature(&rs,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&err));check(d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&s.root)));
         const auto vs=shader("m2_mesh_vs.cso"),psDepthCut=shader("m2_depth_cutout_ps.cso"),ps=shader("m2_mesh_ps.cso"),psCut=shader("m2_mesh_cutout_ps.cso"),skyvs=shader("m2_sky_vs.cso"),skyps=shader("m2_sky_ps.cso");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC dp{};dp.pRootSignature=s.root.Get();dp.VS={vs.data(),vs.size()};dp.PS={nullptr,0};dp.SampleMask=UINT_MAX;
@@ -2036,8 +2049,8 @@ bool TrilogyMeshRenderer::resize(uint32_t width,uint32_t height) {
         d->CreateDepthStencilView(s.depth.Get(),&dsvDesc,s.dsv->GetCPUDescriptorHandleForHeapStart());
         s.dlssDepthReadable=false;s.dlssHistoryValid=false;s.dlssMotion.Reset();
         s.rrReadable=false;s.rrHitDistance.Reset();
-        rd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;ComPtr<ID3D12Resource> acc;
-        check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&acc)));s.accum=std::move(acc);s.accumValid=false;
+        rd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        s.accum.Reset();s.accumValid=false;
 
         if (s.rtReady) {
             auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initState) {
@@ -2412,10 +2425,10 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         const auto& kiteTemplates = s.birdTemplates[0];
         if (s.visualMode == ShowVisualMode::FullFilm360s && act == 2 && !trilogyRoutes && filmTime < float(kLastLightEnd) &&
             !kiteTemplates.empty() && kiteTemplates.size() <= kMaxBirdParts && s.workoutBirdCapacity >= kLastLightKites) {
-            flockPlan.filmKettle = kLastLightKites;
+            flockPlan.filmKettle = f.qualityPreset == QualityPresetId::Lite ? 12u : kLastLightKites;
             flockPlan.formation = FlockFormation::Kettle;
             flockPlan.species = BirdSpecies::BlackKite;
-            flockPlan.birds = std::max(flockPlan.birds, kLastLightKites);
+            flockPlan.birds = std::max(flockPlan.birds, flockPlan.filmKettle);
         }
     }
 
@@ -2482,7 +2495,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const uint32_t flockParts=flockBirds ? static_cast<uint32_t>(flockTemplates.size()) : 0u;
     const size_t flockInstances=size_t(flockBirds)*flockParts;
     const PhysxBodyFrame* bodies=(f.physxBodies && !orbital && iv.aovMode==0u) ? f.physxBodies : nullptr;
-    const size_t bodyInstances=bodies ? std::min<size_t>(bodies->count,kMaxPhysxBodies) : 0u;
+    const size_t bodyInstances=bodies ? std::min<size_t>(bodies->count,s.physxCapacity) : 0u;
     if (appended+flockInstances+bodyInstances>s.maxSceneInstances) throw std::runtime_error("City instance upload exceeds reserved slot");
     const size_t instanceOffset=frameSlot*s.maxSceneInstances*sizeof(InstanceData);
     const size_t rayOffset=frameSlot*s.maxTlasInstances*sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
@@ -2751,6 +2764,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     c.pulse=camera.emissivePulse;
     c.courierLamp=courierLamp;
     c.interFlags |= effectiveEffectsDetail(f) << 12u;
+    if (f.qualityPreset == QualityPresetId::Lite) c.interFlags |= 1u << 20u;
     if (canonical && s.context.benchmark()) c.interFlags |= 1u << 19u;
     if (traceIndirect) c.interFlags |= static_cast<uint32_t>(f.pathTracing) << 15u;
     if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
@@ -2763,6 +2777,15 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const uint32_t curAov = std::min<uint32_t>(iv.aovMode, 7u);
     // A synchronized lighting comparison must use the same spatial resolve on both sides.
     const bool temporalAllowed = canonical && !compareDirectorLighting && !rr;
+    if (temporalAllowed && curAov == 0u && iv.accumulate && !s.accum && s.accumBlend && s.w == width && s.h == height) {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = width; rd.Height = height; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        check(d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&s.accum)));
+    }
     const bool accumulate = temporalAllowed && (curAov == 0u) && iv.accumulate && s.accum && s.accumBlend && s.w == width && s.h == height;
     const bool interactiveMotion = temporalAllowed && useRt && (curAov == 0u) && !accumulate &&
                                    (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
@@ -3122,6 +3145,7 @@ void TrilogyMeshRenderer::recordOrbital(void* commandList, const FrameContext& f
     scene.forward[2] = scene.up[1] = scene.right[0] = scene.fov = 1.f;
     scene.time = float(double(frame.samplePosition)/frame.sampleRate);
     scene.showFlags = 128u;
+    if (frame.qualityPreset == QualityPresetId::Lite) scene.interFlags |= 1u << 20u;
     if (frame.reducedFlash || frame.motionScale < .99f) scene.interFlags |= 1u << 14u;
     const D3D12_VIEWPORT viewport{0,0,float(width),float(height),0,1};
     const D3D12_RECT bounds{0,0,LONG(width),LONG(height)};
@@ -3181,15 +3205,17 @@ const std::vector<CityCollisionBox>& TrilogyMeshRenderer::cityCollision(uint32_t
     return impl_->collisionBoxes;
 }
 uint32_t TrilogyMeshRenderer::workoutBirdCapacity() const noexcept { return impl_ ? impl_->workoutBirdCapacity : 0u; }
-bool TrilogyMeshRenderer::reserveWorkoutBirds(uint32_t birds) {
+bool TrilogyMeshRenderer::reserveWorkoutBirds(uint32_t birds, bool reservePhysx) {
     if (!impl_) return false;
     auto& s=*impl_;
     birds=std::min(birds,kMaxWorkoutBirds);
-    if (birds<=s.workoutBirdCapacity) return true;
+    const size_t addedPhysx = reservePhysx ? kMaxPhysxBodies - s.physxCapacity : 0u;
+    if (birds<=s.workoutBirdCapacity && !addedPhysx) return true;
     if (!s.instanceBuffer || !s.birdParts || !s.context.deviceRaw()) return false;
     // Room to spare, so a flock that is still growing does not come back every few frames.
-    const uint32_t capacity=std::min(kMaxWorkoutBirds,std::max(birds,s.workoutBirdCapacity*2u));
-    const size_t room=s.baseSceneInstances+size_t(capacity)*s.birdParts;
+    const uint32_t capacity=birds > s.workoutBirdCapacity
+        ? std::min(kMaxWorkoutBirds,std::max(birds,s.workoutBirdCapacity*2u)) : s.workoutBirdCapacity;
+    const size_t room=s.baseSceneInstances+addedPhysx+size_t(capacity)*s.birdParts;
     try {
         auto* d=static_cast<ID3D12Device*>(s.context.deviceRaw());
         // Make the larger buffers first. If the machine cannot give them, the flock keeps what it has.
@@ -3246,6 +3272,8 @@ bool TrilogyMeshRenderer::reserveWorkoutBirds(uint32_t birds) {
             s.maxTlasInstances=room;
         }
         s.maxSceneInstances=room;
+        s.baseSceneInstances+=addedPhysx;
+        s.physxCapacity+=addedPhysx;
         s.workoutBirdCapacity=capacity;
         BOO_LOG_INFO("Workout","Room made for "+std::to_string(capacity)+" workout birds ("+std::to_string(room)+" instances).");
         return true;
@@ -3253,6 +3281,9 @@ bool TrilogyMeshRenderer::reserveWorkoutBirds(uint32_t birds) {
         BOO_LOG_WARN("Workout",std::string("Could not make room for ")+std::to_string(capacity)+" workout birds: "+e.what());
         return false;
     }
+}
+bool TrilogyMeshRenderer::reservePhysxBodies() {
+    return impl_ && reserveWorkoutBirds(impl_->workoutBirdCapacity, true);
 }
 FlockFocus TrilogyMeshRenderer::flockFocus() const noexcept { return impl_ ? impl_->flockFocus : FlockFocus{}; }
 bool TrilogyMeshRenderer::neuralMaterialDrawn() const noexcept { return impl_->neuralMaterialDrawn; }

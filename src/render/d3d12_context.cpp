@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <limits>
+#include <iostream>
 
 namespace boo {
 
@@ -30,6 +31,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr uint32_t kTimestampsPerFrame = 5;
 constexpr ULONGLONG kGpuWaitTimeoutMs = 5000;
+constexpr ULONGLONG kWarpGpuWaitTimeoutMs = 60000;
 // Every shader is built for Shader Model 6.0, which a feature level 11 adapter need not have.
 bool supportsShaderModel6(ID3D12Device* device) noexcept {
     D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
@@ -241,6 +243,7 @@ bool D3D12Context::initialize(
     chosenAdapter->GetDesc1(&adapterDesc);
     adapterName_ = w2u8(adapterDesc.Description);
     vendorId_    = adapterDesc.VendorId;
+    deviceId_    = adapterDesc.DeviceId;
     luidLow_     = static_cast<int32_t>(adapterDesc.AdapterLuid.LowPart);
     luidHigh_    = adapterDesc.AdapterLuid.HighPart;
 
@@ -485,37 +488,42 @@ void D3D12Context::shutdown() noexcept {
 
 bool D3D12Context::waitForGpu() noexcept {
     if (!impl_ || !impl_->commandQueue || !impl_->fence || !impl_->fenceEvent) return false;
+    const auto failed = [this]() noexcept {
+        impl_->synchronizationFailed = true;
+        // Callers may destroy resources immediately after a failed wait. On WARP,
+        // retire here as well as at shutdown so none can outlive an undrained wait.
+        if (isWarp_) retireGpuForShutdown();
+        return false;
+    };
     if (impl_->synchronizationFailed || impl_->injectedDeviceLost ||
-        FAILED(impl_->device->GetDeviceRemovedReason())) return false;
+        FAILED(impl_->device->GetDeviceRemovedReason())) return failed();
     const uint64_t value = impl_->nextFenceValue++;
     if (FAILED(impl_->commandQueue->Signal(impl_->fence.Get(), value))) {
-        impl_->synchronizationFailed = true;
-        return false;
+        return failed();
     }
     // UINT64_MAX is the documented removed-device sentinel, not fence completion.
     if (impl_->fence->GetCompletedValue() == std::numeric_limits<uint64_t>::max()) {
-        impl_->synchronizationFailed = true;
-        return false;
+        return failed();
     }
     if (const int slowMs = simulatedSlowDriverMs(); slowMs > 0) Sleep(static_cast<DWORD>(slowMs / 4)); // test only
     if (impl_->fence->GetCompletedValue() < value) {
         if (FAILED(impl_->fence->SetEventOnCompletion(value, impl_->fenceEvent))) {
-            impl_->synchronizationFailed = true;
-            return false;
+            return failed();
         }
         const ULONGLONG deadline = GetTickCount64() +
-            (StartupProgress::instance().active() ? kStartupGpuWaitTimeoutMs : kGpuWaitTimeoutMs);
+            (isWarp_ ? kWarpGpuWaitTimeoutMs :
+             (StartupProgress::instance().active() ? kStartupGpuWaitTimeoutMs : kGpuWaitTimeoutMs));
         for (;;) {
             const DWORD result = WaitForSingleObjectEx(impl_->fenceEvent, 100, FALSE);
             if (result == WAIT_OBJECT_0) break;
             if (result != WAIT_TIMEOUT || FAILED(impl_->device->GetDeviceRemovedReason()) ||
                 GetTickCount64() >= deadline) {
-                impl_->synchronizationFailed = true;
-                return false;
+                return failed();
             }
         }
     }
-    return checkDeviceHealthy();
+    if (!checkDeviceHealthy()) return failed();
+    return true;
 }
 
 bool D3D12Context::retireGpuForShutdown() noexcept {
@@ -525,6 +533,20 @@ bool D3D12Context::retireGpuForShutdown() noexcept {
     const auto finish = [&](bool drained) {
         impl_->teardownRetired = true;
         impl_->teardownDrained = drained;
+        if (!drained && isWarp_) {
+            // WARP may still use process memory after device removal. Never run
+            // destructors or release resources unless the queue really drained.
+            const HRESULT reason = impl_->device->GetDeviceRemovedReason();
+            BOO_LOG_ERROR("D3D12", "WARP queue did not retire; removed reason " + hrHex(reason) +
+                "; terminating without releasing in-flight resources (exit 4319).");
+            try { if (fatalRetirementHandler_) fatalRetirementHandler_(); }
+            catch (...) { BOO_LOG_ERROR("Diagnostics", "Fatal WARP diagnostics export failed."); }
+            std::cout.flush();
+            std::cerr.flush();
+            std::fflush(nullptr);
+            TerminateProcess(GetCurrentProcess(), kWarpRetirementFailureExitCode);
+            for (;;) Sleep(INFINITE);
+        }
         return drained;
     };
     if (FAILED(impl_->device->GetDeviceRemovedReason())) return finish(false);
@@ -535,7 +557,7 @@ bool D3D12Context::retireGpuForShutdown() noexcept {
     // Poll this fresh fence target instead of trusting an old event notification.
     const uint64_t value = impl_->nextFenceValue++;
     if (impl_->fence && SUCCEEDED(impl_->commandQueue->Signal(impl_->fence.Get(), value))) {
-        const ULONGLONG deadline = GetTickCount64() + kGpuWaitTimeoutMs;
+        const ULONGLONG deadline = GetTickCount64() + (isWarp_ ? kWarpGpuWaitTimeoutMs : kGpuWaitTimeoutMs);
         for (;;) {
             const uint64_t completed = impl_->fence->GetCompletedValue();
             if (completed == std::numeric_limits<uint64_t>::max() ||
@@ -611,10 +633,9 @@ bool D3D12Context::resize(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) return true;
     if (width == width_ && height == height_) return true;
 
+    if (!waitForGpu() || !checkDeviceHealthy()) return false;
     impl_->frameGeneration.invalidate();
-    waitForGpu();
     impl_->fgHudless.Reset();impl_->fgUiAlpha.Reset();impl_->fgTargetsBound=false;
-    if (!checkDeviceHealthy()) return false;
     for (uint32_t i = 0; i < kFrameCount; ++i) {
         impl_->renderTargets[i].Reset();
         impl_->frameFenceValues[i] = 0;
@@ -691,7 +712,7 @@ bool D3D12Context::beginFrame() {
     const uint64_t requiredFence = impl_->frameFenceValues[impl_->frameIndex];
     if (requiredFence > 0 && impl_->fence->GetCompletedValue() < requiredFence) {
         if (SUCCEEDED(impl_->fence->SetEventOnCompletion(requiredFence, impl_->fenceEvent))) {
-            if (WaitForSingleObjectEx(impl_->fenceEvent, 2000, FALSE) != WAIT_OBJECT_0) {
+            if (WaitForSingleObjectEx(impl_->fenceEvent, isWarp_ ? static_cast<DWORD>(kWarpGpuWaitTimeoutMs) : 2000, FALSE) != WAIT_OBJECT_0) {
                 impl_->synchronizationFailed = true;
                 return false;
             }

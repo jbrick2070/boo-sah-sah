@@ -49,7 +49,8 @@ public:
     const std::vector<CityCollisionBox>& cityCollision(uint32_t* act) const noexcept;
     BakedClothInfo bakedCloth() const noexcept; // the baked PhysX cloth played back in the last frame
     std::vector<CityCollisionBox> buildCityCollision(uint32_t act); // the same, for a city not being drawn
-    bool reserveWorkoutBirds(uint32_t birds);
+    bool reserveWorkoutBirds(uint32_t birds, bool reservePhysx = false);
+    bool reservePhysxBodies();
     FlockFocus flockFocus() const noexcept; // where they were, for the bird camera
     uint32_t queriedRays() const;
     uint32_t fallbackKits() const;

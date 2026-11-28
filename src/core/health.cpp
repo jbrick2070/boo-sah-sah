@@ -1,5 +1,6 @@
 #include "boo/health.hpp"
 #include "boo/logging.hpp"
+#include "boo/settings.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -336,16 +337,50 @@ FrametimeStats computeFrametimeStats(const std::vector<double>& samplesMs) {
     return stats;
 }
 
+namespace {
+int qualityRank(QualityPresetId preset) noexcept {
+    switch (preset) {
+        case QualityPresetId::Lite: return 0;
+        case QualityPresetId::Safe: return 1;
+        case QualityPresetId::Balanced: return 2;
+        case QualityPresetId::Showcase: return 3;
+        case QualityPresetId::Experimental4K: return 4;
+    }
+    return 0;
+}
+} // namespace
+
+QualityPresetSpec QualityLadder::effectiveSpec(QualityPresetSpec spec) const noexcept {
+    if (safetyResolutionActive_ && spec.id == QualityPresetId::Lite) {
+        spec.renderWidth = 640;
+        spec.renderHeight = 360;
+    }
+    return spec;
+}
+
 QualityLadder::QualityLadder(QualityPresetId initialPreset, size_t windowFrames)
     : currentPreset_(initialPreset), windowFrames_(std::max<size_t>(8, windowFrames)) {}
 
 void QualityLadder::setPreset(QualityPresetId preset) noexcept {
     currentPreset_ = preset;
+    samplesMs_.clear();
+    framesSinceEval_ = 0;
     consecutiveOverBudgetWindows_ = 0;
     consecutiveHeadroomWindows_ = 0;
+    fastSeconds_ = 0.0f;
+    safetyResolutionActive_ = false;
+    lastAutoUpgradeRank_ = -1;
+    maxAutoUpgradeRank_ = 3;
 }
 
 void QualityLadder::stepDown() noexcept {
+    const int rank = qualityRank(currentPreset_);
+    if (rank == lastAutoUpgradeRank_) {
+        // This automatic upgrade could not sustain its workload. Do not retry it
+        // until the viewer explicitly selects a preset.
+        maxAutoUpgradeRank_ = std::min(maxAutoUpgradeRank_, rank - 1);
+    }
+    lastAutoUpgradeRank_ = -1;
     if (currentPreset_ == QualityPresetId::Experimental4K) {
         currentPreset_ = QualityPresetId::Showcase;
         ++downgradeCount_;
@@ -355,12 +390,24 @@ void QualityLadder::stepDown() noexcept {
     } else if (currentPreset_ == QualityPresetId::Balanced) {
         currentPreset_ = QualityPresetId::Safe;
         ++downgradeCount_;
+    } else if (currentPreset_ == QualityPresetId::Safe) {
+        currentPreset_ = QualityPresetId::Lite;
+        ++downgradeCount_;
     }
 }
 
 void QualityLadder::stepUp() noexcept {
+    // WARP and integrated adapters may rise to Safe, never Balanced. A
+    // failed upgrade remains blocked until an explicit preset selection.
+    const int nextRank = qualityRank(currentPreset_) + 1;
+    if (safetyResolutionActive_ || nextRank > maxAutoUpgradeRank_ ||
+        (integratedGraphics_ && nextRank > 1)) return;
+    lastAutoUpgradeRank_ = nextRank;
     // Do not auto-upgrade into manual 4K Experimental mode (Section 6.5)
-    if (currentPreset_ == QualityPresetId::Safe) {
+    if (currentPreset_ == QualityPresetId::Lite) {
+        currentPreset_ = QualityPresetId::Safe;
+        ++upgradeCount_;
+    } else if (currentPreset_ == QualityPresetId::Safe) {
         currentPreset_ = QualityPresetId::Balanced;
         ++upgradeCount_;
     } else if (currentPreset_ == QualityPresetId::Balanced) {
@@ -373,15 +420,20 @@ void QualityLadder::pushFrameSample(
     double gpuFrameMs,
     uint64_t estimatedVramBytes,
     uint64_t softVramCapBytes,
-    bool atSafeSceneCut) {
+    bool atSafeSceneCut,
+    float elapsedSeconds) {
     // Section 6.5: Immediate shed on VRAM pressure regardless of FPS
-    if (softVramCapBytes > 0 && estimatedVramBytes > softVramCapBytes) {
-        memoryPressure_ = true;
-        stepDown();
+    memoryPressure_ = softVramCapBytes > 0 && estimatedVramBytes > softVramCapBytes;
+    if (memoryPressure_) {
         consecutiveHeadroomWindows_ = 0;
-        return;
+        fastSeconds_ = 0.0f;
+        if (currentPreset_ != QualityPresetId::Lite) {
+            stepDown();
+            return;
+        }
+        // Lite has no lower preset. Still collect timings so sustained slowness
+        // can select its smaller safety canvas, even under memory pressure.
     }
-    memoryPressure_ = false;
 
     if (samplesMs_.size() >= windowFrames_) {
         samplesMs_.pop_front();
@@ -389,26 +441,52 @@ void QualityLadder::pushFrameSample(
     samplesMs_.push_back(gpuFrameMs);
     ++framesSinceEval_;
 
+    const float upgradeMs = integratedGraphics_ ? 15.0f : 11.5f;
+    if (integratedGraphics_ && !memoryPressure_) {
+        fastSeconds_ = static_cast<float>(gpuFrameMs) < upgradeMs ? fastSeconds_ + std::clamp(elapsedSeconds, 0.0f, 0.25f) : 0.0f;
+    }
+    // Integrated GPUs require at least 300 fast samples before rising at a scene cut.
+    const size_t requiredWindows = integratedGraphics_ ? std::max<size_t>(3, (300 + windowFrames_ - 1) / windowFrames_) : 3;
     if (samplesMs_.size() < windowFrames_ || framesSinceEval_ < windowFrames_) {
+        // Scene boundaries are single-frame events and need not coincide with a window evaluation.
+        if (!memoryPressure_ && atSafeSceneCut && samplesMs_.size() == windowFrames_ &&
+            consecutiveHeadroomWindows_ >= requiredWindows && (!integratedGraphics_ || fastSeconds_ >= 5.0f) &&
+            recentStats().p95Ms < upgradeMs) {
+            stepUp();
+            consecutiveHeadroomWindows_ = 0;
+            fastSeconds_ = 0.0f;
+        }
         return;
     }
     framesSinceEval_ = 0;
 
     const FrametimeStats stats = recentStats();
     // Section 6.5: p95 > ~18.0 ms for 2 consecutive windows -> degrade gradually
-    if (stats.p95Ms > 18.0) {
+    // On Lite, a median above 55 ms (under about 18 fps) drops to the 640x360 rung: smooth beats sharp.
+    const float downgradeMs = currentPreset_ == QualityPresetId::Lite ? 55.0f :
+                              currentPreset_ == QualityPresetId::Safe ? 40.0f : 18.0f;
+    // The emergency rung requires persistently slow frames, not isolated spikes.
+    const double downgradeSampleMs = currentPreset_ == QualityPresetId::Lite ? stats.p50Ms : stats.p95Ms;
+    if (downgradeSampleMs > downgradeMs) {
         ++consecutiveOverBudgetWindows_;
         consecutiveHeadroomWindows_ = 0;
         if (consecutiveOverBudgetWindows_ >= 2) {
-            stepDown();
+            if (currentPreset_ == QualityPresetId::Lite && !safetyResolutionActive_) {
+                safetyResolutionActive_ = true;
+                ++downgradeCount_;
+            } else {
+                stepDown();
+            }
             consecutiveOverBudgetWindows_ = 0;
         }
-    } else if (stats.p95Ms < 11.5) {
+    } else if (!memoryPressure_ && stats.p95Ms < upgradeMs) {
         consecutiveOverBudgetWindows_ = 0;
         ++consecutiveHeadroomWindows_;
-        if (consecutiveHeadroomWindows_ >= 3 && atSafeSceneCut) {
+        if (consecutiveHeadroomWindows_ >= requiredWindows && atSafeSceneCut &&
+            (!integratedGraphics_ || fastSeconds_ >= 5.0f)) {
             stepUp();
             consecutiveHeadroomWindows_ = 0;
+            fastSeconds_ = 0.0f;
         }
     } else {
         consecutiveOverBudgetWindows_ = 0;

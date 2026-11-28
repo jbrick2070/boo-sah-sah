@@ -479,7 +479,7 @@ std::string buildCliHelpText() {
         "  --cue <path>                Cue JSON file (default: assets/cues/film_360s.json)\n"
         "  --mode <full|solo_rt|solo_tensor|solo_npu|solo_cuda|finale_loop>\n"
         "  --edition <family|midnight> Story edition\n"
-        "  --preset <safe|balanced|showcase|4k_experimental>\n"
+        "  --preset <lite|safe|balanced|showcase|4k_experimental>\n"
         "  --effects-detail <low|normal|high>  Particle density and fractal detail (7 cycles, Safe uses low)\n"
         "  --width <px> --height <px>  Window client size (default: 1920x1080)\n"
         "  --fullscreen / --windowed   Display mode\n"
@@ -598,6 +598,7 @@ std::vector<QualityPresetSpec> loadQualityPresets(const std::filesystem::path& p
         }
     }
     if (out.empty()) {
+        out.push_back(QualityPresetSpec{QualityPresetId::Lite, "Lite", 960, 540, 30, false, false, false, false, 0, 2048, 4, 1536ULL * 1024ULL * 1024ULL});
         out.push_back(QualityPresetSpec{QualityPresetId::Safe, "Safe", 1280, 720, 30, false, false, false, false, 0, 25000, 4, 4ULL << 30});
         out.push_back(QualityPresetSpec{QualityPresetId::Balanced, "Balanced", 1920, 1080, 60, true, true, true, true, 1, 100000, 2, 12ULL << 30});
         out.push_back(QualityPresetSpec{QualityPresetId::Showcase, "Showcase", 2560, 1440, 60, true, true, true, true, 2, 500000, 2, 14ULL << 30});
@@ -608,7 +609,23 @@ std::vector<QualityPresetSpec> loadQualityPresets(const std::filesystem::path& p
 
 QualityPresetSpec findQualityPresetSpec(const std::vector<QualityPresetSpec>& presets, QualityPresetId id) {
     for (const auto& p : presets) {
-        if (p.id == id) return p;
+        if (p.id == id) {
+            QualityPresetSpec spec = p;
+            if (id == QualityPresetId::Lite || id == QualityPresetId::Safe) {
+                spec.allowDxr = false;
+                spec.allowCuda = false;
+                spec.allowTensor = false;
+                spec.allowNpu = false;
+            }
+            return spec;
+        }
+    }
+    // An incomplete preset file must not substitute Balanced for either raster preset.
+    if (id == QualityPresetId::Lite) {
+        return QualityPresetSpec{QualityPresetId::Lite, "Lite", 960, 540, 30, false, false, false, false, 0, 2048, 4, 1536ULL * 1024ULL * 1024ULL};
+    }
+    if (id == QualityPresetId::Safe) {
+        return QualityPresetSpec{QualityPresetId::Safe, "Safe", 1280, 720, 30, false, false, false, false, 0, 25000, 4, 4ULL << 30};
     }
     return QualityPresetSpec{};
 }

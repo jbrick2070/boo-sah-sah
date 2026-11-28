@@ -165,7 +165,7 @@ add_custom_command(
     OUTPUT "${M1_DXR_SCENE_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_5 -E CSDxrTaipeiScene -DBOO_M1_DXR_CS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_DXR_SCENE_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 DXR 1.1 Inline RayQuery Taipei Scene Shader"
     VERBATIM
 )
@@ -174,7 +174,7 @@ add_custom_command(
     OUTPUT "${M1_RASTER_SCENE_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSRasterTaipeiScene -DBOO_M1_RASTER_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_RASTER_SCENE_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 SM 6.0 Raster Taipei Scene Substitute Shader"
     VERBATIM
 )
@@ -183,7 +183,7 @@ add_custom_command(
     OUTPUT "${M1_BLOOM_DOWN_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSBloomDownsample -DBOO_M1_BLOOM_DOWN_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_BLOOM_DOWN_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 Dual-Kawase HDR Bloom Downsample Shader"
     VERBATIM
 )
@@ -192,7 +192,7 @@ add_custom_command(
     OUTPUT "${M1_BLOOM_UP_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSBloomUpsample -DBOO_M1_BLOOM_UP_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_BLOOM_UP_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 Dual-Kawase HDR Bloom Tent Upsample Shader"
     VERBATIM
 )
@@ -201,7 +201,7 @@ add_custom_command(
     OUTPUT "${M1_COMPOSITE_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSCompositeCanvas -DBOO_M1_COMPOSITE_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_COMPOSITE_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 Clean 16:9 Canvas ACES + sRGB + IGN Dither Composite Shader"
     VERBATIM
 )
@@ -210,7 +210,7 @@ add_custom_command(
     OUTPUT "${M1_PRESENT_HUD_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_PRESENT_HUD_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 Swapchain 16:9 Letterbox Catmull-Rom + 10/8-bit HUD Present Shader"
     VERBATIM
 )
@@ -220,7 +220,7 @@ add_custom_command(
     OUTPUT "${M1_PRESENT_CLEAN_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_PRESENT_CLEAN -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_PRESENT_CLEAN_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 Present Shader for frames without the overlay"
     VERBATIM
 )
@@ -229,7 +229,7 @@ add_custom_command(
     OUTPUT "${M1_PARTICLES_SUB_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSLiveParticlesSub -DBOO_M1_PARTICLES_SUB_CS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_PARTICLES_SUB_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 HLSL 8K Linear Rain-Mist Substitute Compute Shader"
     VERBATIM
 )
@@ -238,7 +238,7 @@ add_custom_command(
     OUTPUT "${M1_PARTICLES_VS_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T vs_6_0 -E VSLiveParticles -DBOO_M1_PARTICLES_VS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_PARTICLES_VS_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 3D Velocity-Aligned Rain & Sanctuary Pollen Vertex Shader"
     VERBATIM
 )
@@ -247,7 +247,7 @@ add_custom_command(
     OUTPUT "${M1_PARTICLES_PS_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSLiveParticles -DBOO_M1_PARTICLES_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_PARTICLES_PS_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 3D Soft-Occluded Rain & Sanctuary Pollen Pixel Shader"
     VERBATIM
 )
@@ -256,7 +256,7 @@ add_custom_command(
     OUTPUT "${M1_TENSOR_SUB_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSLiveTensorSub -DBOO_M1_TENSOR_SUB_CS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_TENSOR_SUB_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 HLSL Scalar Caustic Field Substitute Compute Shader"
     VERBATIM
 )
@@ -265,7 +265,7 @@ add_custom_command(
     OUTPUT "${M1_NV12_PACK_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T cs_6_0 -E CSPackCanvasToNv12 -DBOO_M1_NV12_PACK_CS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M1_NV12_PACK_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M1 CanvasClean -> 720p NV12 Hardware Codec Input Pack Shader"
     VERBATIM
 )
@@ -274,7 +274,7 @@ add_custom_command(
     OUTPUT "${M8_SPOUT_BLIT_CSO}"
     COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ps_6_0 -E PSSpoutCleanBlit -DBOO_M8_SPOUT_BLIT_PS -Ges -WX -O3
             "${M1_SLICE_HLSL}" -Fo "${M8_SPOUT_BLIT_CSO}"
-    DEPENDS "${M1_SLICE_HLSL}"
+    DEPENDS "${M1_SLICE_HLSL}" "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h"
     COMMENT "Compiling M8 Clean-Feed CanvasClean -> Spout2 Shared BGRA8 Blit Shader"
     VERBATIM
 )
@@ -329,10 +329,14 @@ add_custom_command(OUTPUT "${BOO_OUT_SHADER_DIR}/m2_nrd_unpack_ps.cso"
 set(BOO_VARIANT_SHADER_OUTPUTS)
 function(boo_variant_shader name source profile entry)
     set(output "${BOO_OUT_SHADER_DIR}/${name}.cso")
+    set(extra_dependencies)
+    if(source STREQUAL "m1_taipei_slice")
+        list(APPEND extra_dependencies "${CMAKE_SOURCE_DIR}/assets/shaders/m1_hud_layout.h")
+    endif()
     add_custom_command(OUTPUT "${output}"
         COMMAND "${BOO_DXC_EXECUTABLE}" -nologo -T ${profile} -E ${entry} ${ARGN} -Ges -WX -O3
             "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" -Fo "${output}"
-        DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" VERBATIM)
+        DEPENDS "${CMAKE_SOURCE_DIR}/assets/shaders/${source}.hlsl" ${extra_dependencies} VERBATIM)
     set(BOO_VARIANT_SHADER_OUTPUTS ${BOO_VARIANT_SHADER_OUTPUTS} "${output}" PARENT_SCOPE)
 endfunction()
 boo_variant_shader(dlss_resolve dlss_resolve cs_6_0 CSResolve)
@@ -340,6 +344,10 @@ boo_variant_shader(m2_motion_vs m2_mesh vs_6_0 VSSceneMotion)
 boo_variant_shader(m2_motion_ps m2_mesh ps_6_0 PSSceneMotion)
 boo_variant_shader(m2_motion_cutout_ps m2_mesh ps_6_0 PSSceneMotion -DBOO_ALPHA_CUTOUT=1)
 boo_variant_shader(m2_sky_motion_ps m2_mesh ps_6_0 PSSkyMotion)
+boo_variant_shader(m1_hud_cache m1_taipei_slice ps_6_0 PSHudCache -DBOO_M1_PRESENT_PS)
+boo_variant_shader(m1_hud_cache_clean m1_taipei_slice ps_6_0 PSHudCache -DBOO_M1_PRESENT_PS -DBOO_PRESENT_CLEAN)
+boo_variant_shader(m1_present_cached m1_taipei_slice ps_6_0 PSPresentCached -DBOO_M1_PRESENT_PS)
+boo_variant_shader(m1_present_cached_frame_generation m1_taipei_slice ps_6_0 PSPresentCached -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
 boo_variant_shader(m1_present_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS)
 boo_variant_shader(m1_present_clean_frame_generation m1_taipei_slice ps_6_0 PSPresentLetterboxHud -DBOO_M1_PRESENT_PS -DBOO_FRAME_GENERATION_OUTPUTS -DBOO_PRESENT_CLEAN)
 # Neural rendering suite (src/render/neural_rendering.cpp)

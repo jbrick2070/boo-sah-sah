@@ -1,3 +1,5 @@
+#include "m1_hud_layout.h"
+
 // BOO SAH SAH — The Glass Orchid Protocol
 // Milestone M1 60-Second Taipei -> Enamel Monolith -> Glass Orchid Vertical Slice Shaders
 // Compiled with Windows SDK DXC (-Ges -WX -O3):
@@ -1725,6 +1727,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
 {
     uint aovMode = gIsFirstDownsample & 0xFFu;
     uint lensFlags = (gIsFirstDownsample >> 8u) & 3u;
+    bool lite = (gIsFirstDownsample & 0x400u) != 0u;
     float2 pxPos = floor(pin.position.xy);
     float3 hdrCenter = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
     float3 sdr;
@@ -1767,17 +1770,20 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         float r2 = dot(centered, centered);
 
         // Lateral chromatic aberration: red and blue image planes magnify slightly differently toward the corners.
-        float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 0.45 * gAudioKick));
-        float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
-        float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
-        hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
+        if (!lite)
+        {
+            float2 caShift = (pin.uv - 0.5) * (0.0022 * r2 * (1.0 + 0.45 * gAudioKick));
+            float caR = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv + caShift, 0.0).r;
+            float caB = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv - caShift, 0.0).b;
+            hdr += float3(caR - hdrCenter.r, 0.0, caB - hdrCenter.b);
+        }
 
         float vignette = saturate(1.14 - gVignetteStrength * r2);
         float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
 
         // Wide anamorphic streak: four symmetric horizontal tap pairs with falling weights and a cool cast.
         float3 streak = 0.0.xxx;
-        [unroll] for (int s = 0; s < 4; ++s)
+        [unroll] for (int s = 0; s < 4 && !lite; ++s)
         {
             float offPx = 12.0 * pow(2.2, (float)s) * scale;
             float wS = 1.0 / (1.0 + (float)s * 1.6);
@@ -1903,6 +1909,7 @@ Texture2D<float4> gCodecDecodedTex    : register(t2);
 // Localized text coverage atlas (include/boo/ui_text.hpp). Only read when gHudFlags bit 16 or 17 is set;
 // English leaves both clear and draws every word with the glyph tables below, unchanged.
 Texture2D<float>  gUiTextTex          : register(t3);
+Texture2D<float4> gHudCacheTex        : register(t4);
 SamplerState      gLinearClamp        : register(s0);
 
 // Label slots: the same order as enum UiLabel in include/boo/ui_text.hpp.
@@ -2827,6 +2834,7 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
     const bool abLeftHwVerified   = (gHudFlags & (1u << 14u)) != 0u;
     const bool externalMediaValid = (gHudFlags & (1u << 15u)) != 0u;
     const bool cueCodecInset      = (gHudFlags & (1u << 18u)) != 0u;
+    const bool litePresent        = (gHudFlags & (1u << 22u)) != 0u;
 
     sdr = 0.0.xxx;
     uiAlpha = 0.0;
@@ -2852,17 +2860,17 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
                 }
                 else
                 {
-                    sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
+                    sdr = litePresent ? gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
                 }
             }
             else if ((directorCompare || abLeftHwVerified) && canvasUv.x >= splitRatio)
             {
                 // RT / CUDA / Tensor A/B: Left = Canonical Live HW CanvasClean, Right = Isolated Substitute CanvasAbCompare
-                sdr = sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
+                sdr = litePresent ? gCanvasAbCompareTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasAbCompareTex, canvasUv, canvasRes);
             }
             else
             {
-                sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
+                sdr = litePresent ? gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
             }
         }
         else if (codecViewActive)
@@ -2871,7 +2879,7 @@ void presentFilm(VSOut pin, out float3 sdr, out float uiAlpha, out float3 hudles
         }
         else
         {
-            sdr = sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
+            sdr = litePresent ? gCanvasCleanTex.SampleLevel(gLinearClamp, canvasUv, 0.0f).rgb : sampleTexCatmullRom(gCanvasCleanTex, canvasUv, canvasRes);
             hudless = sdr;
             // The broadcast monitor belongs to telemetry. Clean cinema keeps the
             // native image, and the standalone benchmark owns this corner when open.
@@ -2935,6 +2943,7 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
                 : textRun(local, 5.0 * textScale, textScale, TXT_GLYPHS | (4u << 8u) | TXT_MONITOR,
                           textPack8(72u,76u,83u,76u,0u,0u,0u,0u), 4.0, float2(4.0, 6.0));      // HLSL
             sdr = lerp(float3(0.025,0.045,0.06), 0.90.xxx, label);
+            uiAlpha = 1.0;
         }
     }
     const float3 colJade   = float3(0.04, 0.88, 0.74);
@@ -2957,7 +2966,7 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
 #ifndef BOO_PRESENT_CLEAN
     if (showOverlay && (hudMode == 0u || hudMode == 2u) && res.x >= 480.0 && res.y >= 300.0)
     {
-        const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float uiScale = BOO_HUD_SCALE(res.y);
         const float barH = 44.0 * uiScale;
         if (px.y >= res.y - barH)
         {
@@ -2985,8 +2994,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
             sdr = hudOver(uiAlpha, sdr, aclk ? colJade : colCyan, clkTxt);
 
             // Clickable / Draggable Timeline Scrub Bar + Act Sub-Bar
-            float2 tlMin  = float2(82.0 * uiScale, res.y - 31.0 * uiScale);
-            float2 tlSize = float2(max(90.0, res.x * 0.20), 10.0 * uiScale);
+            float2 tlMin  = float2(BOO_HUD_TIMELINE_X(uiScale), res.y - 31.0 * uiScale);
+            float2 tlSize = float2(BOO_HUD_TIMELINE_WIDTH(res.x), 10.0 * uiScale);
             float filmFill = saturate(gFilmTime / max(gDuration, 1.0));
             float tlMask = segmentedBar(px, tlMin, tlSize, filmFill, 24u);
             sdr = hudOver(uiAlpha, sdr, lerp(colJade, colOrchid, filmFill), tlMask * 0.92);
@@ -2994,8 +3003,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
             if (abs(px.x - tlThumbX) <= 2.2 * uiScale && px.y >= tlMin.y - 2.5 * uiScale && px.y <= tlMin.y + tlSize.y + 2.5 * uiScale)
                 sdr = hudInk(uiAlpha, colEnamel);
 
-            float2 actMin  = float2(82.0 * uiScale, res.y - 16.0 * uiScale);
-            float2 actSize = float2(max(90.0, res.x * 0.20), 5.0 * uiScale);
+            float2 actMin  = float2(BOO_HUD_TIMELINE_X(uiScale), res.y - 16.0 * uiScale);
+            float2 actSize = float2(BOO_HUD_TIMELINE_WIDTH(res.x), 5.0 * uiScale);
             float actMask = segmentedBar(px, actMin, actSize, gActProgress, 12u);
             sdr = hudOver(uiAlpha, sdr, colAmber, actMask * 0.88);
 
@@ -3015,7 +3024,9 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
             // FPS & Total Frame GPU ms readouts
             float statX = eqBaseX + 32.0 * uiScale;
             float fpsLbl = sampleWord4(px, float2(statX, res.y - 34.0 * uiScale), 1.8 * uiScale, 70u, 80u, 83u, 58u);
-            float fpsVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 34.0 * uiScale), 1.8 * uiScale, gFps);
+            // Use the same measured base-frame rate as the RENDER FPS panel when available.
+            float fpsVal = sampleFixedNumber6(px, float2(statX + 38.0 * uiScale, res.y - 34.0 * uiScale), 1.8 * uiScale,
+                                              gVolumeAndPadding.w > 0.0f ? gVolumeAndPadding.w : gFps);
             sdr = hudOver(uiAlpha, sdr, colJade, fpsLbl);
             sdr = hudOver(uiAlpha, sdr, colEnamel, fpsVal);
 
@@ -3176,8 +3187,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
         {
             const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
             const bool isFull = (gNeuralMeta.w & 1u) != 0u;
-            const float2 pillSize = float2(isFull ? 150.0 : 86.0, 18.0) * uiScale;
-            const float2 pillMin = float2(res.x - 14.0 * uiScale - pillSize.x, 14.0 * uiScale);
+            const float2 pillSize = float2(BOO_HUD_FULLSCREEN_PILL_WIDTH(isFull, uiScale), 18.0 * uiScale);
+            const float2 pillMin = float2(BOO_HUD_FULLSCREEN_PILL_X(res.x, pillSize.x, uiScale), BOO_HUD_FULLSCREEN_PILL_Y(uiScale));
             if (px.x >= pillMin.x && px.x < pillMin.x + pillSize.x && px.y >= pillMin.y && px.y < pillMin.y + pillSize.y)
             {
                 const float3 edge = isFull ? colAmber : lerp(colJade, colCyan, 0.35);
@@ -3218,28 +3229,27 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
 #ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode < 2u && res.x >= 480.0 && res.y >= 300.0)
     {
-        const float uiScale = clamp(floor(res.y / 540.0), 1.0, 3.0);
+        const float uiScale = BOO_HUD_SCALE(res.y);
 
         // Live hardware workloads. In narrow windows reserve room for the separate benchmark.
         const bool benchActiveOrDone = hudMode == 0u && (gHudFlags & 0xC0u) != 0u;
-        const bool compactTable = hudMode == 1u || res.x < 330.0 * uiScale ||
-                                  (benchActiveOrDone && res.x < 610.0 * uiScale);
-        float liveTopY = (gVolumeAndPadding.x >= 0.0) ? (44.0 * uiScale) : (14.0 * uiScale);
-        float2 liveMin  = float2(14.0 * uiScale, liveTopY);
-        float featureRowHeight = compactTable ? 18.0 : 22.0;
+        const bool compactTable = BOO_HUD_PANEL_COMPACT(hudMode, res.x, uiScale, benchActiveOrDone);
+        float liveTopY = BOO_HUD_PANEL_Y(uiScale, gVolumeAndPadding.x >= 0.0f);
+        float2 liveMin  = float2(BOO_HUD_PANEL_X(uiScale), liveTopY);
+        float featureRowHeight = BOO_HUD_FEATURE_ROW_HEIGHT(compactTable);
         bool showFrameRates = gVolumeAndPadding.w > 0.0 && gInteractiveMeta.w > 0u;
         // NEURAL RENDERING: a 20-unit heading and three rows below the five Real-Time Graphics rows.
         // main.cpp mirrors these offsets for its click handling.
-        float neuralTop = 139.0 + 5.0 * featureRowHeight;
-        float neuralRowsTop = neuralTop + 20.0;
-        float footerTop = neuralRowsTop + 3.0 * featureRowHeight;
+        float neuralTop = BOO_HUD_NEURAL_TOP(featureRowHeight);
+        float neuralRowsTop = BOO_HUD_NEURAL_ROWS_TOP(neuralTop);
+        float footerTop = BOO_HUD_FOOTER_TOP(neuralRowsTop, featureRowHeight);
         // The FPS line is always reserved so the rows below never move; main.cpp mirrors them for clicks.
-        float sensorTop = footerTop + 20.0;
-        float cpuTop = sensorTop + 18.0;
-        float workoutTop = cpuTop + 18.0;   // WORKOUT level, bird count, [-] [+]
-        float flockTop = workoutTop + 20.0; // FLOCK formation (click cycles) and bird camera toggle
-        float physxTop = flockTop + 20.0;   // PHYSX genre (click or Shift+P dials) and its timings
-        const float benchmarkTop = physxTop + 20.0;
+        float sensorTop = BOO_HUD_SENSOR_TOP(footerTop);
+        float cpuTop = BOO_HUD_CPU_TOP(sensorTop);
+        float workoutTop = BOO_HUD_WORKOUT_TOP(cpuTop);   // WORKOUT level, bird count, [-] [+]
+        float flockTop = BOO_HUD_FLOCK_TOP(workoutTop); // FLOCK formation (click cycles) and bird camera toggle
+        float physxTop = BOO_HUD_PHYSX_TOP(flockTop);   // PHYSX genre (click or Shift+P dials) and its timings
+        const float benchmarkTop = BOO_HUD_BENCHMARK_TOP(physxTop);
         float2 liveSize = float2(compactTable ? 220.0 : 306.0, benchmarkTop + 22.0) * uiScale;
         // Dashboard panel: 0 full table, 1 mini two-line strip, 2 hidden (a small HUD+ tab brings it back).
         // The backtick key cycles; main.cpp mirrors every button rectangle below.
@@ -3892,9 +3902,9 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
         // Top-Right Standalone Offscreen Benchmark Card (`B` sweep — explicitly labeled "BENCH [B]")
         if (benchActiveOrDone)
         {
-            bool stackCards = res.x < 426.0 * uiScale;
-            float2 cardMin = float2(max(0.0, res.x - 278.0 * uiScale),
-                                    stackCards ? liveTopY + liveSize.y + 6.0 * uiScale : 14.0 * uiScale);
+            bool stackCards = BOO_HUD_BENCH_STACK(res.x, uiScale);
+            float2 cardMin = float2(BOO_HUD_BENCH_X(res.x, uiScale),
+                                    BOO_HUD_BENCH_Y(stackCards, liveTopY, liveSize.y, uiScale));
             float2 cardSize = float2(264.0 * uiScale, 126.0 * uiScale);
             if (px.x >= cardMin.x && px.x <= cardMin.x + cardSize.x &&
                 px.y >= cardMin.y && px.y <= cardMin.y + cardSize.y)
@@ -3985,7 +3995,7 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
     }
 #ifndef BOO_PRESENT_CLEAN
     if (showOverlay && hudMode == 2u) {
-        const float uiScale = clamp(min(floor(res.y / 540.0), floor(lbSize.x / 480.0)), 1.0, 3.0);
+        const float uiScale = BOO_HUD_AB_SCALE(res.y, lbSize.x);
         const float splitRatio = clamp(gInteractiveState.x, 0.05, 0.95);
         float splitX = lbMin.x + lbSize.x * splitRatio;
         if (abs(px.x - splitX) < 1.35 && px.y >= lbMin.y && px.y < lbMin.y + lbSize.y)
@@ -4005,8 +4015,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
         }
 
         float4 pm = gLivePillarMetrics[min(abEngine, 3u)];
-        float2 bannerSz    = float2(min(262.0 * uiScale, (lbSize.x - 40.0 * uiScale) * 0.5), 28.0 * uiScale);
-        float2 leftBoxMin  = float2(lbMin.x + 14.0 * uiScale, lbMin.y + 14.0 * uiScale);
+        float2 bannerSz    = float2(BOO_HUD_AB_BANNER_WIDTH(lbSize.x, uiScale), 28.0 * uiScale);
+        float2 leftBoxMin  = float2(BOO_HUD_AB_LEFT_COORD(lbMin.x, uiScale), BOO_HUD_AB_LEFT_COORD(lbMin.y, uiScale));
         float  rightMaxX   = max(lbMin.x + 14.0 * uiScale, lbMin.x + lbSize.x - bannerSz.x - 14.0 * uiScale);
         float2 rightBoxMin = float2(clamp(max(splitX + 14.0 * uiScale, leftBoxMin.x + bannerSz.x + 12.0 * uiScale), lbMin.x + 14.0 * uiScale, rightMaxX), lbMin.y + 14.0 * uiScale);
 
@@ -4115,8 +4125,8 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
     {
         const float u = clamp(floor(res.y / 540.0), 1.0, 3.0);
         const float2 barSize = float2(536.0 * u, 54.0 * u);
-        const float barMinX  = 0.5 * (res.x - barSize.x);
-        const float barMinY  = (hudMode == 1u) ? (res.y - 60.0 * u) : (res.y - 104.0 * u);
+        const float barMinX  = BOO_HUD_STUDIO_X(res.x, u);
+        const float barMinY  = BOO_HUD_STUDIO_Y(res.y, hudMode, u);
         const float2 barMin  = float2(barMinX, barMinY);
         const uint   trkSlot = gInteractiveMeta.z & 0xFFu;
         const float  trkToastAlpha = saturate((float)((gInteractiveMeta.z >> 8u) & 0xFFu) / 255.0);
@@ -4701,6 +4711,54 @@ void presentHud(VSOut pin, inout float3 sdr, inout float uiAlpha)
         }
     }
 
+}
+
+// The cache stores premultiplied dashboard color and coverage. The film remains live.
+float4 PSHudCache(VSOut pin) : SV_Target
+{
+    const float2 px = pin.uv * max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
+    float3 sdr = 0.0.xxx;
+    float alpha = 0.0;
+    textBeginPixel();
+    textBeginPass();
+    presentHud(pin, sdr, alpha);
+    bool again = textResolvePending(px);
+    [loop] for (uint textPass = 1u; again && textPass < TXT_MAX_PASSES; ++textPass)
+    {
+        sdr = 0.0.xxx;
+        alpha = 0.0;
+        textBeginPass();
+        presentHud(pin, sdr, alpha);
+        again = textResolvePending(px);
+    }
+    return float4(sdr, alpha);
+}
+
+#ifdef BOO_FRAME_GENERATION_OUTPUTS
+struct CachedPresentOutputs { float4 color : SV_Target0; float4 scene : SV_Target1; float alpha : SV_Target2; };
+CachedPresentOutputs PSPresentCached(VSOut pin)
+#else
+float4 PSPresentCached(VSOut pin) : SV_Target
+#endif
+{
+    const float2 px = pin.uv * max(gSwapchainAndCanvas.xy, float2(1.0, 1.0));
+    float3 film, hudless;
+    float filmAlpha;
+    presentFilm(pin, film, filmAlpha, hudless);
+    float4 hud = gHudCacheTex.Load(int3(int2(px), 0));
+    float3 sdr = hud.rgb + film * (1.0f - hud.a);
+    float maxQuant = (gSwapchainBits >= 10u) ? 1023.0f : 255.0f;
+    float scDither = triangularDither(floor(px), 0x13572468u) / maxQuant;
+    sdr = saturate(sdr + scDither.xxx);
+#ifdef BOO_FRAME_GENERATION_OUTPUTS
+    CachedPresentOutputs result;
+    result.color = float4(sdr, 1.0f);
+    result.scene = float4(saturate(hudless + scDither.xxx), 1.0f);
+    result.alpha = filmAlpha + (1.0f - filmAlpha) * hud.a;
+    return result;
+#else
+    return float4(sdr, 1.0f);
+#endif
 }
 
 #ifdef BOO_FRAME_GENERATION_OUTPUTS

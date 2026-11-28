@@ -125,7 +125,8 @@ enum class QualityPresetId : uint8_t {
     Safe           = 0,
     Balanced       = 1,
     Showcase       = 2,
-    Experimental4K = 3
+    Experimental4K = 3,
+    Lite           = 4
 };
 
 enum class AbCompareEngine : uint8_t {
@@ -247,6 +248,7 @@ struct WorkoutFlock {
 struct FrameContext {
     InteractiveView interactive{};
     uint64_t presentationFrame = 0;
+    uint64_t hudInteractionSerial = 0; // Changes on viewer input to refresh cached controls immediately.
     int64_t samplePosition = 0;
     int32_t sampleRate = 48000;
     double filmTimeSeconds = 0.0;
@@ -286,7 +288,7 @@ struct FrameContext {
 };
 
 inline uint32_t effectiveEffectsDetail(const FrameContext& frame) noexcept {
-    return frame.qualityPreset == QualityPresetId::Safe ? 0u : frame.effectsDetail;
+    return (frame.qualityPreset == QualityPresetId::Safe || frame.qualityPreset == QualityPresetId::Lite) ? 0u : frame.effectsDetail;
 }
 
 struct IEffect {
@@ -319,6 +321,9 @@ const char* toString(HealthState state) noexcept;
 const char* toString(EngineKind kind) noexcept;
 const char* toString(PlaybackMode mode) noexcept;
 const char* toString(Edition edition) noexcept;
+// Exact Intel PCI IDs for Gen9/Gen9.5 integrated graphics.
+bool isIntelGen9Gpu(uint32_t vendorId, uint32_t deviceId) noexcept;
+QualityPresetId selectStartupPreset(QualityPresetId requested, bool explicitPreset, bool integrated, bool warp, uint32_t vendorId, uint32_t deviceId) noexcept;
 const char* toString(QualityPresetId preset) noexcept;
 const char* toString(AbCompareEngine engine) noexcept;
 const char* toString(ShowVisualMode mode) noexcept;

@@ -140,7 +140,7 @@ bool exportDiagnosticsJson(
     run["playback_mode"] = toString(summary.settings.playbackMode);
     run["final_quality_preset"] = toString(summary.finalQualityPreset);
     run["effects_detail_requested"] = static_cast<int64_t>(summary.settings.effectsDetail);
-    run["effects_detail_active"] = static_cast<int64_t>(summary.finalQualityPreset == QualityPresetId::Safe ? 0u : summary.settings.effectsDetail);
+    run["effects_detail_active"] = static_cast<int64_t>((summary.finalQualityPreset == QualityPresetId::Safe || summary.finalQualityPreset == QualityPresetId::Lite) ? 0u : summary.settings.effectsDetail);
     run["quality_downgrades"] = static_cast<int64_t>(summary.qualityDowngrades);
     run["rendered_frames"] = static_cast<int64_t>(summary.renderedFrames);
     run["present_stalls"] = static_cast<int64_t>(summary.presentStalls);

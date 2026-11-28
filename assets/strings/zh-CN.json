@@ -165,6 +165,7 @@
     "hud.live_camera": "摄像头已开启",
     "hud.ost.synth": "程序化 RTX 合成器",
     "hud.ost.custom": "自定义外部 MP3+",
+    "win.preset_lite": "Lite",
     "win.act": "幕",
     "win.explore": "探索",
     "win.wipe": "对比",
