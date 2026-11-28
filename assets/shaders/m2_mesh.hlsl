@@ -2829,9 +2829,12 @@ void PSDepthCutout(VOut i) {
 // The copied distance is linear camera-to-surface distance, like dist below.
 // Check all four texels used by the bilinear color lookup so foreground
 // silhouettes cannot bleed into an otherwise valid background sample.
-bool glassSceneSample(float2 uv, float glassDist, float bias, out float3 color) {
+bool glassSceneSample(float2 uv, float glassDist, float bias, float4 tileUv, out float3 color) {
     color = 0.0f.xxx;
     if (any(uv < 0.0f) || any(uv >= 1.0f)) return false;
+    // The tiled render test has current scene data only in its own 64px
+    // rectangle. Keep all four GatherRed taps and bilinear color taps there.
+    if ((interFlags & (1u << 22u)) != 0u) uv = clamp(uv, tileUv.xy, tileUv.zw);
     float4 depths = gSceneDepthCopy.GatherRed(linearClamp, uv);
     if (any(depths < glassDist - bias)) return false;
     color = gSceneColorCopy.SampleLevel(linearClamp, uv, 0.0f).rgb;
@@ -2846,9 +2849,14 @@ bool glassSceneRefraction(VOut i, float dist, float ndotv, uint matId,
                           out float3 dispersionRed, out float3 dispersionBlue) {
     int2 dims = int2(max(width, 1u), max(height, 1u));
     float2 baseUv = i.pos.xy / float2(dims);
+    float2 tileMin = floor(i.pos.xy / 64.0f) * 64.0f;
+    float2 tileMax = min(tileMin + 64.0f, float2(dims));
+    float2 innerMin = min(tileMin + 1.5f, (tileMin + tileMax) * 0.5f);
+    float2 innerMax = max(tileMax - 1.5f, innerMin);
+    float4 tileUv = float4(innerMin / float2(dims), innerMax / float2(dims));
     float bias = max(0.015f, dist * 0.0025f);
     float3 baseColor;
-    bool baseValid = glassSceneSample(baseUv, dist, bias, baseColor);
+    bool baseValid = glassSceneSample(baseUv, dist, bias, tileUv, baseColor);
     result = baseColor;
     dispersionRed = baseColor;
     dispersionBlue = baseColor;
@@ -2866,7 +2874,7 @@ bool glassSceneRefraction(VOut i, float dist, float ndotv, uint matId,
     if (deltaLength > 0.10f) delta *= 0.10f / deltaLength;
     float2 refrUv = baseUv + delta;
     float3 refrColor;
-    bool refrValid = glassSceneSample(refrUv, dist, bias, refrColor);
+    bool refrValid = glassSceneSample(refrUv, dist, bias, tileUv, refrColor);
     if (!refrValid) return baseValid;
     float2 edge = min(refrUv, 1.0f - refrUv);
     float fade = smoothstep(0.0f, 0.035f, min(edge.x, edge.y));
@@ -2875,9 +2883,9 @@ bool glassSceneRefraction(VOut i, float dist, float ndotv, uint matId,
     dispersionBlue = result;
     if (!liteMode() && effectsDetail() > 0u && !isCanopy && (matId == 3u || matId == 4u)) {
         float3 sampleColor;
-        if (glassSceneSample(baseUv + delta * 0.88f, dist, bias, sampleColor))
+        if (glassSceneSample(baseUv + delta * 0.88f, dist, bias, tileUv, sampleColor))
             dispersionRed = baseValid ? lerp(baseColor, sampleColor, fade) : sampleColor;
-        if (glassSceneSample(baseUv + delta * 1.14f, dist, bias, sampleColor))
+        if (glassSceneSample(baseUv + delta * 1.14f, dist, bias, tileUv, sampleColor))
             dispersionBlue = baseValid ? lerp(baseColor, sampleColor, fade) : sampleColor;
     }
     return true;
@@ -4251,7 +4259,7 @@ float2 PSSkyMotion(SkyOut i) : SV_Target0 {
 #endif
 Targets PSSky(SkyOut i) {
     float2 p = i.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    if ((interFlags & (1u << 17u)) != 0u) p -= jitterNdc;
+    if ((interFlags & ((1u << 17u) | (1u << 22u))) != 0u) p -= jitterNdc;
     float3 d = norm(forward + right * p.x * aspect * tan(fov * 0.5) + up * p.y * tan(fov * 0.5));
     uint curAov = aovMode();
     bool orbital = (showFlags & 128u) != 0u;

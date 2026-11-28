@@ -3,8 +3,8 @@
 namespace boo {
 // Native UI, preview and both exports share the same localized vocabulary.
 enum class ResultText {
-    Run,                 // Run benchmark
-    Select,              // Select a test
+    Run,                 // Run
+    Select,              // Choose a test
     Raster,              // Raster
     Path,                // Path tracing (High)
     Dlss,                // DLSS (Quality)
@@ -77,6 +77,12 @@ enum class ResultText {
     NoNpu, // No NPU detected
     Details, HideDetails, DlssNote, DlssRanGpu, DlssDidNotRunGpu,
     SameAsReference, Faster, Slower,
+    RenderTest, RenderRaster, RenderTime, RenderRate, Tiles, SamplesPerPixel, RenderMode,
+    RenderPathRan, RenderRasterRan, RenderResolutionFallback,
+    RasterDescription, PathDescription, DlssDescription, RenderDescription,
+    Elapsed, Measuring, Progress, WindowTitle,
+    FilmTour, FilmTourDescription, TourScene, TourScore, TourConditions,
+    TourDuskPool, TourSanctuary, TourVortex, TourShanghai, TourEarth, TourBathroom,
     Count
 };
 

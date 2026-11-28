@@ -3706,6 +3706,9 @@ void M1TaipeiSliceEffect::Impl::recordBloomAndCompositeToTarget(
         pc.isFirstDownsample = curAov | (ctx.qualityPreset == QualityPresetId::Lite ? 0x400u :
             (((trilogy && curAov == 0u && ctx.qualityPreset != QualityPresetId::Safe) ? 0x100u : 0u) |
              ((ctx.reducedFlash || curAov != 0u) ? 0u : 0x200u)));
+        // Cross-pixel optical effects would change completed tiles as adjacent
+        // tiles are rendered. Keep the pointwise film grade for this test.
+        if (ctx.interactive.renderTileEnabled) pc.isFirstDownsample = 0xC00u;
         pc.ditherSeed = static_cast<uint32_t>((sampleBucket ^ ctx.randomSeed) & 0xFFFFFFFFULL);
         pc.preExposure = 0.94f;
         pc.bloomIntensity = (curAov != 0u) ? 0.0f : (0.18f + 0.06f * cam.revealOpen01);
@@ -4132,7 +4135,7 @@ void M1TaipeiSliceEffect::Impl::recordScenePipelineToCanvas(
     // the non-canonical CUDA comparison pass (whose telemetry stays canonical).
     if (particleBufferIsSubstitute) sc.sceneFlags |= 1024u;
 
-    if (ctx.interactive.aovMode == 0u && !orbital && shanghaiRiverSample(visualMode, ctx) < 0) {
+    if (!ctx.interactive.renderTileEnabled && ctx.interactive.aovMode == 0u && !orbital && shanghaiRiverSample(visualMode, ctx) < 0) {
         transitionResource(cmd, sceneHdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHdr = rtvAt(0u);
         D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(canvasW), static_cast<float>(canvasH), 0.0f, 1.0f};
@@ -5121,7 +5124,10 @@ BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
     const FrameContext& frame, const ResultsSample& sample, BenchmarkSnapshot& snapshot, double& milliseconds) {
     if (!d3d_.benchmark() || !impl_ || !impl_->trilogyMesh || !hasAllAuthoredSceneAssets())
         return BenchmarkReason::WorkloadChanged;
-    const auto expected = resultsSampleAt(sample.tag);
+    const bool tour = d3d_.benchmark()->mode == BenchmarkMode::FilmTour;
+    const uint32_t tourIndex = sample.kind == ResultsSampleKind::Warmup ? sample.tag :
+        sample.tag - static_cast<uint32_t>(kResultsWarmupCount) + kFilmTourWarmupCount;
+    const auto expected = tour ? filmTourSampleAt(snapshot.tourScene, tourIndex) : resultsSampleAt(sample.tag);
     if (!expected || expected->sample48k != sample.sample48k || expected->kind != sample.kind ||
         frame.samplePosition != sample.sample48k ||
         impl_->canvasW != 1280 || impl_->canvasH != 720) return BenchmarkReason::WorkloadChanged;
@@ -5164,7 +5170,7 @@ BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
 
     scene.trilogyMesh->retire(kHeadlessSlot);
     const auto stats = scene.trilogyMesh->lastCityDrawStats();
-    if (!stats.rasterBatches || !stats.activeInstances || scene.orbitalViewActive)
+    if (!tour && (!stats.rasterBatches || !stats.activeInstances || scene.orbitalViewActive))
         return BenchmarkReason::WorkloadChanged;
     if (!measured) return BenchmarkReason::None;
 
@@ -5184,14 +5190,14 @@ BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
     const bool pathRan = scene.trilogyMesh->highPathExecuted() && scene.trilogyMesh->queriedRays() > 0 &&
                          pathTracingState() == RendererFeatureState::Active;
     evidence[static_cast<size_t>(BenchmarkFeature::Lighting)] = pathRan ? BenchmarkEvidence::PathTracingGpu :
-        (stats.rayInstances == 0 ? BenchmarkEvidence::RasterGpu : BenchmarkEvidence::Unknown);
+        ((scene.orbitalViewActive || stats.rayInstances == 0) ? BenchmarkEvidence::RasterGpu : BenchmarkEvidence::Unknown);
     const bool dlss = frame.dlssMode == DlssMode::Quality;
     const bool dlssRan = dlssState() == RendererFeatureState::Active && dlssInputWidth() && dlssInputHeight() &&
                          dlssInputWidth() < scene.canvasW && dlssInputHeight() < scene.canvasH;
     evidence[static_cast<size_t>(BenchmarkFeature::Upscaling)] = dlssRan ? BenchmarkEvidence::DlssGpu :
         (dlss ? BenchmarkEvidence::Failed : BenchmarkEvidence::Off);
     if (dlss && !dlssRan) return BenchmarkReason::DlssInitFailed;
-    if (trace != pathRan || (!trace && stats.rayInstances) || dlss != dlssRan ||
+    if (trace != pathRan || (!trace && !scene.orbitalViewActive && stats.rayInstances) || dlss != dlssRan ||
         rayReconstructionState() == RendererFeatureState::Active)
         return BenchmarkReason::WorkloadChanged;
     const uint32_t inputW = dlss ? dlssInputWidth() : scene.canvasW;
@@ -5216,6 +5222,58 @@ BenchmarkReason M1TaipeiSliceEffect::drawBenchmarkFrame(
     const D3D12_RANGE written{0, 0};
     scene.checkReadback->Unmap(0, &written);
     if (ticks[1] < ticks[0] || (ticks[0] == 0 && ticks[1] == 0)) return BenchmarkReason::TimingUnavailable;
+    milliseconds = static_cast<double>(ticks[1] - ticks[0]) * 1000.0 / static_cast<double>(scene.gpuTimestampFreq);
+    return BenchmarkReason::None;
+}
+
+BenchmarkReason M1TaipeiSliceEffect::drawRenderTestFrame(const FrameContext& frame, double& milliseconds) {
+    milliseconds = 0.0;
+    if (!d3d_.benchmark() || d3d_.benchmark()->mode != BenchmarkMode::RenderTest || !impl_ ||
+        !impl_->trilogyMesh || !hasAllAuthoredSceneAssets() || !frame.interactive.accumulate ||
+        !frame.interactive.renderTileEnabled || !frame.interactive.renderTileWidth ||
+        !frame.interactive.renderTileHeight || frame.interactive.renderTileX >= impl_->canvasW ||
+        frame.interactive.renderTileY >= impl_->canvasH ||
+        frame.interactive.renderTileWidth > impl_->canvasW - frame.interactive.renderTileX ||
+        frame.interactive.renderTileHeight > impl_->canvasH - frame.interactive.renderTileY)
+        return BenchmarkReason::WorkloadChanged;
+    auto& scene = *impl_;
+    if (!scene.checkTimestamps) {
+        auto* device = static_cast<ID3D12Device*>(d3d_.deviceRaw());
+        D3D12_QUERY_HEAP_DESC heap{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 2u, 0};
+        D3D12_HEAP_PROPERTIES properties{};
+        properties.Type = D3D12_HEAP_TYPE_READBACK;
+        const auto desc = makeBufferDesc(2u * sizeof(uint64_t));
+        if (!scene.gpuTimestampFreq || FAILED(device->CreateQueryHeap(&heap, IID_PPV_ARGS(&scene.checkTimestamps))) ||
+            FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&scene.checkReadback))))
+            return BenchmarkReason::TimingUnavailable;
+    }
+    const ActGrade frameGrade = evalFrameGrade(scene.visualMode, frame);
+    if (!d3d_.executeSingleCommandListAndWait([&](void* raw) {
+        auto* cmd = static_cast<ID3D12GraphicsCommandList*>(raw);
+        cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        scene.recordScenePipelineToCanvas(d3d_, cmd, frame, frameGrade,
+            frame.pathTracing != PathTracingLevel::Off, false, false, false, false,
+            scene.canvasClean.Get(), 5u, kHeadlessSlot, true, false, false);
+        cmd->EndQuery(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        cmd->ResolveQueryData(scene.checkTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+            scene.checkReadback.Get(), 0);
+    })) return d3d_.checkDeviceHealthy() ? BenchmarkReason::RendererFailed : BenchmarkReason::GraphicsReset;
+    scene.trilogyMesh->retire(kHeadlessSlot);
+    const auto stats = scene.trilogyMesh->lastCityDrawStats();
+    if (!stats.rasterBatches || !stats.activeInstances || scene.orbitalViewActive)
+        return BenchmarkReason::WorkloadChanged;
+    const bool trace = frame.pathTracing != PathTracingLevel::Off;
+    if (trace && pathTracingState() != RendererFeatureState::Active)
+        return BenchmarkReason::WorkloadChanged;
+    D3D12_RANGE read{0, 2u * sizeof(uint64_t)};
+    void* mapped = nullptr;
+    if (FAILED(scene.checkReadback->Map(0, &read, &mapped)) || !mapped) return BenchmarkReason::TimingUnavailable;
+    uint64_t ticks[2]{};
+    std::memcpy(ticks, mapped, sizeof(ticks));
+    const D3D12_RANGE written{0, 0};
+    scene.checkReadback->Unmap(0, &written);
+    if (ticks[1] < ticks[0] || (!ticks[0] && !ticks[1])) return BenchmarkReason::TimingUnavailable;
     milliseconds = static_cast<double>(ticks[1] - ticks[0]) * 1000.0 / static_cast<double>(scene.gpuTimestampFreq);
     return BenchmarkReason::None;
 }

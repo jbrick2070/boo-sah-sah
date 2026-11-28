@@ -18,6 +18,7 @@ public:
     void cancel();
     ResultsWorkerState poll();
     BenchmarkSnapshot snapshot() const;
+    std::shared_ptr<const RenderTestImage> image() const;
 private:
     struct Shared;
     std::shared_ptr<Shared> shared_;

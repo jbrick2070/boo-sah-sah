@@ -15,7 +15,7 @@ BOO SAH SAH is an interactive six-minute film rendered on the viewer's PC. No ac
 
 1. Press F to explore: W A S D fly, Q/E down/up, right-drag to look, Y drops marbles. F returns.
 2. Press Ctrl+B (or Run benchmark in Hardware Orchestra), choose Raster and run. The film pauses for a fixed shot; read the GPU frame times; Save picture and text writes to a folder you choose; Back to film resumes. The report form opens only after you confirm.
-3. Path tracing and DLSS Quality are separate tests; unavailable choices say why.
+3. Path tracing, DLSS Quality, Render test (one frame rendered tile by tile, about 25 s) and Film tour (six scenes, about 30 s) are separate tests; unavailable choices say why.
 4. Outside Explore, in Safe or higher (in Lite press Q once): Shift+Up / Down add or remove bird flocks; Shift+F changes formation.
 5. Space pauses; Left / Right seek; N / P change acts; Z music; Tab panels; F11 full screen.
 

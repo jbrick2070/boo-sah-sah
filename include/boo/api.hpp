@@ -200,6 +200,14 @@ struct InteractiveView {
     bool lampsOff = false;               // Switch off practical lamps (sconce / mirror halo / RTXDI emitters)
     bool accumulate = false;             // Progressive temporal accumulation + sub-pixel jitter
     uint32_t accumFrame = 0;             // 0 = reset history this frame
+    // Benchmark-only half-open output-pixel rectangle. Each tile starts at
+    // accumFrame 0; renderTileReset clears the image once, at the first tile.
+    bool renderTileEnabled = false;
+    bool renderTileReset = false;
+    uint32_t renderTileX = 0;
+    uint32_t renderTileY = 0;
+    uint32_t renderTileWidth = 0;
+    uint32_t renderTileHeight = 0;
     float abSplitRatio = 0.5f;           // [0.05..0.95] draggable RTX ON / OFF A/B split curtain
     bool soloWipeActive = false;         // Renderer-owned automatic solo presentation
     uint32_t activePreset = 0;           // 0 = free-fly, 1..6 = hero macro bookmark

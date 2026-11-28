@@ -8,12 +8,56 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace boo {
+
+struct RenderTile {
+    uint32_t x, y, width, height;
+};
+
+// Sort by distance from the centre, with row/column as deterministic tie-breakers.
+// Edge tiles are clipped so the returned rectangles partition the entire image.
+inline std::vector<RenderTile> renderTileOrder(uint32_t width, uint32_t height, uint32_t tileSize) {
+    std::vector<RenderTile> tiles;
+    if (!width || !height || !tileSize) return tiles;
+    for (uint64_t y = 0; y < height; y += tileSize) {
+        for (uint64_t x = 0; x < width; x += tileSize) {
+            tiles.push_back({static_cast<uint32_t>(x), static_cast<uint32_t>(y),
+                static_cast<uint32_t>((std::min)(uint64_t(tileSize), uint64_t(width) - x)),
+                static_cast<uint32_t>((std::min)(uint64_t(tileSize), uint64_t(height) - y))});
+        }
+    }
+    const auto distance = [=](const RenderTile& t) {
+        const double dx = 2.0 * t.x + t.width - width;
+        const double dy = 2.0 * t.y + t.height - height;
+        return dx * dx + dy * dy;
+    };
+    std::sort(tiles.begin(), tiles.end(), [&](const RenderTile& a, const RenderTile& b) {
+        const auto da = distance(a), db = distance(b);
+        if (da != db) return da < db;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+    return tiles;
+}
+
+inline std::optional<double> renderMegaSamplesPerSecond(
+    uint32_t width, uint32_t height, uint32_t samplesPerPixel, double seconds) noexcept {
+    if (!width || !height || !samplesPerPixel || !std::isfinite(seconds) || seconds <= 0.0)
+        return std::nullopt;
+    const double result = static_cast<double>(width) * height * samplesPerPixel / seconds / 1000000.0;
+    return std::isfinite(result) ? std::optional<double>{result} : std::nullopt;
+}
 
 inline constexpr std::size_t kResultsWarmupCount = 30;
 inline constexpr std::size_t kResultsMeasuredCount = 180;
 inline constexpr std::size_t kResultsSampleCount = kResultsWarmupCount + kResultsMeasuredCount;
+inline constexpr std::size_t kFilmTourSceneCount = 6;
+inline constexpr uint32_t kFilmTourWarmupCount = 15;
+inline constexpr uint32_t kFilmTourMeasuredCount = 90;
+inline constexpr uint32_t kFilmTourFramesPerScene = kFilmTourWarmupCount + kFilmTourMeasuredCount;
+inline constexpr std::array<double, kFilmTourSceneCount> kFilmTourTimesSeconds{3.5, 47.0, 225.0, 86.0, 298.0, 343.5};
 
 enum class ResultsSampleKind : uint8_t { Warmup, Measured };
 struct ResultsSample {
@@ -21,6 +65,25 @@ struct ResultsSample {
     int64_t sample48k;     // Film sample position, not a wall-clock timestamp.
     ResultsSampleKind kind;
 };
+
+// Reuse the fixed-shot timestamp slots; film time stays fixed for the entire scene.
+constexpr std::optional<ResultsSample> filmTourSampleAt(std::size_t scene, uint32_t index) noexcept {
+    if (scene >= kFilmTourSceneCount || index >= kFilmTourFramesPerScene) return std::nullopt;
+    const bool warm = index < kFilmTourWarmupCount;
+    return ResultsSample{warm ? index : static_cast<uint32_t>(kResultsWarmupCount) + index - kFilmTourWarmupCount,
+        static_cast<int64_t>(kFilmTourTimesSeconds[scene] * 48000.0),
+        warm ? ResultsSampleKind::Warmup : ResultsSampleKind::Measured};
+}
+
+inline std::optional<double> filmTourGeometricMean(const std::array<double, kFilmTourSceneCount>& medians) noexcept {
+    double sum = 0;
+    for (const double value : medians) {
+        if (!std::isfinite(value) || value <= 0) return std::nullopt;
+        sum += std::log(value) / static_cast<double>(kFilmTourSceneCount);
+    }
+    const double score = std::exp(sum);
+    return std::isfinite(score) && score > 0 ? std::optional<double>{score} : std::nullopt;
+}
 
 constexpr std::optional<ResultsSample> resultsSampleAt(std::size_t index) noexcept {
     if (index >= kResultsSampleCount) return std::nullopt;

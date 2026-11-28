@@ -2916,7 +2916,16 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         s.dlssDepthReadable=false;
     }
     cmd->ClearDepthStencilView(depthHandle,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
-    D3D12_VIEWPORT vp{0,0,float(width),float(height),0,1};D3D12_RECT sc{0,0,LONG(width),LONG(height)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
+    D3D12_VIEWPORT vp{0,0,float(width),float(height),0,1};D3D12_RECT sc{0,0,LONG(width),LONG(height)};
+    // Scissoring the scene draw bounds all raster and inline DXR pixel work to
+    // the tile. The history resolve below deliberately restores full bounds.
+    if (iv.renderTileEnabled) {
+        const uint32_t x = std::min(iv.renderTileX, width);
+        const uint32_t y = std::min(iv.renderTileY, height);
+        sc = {LONG(x), LONG(y), LONG(x + std::min(iv.renderTileWidth, width - x)),
+              LONG(y + std::min(iv.renderTileHeight, height - y))};
+    }
+    cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
 
     SceneConstants c{};std::copy_n(camera.eye,3,c.eye);c.fov=camera.fovYRadians;c.aspect=float(width)/float(height);for(int i=0;i<3;++i)c.forward[i]=camera.target[i]-camera.eye[i];normalize(c.forward);cross(camera.up,c.forward,c.right);normalize(c.right);cross(c.forward,c.right,c.up);c.time=filmTime;c.reveal=camera.revealOpen01;c.width=width;c.height=height;c.act=act;c.canonical=canonical?1u:0u;
     if(isM2 || riverSample>=0) {
@@ -2948,6 +2957,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     c.interFlags |= effectiveEffectsDetail(f) << 12u;
     if (f.qualityPreset == QualityPresetId::Lite) c.interFlags |= 1u << 20u;
     if (integratedTensorSubstitute) c.interFlags |= 1u << 21u;
+    if (iv.renderTileEnabled) c.interFlags |= 1u << 22u;
     if (canonical && s.context.benchmark()) c.interFlags |= 1u << 19u;
     if (traceIndirect) c.interFlags |= static_cast<uint32_t>(f.pathTracing) << 15u;
     if (f.reducedFlash || f.motionScale < 0.99f) c.interFlags |= 1u << 14u;
@@ -2973,7 +2983,7 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
     const bool interactiveMotion = temporalAllowed && useRt && (curAov == 0u) && !accumulate &&
                                    (iv.exploreActive || iv.sunOverride || iv.lampsOff || dynMarbles > 0u) &&
                                    s.nrd.isAvailable();
-    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u) && !rr;
+    const bool splitDenoise = (canonical || compareDirectorLighting) && useRt && (curAov == 0u) && !rr && !iv.renderTileEnabled;
     if (rr) {
         c.interFlags |= 1u << 18u;
         buildColumnMajorCameraMatrices(c.eye,c.right,c.up,c.forward,c.fov,c.aspect,s.rrWorldToView,s.rrViewToClip);
@@ -3279,14 +3289,14 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
         // Prefer NVIDIA NRD.dll dynamic DXIL compute sidecar; fall back cleanly to built-in HLSL accumulator
         const uint32_t kJ=(iv.accumFrame%64u)+1u;
         const float jitterPx[2]={halton(kJ,2)-0.5f,halton(kJ,3)-0.5f};
-        const bool reset=(iv.accumFrame==0u)||!s.accumValid;
-        const bool nrdRan=s.nrd.isAvailable()&&s.nrd.recordAccumulation(cmd,hdr,width,height,slot,reset?0u:iv.accumFrame,jitterPx);
+        const bool reset=iv.renderTileEnabled ? (iv.renderTileReset || !s.accumValid) : ((iv.accumFrame==0u)||!s.accumValid);
+        const bool nrdRan=!iv.renderTileEnabled&&s.nrd.isAvailable()&&s.nrd.recordAccumulation(cmd,hdr,width,height,slot,reset?0u:iv.accumFrame,jitterPx);
         cmd->SetDescriptorHeaps(1, m2Heaps);
         if(nrdRan) {
             s.accumValid=true;
             s.denoiseMode=2u;
         } else {
-            const float wgt=reset?1.0f:1.0f/float(std::min<uint32_t>(iv.accumFrame,4095u)+1u);
+            const float wgt=(reset || (iv.renderTileEnabled && iv.accumFrame == 0u))?1.0f:1.0f/float(std::min<uint32_t>(iv.accumFrame,4095u)+1u);
             const UINT base=slotBase;
             D3D12_SHADER_RESOURCE_VIEW_DESC sv{};sv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;sv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
             sv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d->CreateShaderResourceView(hdr,&sv,cpuAt(base));
@@ -3294,12 +3304,18 @@ bool TrilogyMeshRenderer::record(void* raw,const FrameContext& f,const M1CameraS
             auto accRtv=s.rtv->GetCPUDescriptorHandleForHeapStart();accRtv.ptr+=SIZE_T(7)*rtvInc;d->CreateRenderTargetView(s.accum.Get(),nullptr,accRtv);
             transition(cmd,hdr,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (iv.renderTileEnabled && reset) {
+                const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                cmd->ClearRenderTargetView(accRtv, clear, 0, nullptr);
+            }
             cmd->SetGraphicsRootSignature(s.accumRoot.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cmd->OMSetRenderTargets(1,&accRtv,FALSE,nullptr);const float bf[4]={wgt,wgt,wgt,wgt};cmd->OMSetBlendFactor(bf);
             cmd->SetPipelineState(s.accumBlend.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base));cmd->DrawInstanced(3,1,0,0);
             transition(cmd,s.accum.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transition(cmd,hdr,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
             cmd->OMSetRenderTargets(1,&handle,FALSE,nullptr);
+            const D3D12_RECT fullScissor{0,0,LONG(width),LONG(height)};
+            if (iv.renderTileEnabled) cmd->RSSetScissorRects(1,&fullScissor);
             cmd->SetPipelineState(s.accumResolve.Get());cmd->SetGraphicsRootDescriptorTable(0,gpuAt(base+1u));cmd->DrawInstanced(3,1,0,0);
             s.accumValid=true;
             s.denoiseMode=2u;

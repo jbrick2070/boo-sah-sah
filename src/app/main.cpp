@@ -3034,6 +3034,8 @@ int main(int argc, char** argv) {
                             }
                             if (adapter.shaderModel == "Unknown") break;
                             context.availability[0] = BenchmarkReason::None;
+                            context.availability[3] = BenchmarkReason::None;
+                            context.availability[4] = BenchmarkReason::None;
                             const bool dxr = adapter.dxrTier == "Tier_1_1" || adapter.dxrTier == "Tier_1_2";
                             context.availability[1] = adapter.dxrTier == "Unknown" ? BenchmarkReason::AdapterMismatch :
                                 dxr ? BenchmarkReason::None : BenchmarkReason::RequiresDxr;

@@ -1744,6 +1744,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
     uint aovMode = gIsFirstDownsample & 0xFFu;
     uint lensFlags = (gIsFirstDownsample >> 8u) & 3u;
     bool lite = (gIsFirstDownsample & 0x400u) != 0u;
+    bool tiledRender = (gIsFirstDownsample & 0x800u) != 0u;
     float2 pxPos = floor(pin.position.xy);
     float3 hdrCenter = gSceneHdrTex.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
     float3 sdr;
@@ -1795,7 +1796,7 @@ float4 PSCompositeCanvas(VSOut pin) : SV_Target
         }
 
         float vignette = saturate(1.14 - gVignetteStrength * r2);
-        float3 bloom = gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0).rgb;
+        float3 bloom = tiledRender ? 0.0f.xxx : gBloomMip0.SampleLevel(gLinearClamp, pin.uv, 0.0f).rgb;
 
         // Wide anamorphic streak: four symmetric horizontal tap pairs with falling weights and a cool cast.
         float3 streak = 0.0.xxx;

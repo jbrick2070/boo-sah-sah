@@ -1,5 +1,6 @@
 #include "boo/results_export.hpp"
 #include "boo/results_card.hpp"
+#include "boo/render_test_image.hpp"
 #include "results_export_transaction.hpp"
 
 #include <windows.h>
@@ -159,6 +160,33 @@ bool encodeCard(const ResultCard& card, std::wstring_view language, bool rtl, st
     return header && data && end;
 }
 
+bool encodeRenderImage(const RenderTestImage& image, std::vector<BYTE>& png) {
+    if (!image.valid()) return false;
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    // The native PNG encoder accepts BGRA, while the renderer returns RGBA.
+    std::vector<BYTE> bgra = image.rgba;
+    for (size_t i = 0; i < bgra.size(); i += 4) std::swap(bgra[i], bgra[i+2]);
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
+        FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) ||
+        FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) ||
+        FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr)) ||
+        FAILED(frame->SetSize(image.width, image.height)) || FAILED(frame->SetPixelFormat(&format)) ||
+        !IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA) ||
+        FAILED(frame->WritePixels(image.height, image.width * 4, static_cast<UINT>(bgra.size()), bgra.data())) ||
+        FAILED(frame->Commit()) || FAILED(encoder->Commit())) return false;
+    STATSTG stat{};
+    if (FAILED(stream->Stat(&stat, STATFLAG_NONAME)) || stat.cbSize.QuadPart < 33 ||
+        stat.cbSize.QuadPart > 32ULL * 1024 * 1024 || FAILED(stream->Seek({}, STREAM_SEEK_SET, nullptr))) return false;
+    png.resize(stat.cbSize.LowPart);
+    ULONG read{};
+    return SUCCEEDED(stream->Read(png.data(), static_cast<ULONG>(png.size()), &read)) && read == png.size();
+}
+
 bool writeAndVerify(const Path& file, const void* data, DWORD size) {
     Handle handle{CreateFileW(file.c_str(), GENERIC_READ|GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (handle.value == INVALID_HANDLE_VALUE) return false;
@@ -195,7 +223,7 @@ bool detail::publishResultsFile(const Path& destination, const std::function<boo
 }
 
 bool writeResultsFile(const Path& file, const ResultCard& card, std::wstring_view language, bool rtl,
-                      ResultsSaveKind kind) {
+                      ResultsSaveKind kind, const RenderTestImage* image) {
     if (card.rows.empty()) return false;
     if (kind == ResultsSaveKind::Text) {
         const std::wstring content = resultsCardText(card);
@@ -211,14 +239,14 @@ bool writeResultsFile(const Path& file, const ResultCard& card, std::wstring_vie
     }
     std::vector<BYTE> png;
     UINT height{};
-    if (!encodeCard(card, language, rtl, png, height)) return false;
+    if (image ? !encodeRenderImage(*image, png) : !encodeCard(card, language, rtl, png, height)) return false;
     return detail::publishResultsFile(file, [&](const Path& stage) {
         return writeAndVerify(stage, png.data(), static_cast<DWORD>(png.size()));
     });
 }
 
 ResultsSaveStatus pickAndSaveResults(HWND owner, const ResultCard& card, const std::wstring& language,
-                                    bool rtl, const std::wstring& title, ResultsSaveKind kind, BenchmarkMode mode) {
+                                    bool rtl, const std::wstring& title, ResultsSaveKind kind, BenchmarkMode mode, const RenderTestImage* image) {
     ComPtr<IFileSaveDialog> picker;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&picker))))
         return ResultsSaveStatus::Failed;
@@ -232,7 +260,9 @@ ResultsSaveStatus pickAndSaveResults(HWND owner, const ResultCard& card, const s
     wchar_t date[16]{};
     swprintf_s(date, L"%04u-%02u-%02u", today.wYear, today.wMonth, today.wDay);
     const wchar_t* modeName = mode == BenchmarkMode::PathTracing ? L"Path tracing" :
-                              mode == BenchmarkMode::DlssQuality ? L"DLSS Quality" : L"Raster";
+                              mode == BenchmarkMode::DlssQuality ? L"DLSS Quality" :
+                              mode == BenchmarkMode::RenderTest ? L"Render test" :
+                              mode == BenchmarkMode::FilmTour ? L"Film tour" : L"Raster";
     const std::wstring suggested = std::wstring(L"BOO SAH SAH benchmark ") + date + L" " + modeName +
                                    (picture ? L".png" : L".txt");
     if (FAILED(picker->SetTitle(title.c_str())) || FAILED(picker->SetFileTypes(1, filter)) ||
@@ -248,6 +278,6 @@ ResultsSaveStatus pickAndSaveResults(HWND owner, const ResultCard& card, const s
     if (FAILED(shown) || FAILED(picker->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
         return ResultsSaveStatus::Failed;
     struct FreePath { PWSTR path; ~FreePath() { CoTaskMemFree(path); } } freePath{path};
-    return writeResultsFile(path, card, language, rtl, kind) ? ResultsSaveStatus::Saved : ResultsSaveStatus::Failed;
+    return writeResultsFile(path, card, language, rtl, kind, image) ? ResultsSaveStatus::Saved : ResultsSaveStatus::Failed;
 }
 } // namespace boo

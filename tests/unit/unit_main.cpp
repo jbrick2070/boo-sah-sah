@@ -2369,9 +2369,9 @@ bool testUiStringCatalogs() {
         BOO_CHECK(source.ok);
         for (const auto& [key, entry] : source.value.find("strings")->asObject()) keys.push_back(key);
     }
-    // 105 interface strings plus 85 results strings.
-    static_assert(static_cast<size_t>(ResultText::Count) == 85);
-    BOO_CHECK(keys.size() == 190);
+    // 105 interface strings plus 114 results strings.
+    static_assert(static_cast<size_t>(ResultText::Count) == 114);
+    BOO_CHECK(keys.size() == 219);
     BOO_CHECK(std::find(keys.begin(), keys.end(), "win.preset_lite") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.wipe_dxr_on") != keys.end());
     BOO_CHECK(std::find(keys.begin(), keys.end(), "hud.state_idle") != keys.end());

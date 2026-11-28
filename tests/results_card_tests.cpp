@@ -1,5 +1,7 @@
 #include "boo/results_card.hpp"
+#include "boo/render_test_image.hpp"
 #include "boo/results_export.hpp"
+#include "boo/results_reference.hpp"
 #include "boo/ui_text.hpp"
 #include "../src/app/results_export_transaction.hpp"
 #include <windows.h>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -144,6 +147,124 @@ int main() {
     s.evidence[static_cast<size_t>(BenchmarkFeature::Director)] = BenchmarkEvidence::ScriptedCpu;
     s.power = BenchmarkPower::Mains;
     s.evidence[static_cast<size_t>(BenchmarkFeature::Upscaling)] = BenchmarkEvidence::Off;
+    // The legacy IDs and reference data are a compatibility contract for
+    // earlier benchmark results, independent of the new render test.
+    static_assert(static_cast<uint32_t>(BenchmarkMode::Raster) == 0);
+    static_assert(static_cast<uint32_t>(BenchmarkMode::PathTracing) == 1);
+    static_assert(static_cast<uint32_t>(BenchmarkMode::DlssQuality) == 2);
+    for (const auto& expected : {std::tuple{BenchmarkMode::Raster, 1280u, 720u, 0.5819, 0.6006},
+                                 std::tuple{BenchmarkMode::PathTracing, 1280u, 720u, 4.0999, 5.0287},
+                                 std::tuple{BenchmarkMode::DlssQuality, 853u, 480u, 0.9440, 1.3090}}) {
+        const auto [mode, inputWidth, inputHeight, median, worst] = expected;
+        auto legacy = s;
+        legacy.mode = mode;
+        legacy.inputWidth = inputWidth;
+        legacy.inputHeight = inputHeight;
+        legacy.evidence[static_cast<size_t>(BenchmarkFeature::Lighting)] =
+            mode == BenchmarkMode::PathTracing ? BenchmarkEvidence::PathTracingGpu : BenchmarkEvidence::RasterGpu;
+        legacy.evidence[static_cast<size_t>(BenchmarkFeature::Upscaling)] =
+            mode == BenchmarkMode::DlssQuality ? BenchmarkEvidence::DlssGpu : BenchmarkEvidence::Off;
+        const auto* reference = resultsReferenceFor(legacy);
+        CHECK(reference != nullptr);
+        if (reference) {
+            CHECK(reference->snapshot.mode == mode);
+            CHECK(reference->snapshot.width == 1280 && reference->snapshot.height == 720);
+            CHECK(reference->snapshot.inputWidth == inputWidth && reference->snapshot.inputHeight == inputHeight);
+            CHECK(reference->snapshot.warmupCount == 30 && reference->snapshot.measuredCount == 180);
+            CHECK(reference->snapshot.medianMs == median && reference->snapshot.worstMs == worst);
+        }
+    }
+    {
+        auto tour = s;
+        tour.mode = BenchmarkMode::FilmTour;
+        tour.tourFramesDone = kFilmTourSceneCount * (kFilmTourWarmupCount + kFilmTourMeasuredCount);
+        tour.medianMs = 2.0;
+        for (size_t i = 0; i < kFilmTourSceneCount; ++i) {
+            tour.tourMediansMs[i] = double(i + 1);
+            tour.tourWorstMs[i] = double(i + 2);
+        }
+        const auto card = makeResultsCard(viewer, tour);
+        CHECK(card.headings[2] == resultText(T::Reference));
+        CHECK(field(card, T::TourScore) == L"2.0");
+        CHECK(field(card, T::TourScore, 1) == L"0.5");
+        CHECK(resultsComparisonForRun(tour) == resultsComparisonLine(2.0, 0.5461));
+        for (const auto power : {BenchmarkPower::Battery, BenchmarkPower::Unknown, BenchmarkPower::Changed}) {
+            tour.power = power;
+            CHECK(resultsReferenceFor(tour) != nullptr);
+            CHECK(!resultsComparisonForRun(tour).empty());
+        }
+        tour.power = BenchmarkPower::Mains;
+        constexpr std::array<T, kFilmTourSceneCount> scenes{T::TourDuskPool, T::TourSanctuary, T::TourVortex,
+            T::TourShanghai, T::TourEarth, T::TourBathroom};
+        const auto saved = resultsCardText(card);
+        for (size_t i = 0; i < scenes.size(); ++i) {
+            const auto label = std::wstring(resultText(scenes[i]));
+            const auto& median = card.rows[1 + i * 2];
+            const auto& worst = card.rows[2 + i * 2];
+            CHECK(median.label == label + L" · " + resultText(T::Typical));
+            CHECK(worst.label == label + L" · " + resultText(T::Worst));
+            CHECK(median.values[0].text == std::to_wstring(i + 1) + L".0");
+            CHECK(worst.values[0].text == std::to_wstring(i + 2) + L".0");
+            // Both logical rows and the scene name appear in the exported text.
+            CHECK(saved.find(label) != std::wstring::npos);
+        }
+        tour.tourMediansMs[0] = std::numeric_limits<double>::quiet_NaN();
+        CHECK(resultsReferenceFor(tour) == nullptr);
+        tour.outcome = ResultsOutcome::Cancelled;
+        CHECK(field(makeResultsCard(viewer, tour), T::TourScore) == resultText(T::Unavailable));
+    }
+    {
+        auto shot = s;
+        shot.mode = BenchmarkMode::RenderTest;
+        shot.stage = BenchmarkStage::Finished;
+        shot.outcome = ResultsOutcome::Completed;
+        shot.reason = BenchmarkReason::None;
+        shot.width = shot.inputWidth = 1920;
+        shot.height = shot.inputHeight = 1080;
+        shot.tilesTotal = shot.tilesDone = 510;
+        shot.samplesPerPixel = 24;
+        shot.renderSeconds = 19.0;
+        shot.megaSamplesPerSecond = 6.63552;
+        shot.renderPathTraced = true;
+        auto card = makeResultsCard(viewer, shot);
+        CHECK(field(card, T::RenderTime) == L"19.0");
+        CHECK(field(card, T::RenderRate) == L"6.6");
+        CHECK(field(card, T::Tiles) == L"510 / 510");
+        CHECK(field(card, T::SamplesPerPixel) == L"24");
+        CHECK(field(card, T::RenderMode) == resultText(T::RenderPathRan));
+        CHECK(field(card, T::RenderTime, 1) == L"23.3");
+        CHECK(field(card, T::RenderRate, 1) == L"2.1");
+        bool renderHardware = false;
+        for (const auto& row : card.rows) if (row.label == L"GPU")
+            renderHardware = row.values[1].text == L"NVIDIA GeForce RTX 5080 Laptop GPU";
+        CHECK(renderHardware);
+        CHECK(resultsComparisonForRun(shot) == resultsComparisonLine(19.0, 23.3));
+        CHECK(resultsComparisonForRun(shot) == L"23% faster than the RTX 5080 reference");
+        // The comparison must use wall time, not the rate or frame-time fields.
+        shot.renderSeconds = 46.6;
+        shot.megaSamplesPerSecond = 100.0;
+        shot.medianMs = 0.1;
+        CHECK(resultsComparisonForRun(shot) == L"50% slower than the RTX 5080 reference");
+        const auto* reference = resultsReferenceFor(shot);
+        CHECK(reference && reference->snapshot.vendorId == 0x10de && reference->snapshot.deviceId == 0x2c59);
+        CHECK(reference && reference->hardware.cpu == ResultsCpuModel::IntelCoreUltra9_275HX);
+        shot.renderPathTraced = false;
+        card = makeResultsCard(viewer, shot);
+        CHECK(field(card, T::RenderMode) == resultText(T::RenderRasterRan));
+        CHECK(field(card, T::RenderTime, 1) == L"\u2014");
+        CHECK(resultsComparisonForRun(shot).empty());
+        shot.renderPathTraced = true;
+        shot.samplesPerPixel = 23;
+        CHECK(resultsReferenceFor(shot) == nullptr);
+        shot.samplesPerPixel = 24;
+        shot.renderSeconds = std::numeric_limits<double>::quiet_NaN();
+        CHECK(resultsReferenceFor(shot) == nullptr);
+        shot.renderSeconds = 46.6;
+        --shot.tilesDone;
+        card = makeResultsCard(viewer, shot);
+        CHECK(field(card, T::RenderTime) == resultText(T::Unavailable));
+        CHECK(field(card, T::RenderRate) == resultText(T::Unavailable));
+    }
     const auto matchingSnapshot = s;
     const auto render = [&] { return makeResultsCard(viewer, s); };
     const auto raster = render();
@@ -279,6 +400,38 @@ int main() {
         }
         strings.clear();
         singleSaveTests(viewer, matchingSnapshot);
+        RenderTestImage image;
+        image.width = 1280; image.height = 720;
+        image.rgba.resize(size_t(image.width) * image.height * 4, 255);
+        CHECK(image.valid());
+        image.rgba[0] = 0x12; image.rgba[1] = 0x34; image.rgba[2] = 0x56;
+        image.rgba.pop_back();
+        CHECK(!image.valid());
+        image.rgba.push_back(255);
+        CHECK(!validRenderTestImageSize(1281, 720, image.rgba.size()));
+        CHECK(!validRenderTestImageSize(1920, 1080, image.rgba.size()));
+        const auto picture = fs::temp_directory_path() / L"boo-render-image-test.png";
+        const auto card = makeResultsCard(viewer, matchingSnapshot);
+        CHECK(writeResultsFile(picture, card, L"en-US", false, ResultsSaveKind::Picture, &image));
+        Microsoft::WRL::ComPtr<IWICImagingFactory> wic;
+        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+        CHECK(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))));
+        if (wic) CHECK(SUCCEEDED(wic->CreateDecoderFromFilename(picture.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)));
+        if (decoder) CHECK(SUCCEEDED(decoder->GetFrame(0, &frame)));
+        UINT w{}, h{};
+        CHECK(frame && SUCCEEDED(frame->GetSize(&w, &h)) && w == image.width && h == image.height);
+        Microsoft::WRL::ComPtr<IWICFormatConverter> converted;
+        if (wic) CHECK(SUCCEEDED(wic->CreateFormatConverter(&converted)));
+        if (converted && frame) CHECK(SUCCEEDED(converted->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+            WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)));
+        BYTE firstPixel[4]{}; WICRect pixel{0, 0, 1, 1};
+        CHECK(converted && SUCCEEDED(converted->CopyPixels(&pixel, 4, 4, firstPixel)) &&
+              firstPixel[0] == 0x12 && firstPixel[1] == 0x34 && firstPixel[2] == 0x56 && firstPixel[3] == 255);
+        image.rgba.pop_back();
+        CHECK(!writeResultsFile(picture, card, L"en-US", false, ResultsSaveKind::Picture, &image));
+        converted.Reset(); frame.Reset(); decoder.Reset(); wic.Reset();
+        fs::remove(picture);
         CoUninitialize();
     } else CHECK(false);
     return failures ? 1 : 0;

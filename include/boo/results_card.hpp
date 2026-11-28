@@ -11,6 +11,8 @@ ResultText resultsReasonText(BenchmarkReason reason);
 ResultText resultsModeText(BenchmarkMode mode);
 // Compares throughput derived from positive frame times; empty for invalid scores.
 std::wstring resultsComparisonLine(double runMs, double referenceMs);
+// Selects the matching reference and the appropriate time for the run's mode.
+std::wstring resultsComparisonForRun(const BenchmarkSnapshot& run);
 
 struct ResultCardCell {
     std::wstring text;

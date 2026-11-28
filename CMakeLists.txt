@@ -616,6 +616,8 @@ endif()
 target_link_libraries(boo_core PUBLIC
     bcrypt
     comctl32
+    dwmapi
+    uxtheme
     d3d12
     dxgi
     dxguid
@@ -697,7 +699,7 @@ if(BOO_BUILD_TESTS)
     enable_testing()
     target_sources(boo_sah_sah PRIVATE tests/verify_film_benchmark.cpp)
     target_compile_definitions(boo_sah_sah PRIVATE BOO_VERIFY_FILM_BENCHMARK=1)
-    add_executable(boo_results_card_test tests/results_card_tests.cpp)
+    add_executable(boo_results_card_test tests/results_card_tests.cpp tests/results_theme_tests.cpp)
     target_link_libraries(boo_results_card_test PRIVATE boo_core)
     boo_apply_compiler_flags(boo_results_card_test)
     add_test(NAME BooResultsCard COMMAND boo_results_card_test)

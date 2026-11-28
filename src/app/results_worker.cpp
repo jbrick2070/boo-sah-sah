@@ -4,6 +4,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <iterator>
 #include <mutex>
@@ -47,6 +48,8 @@ struct Channel {
     DWORD version;
     volatile LONG permit;
     BenchmarkRequest request;
+    uint32_t imageWidth, imageHeight, imageBytes;
+    unsigned char image[1920u * 1080u * 4u];
 };
 
 enum class MessageType : DWORD { ready, progress };
@@ -154,6 +157,14 @@ struct Reporter final : BenchmarkReporter {
     bool publish(const BenchmarkSnapshot& snapshot) override {
         return !cancelled() && send(pipe, {MessageType::progress, snapshot});
     }
+    bool publishImage(const RenderTestImage& image) override {
+        if (cancelled() || !image.valid() || image.rgba.size() > sizeof(channel->image)) return false;
+        channel->imageWidth = image.width;
+        channel->imageHeight = image.height;
+        channel->imageBytes = static_cast<uint32_t>(image.rgba.size());
+        std::memcpy(channel->image, image.rgba.data(), image.rgba.size());
+        return !cancelled();
+    }
     void finish(const BenchmarkSnapshot& snapshot) override {
         // The backend has retired the queue. Windows reclaims this private process's D3D/NGX
         // handles on normal exit. The supervisor verifies the actual exit inside its original deadline.
@@ -163,6 +174,41 @@ struct Reporter final : BenchmarkReporter {
     HANDLE pipe;
 };
 bool validUpdate(const BenchmarkSnapshot& next, const BenchmarkSnapshot& prev) {
+    if (next.mode == BenchmarkMode::FilmTour) {
+        constexpr auto total = static_cast<uint32_t>(kFilmTourSceneCount) * kFilmTourFramesPerScene;
+        if (next.mode != prev.mode || next.stage < prev.stage || next.stage > BenchmarkStage::Finished ||
+            prev.stage == BenchmarkStage::Finished || next.reason > BenchmarkReason::DlssInitFailed ||
+            next.outcome > ResultsOutcome::Unavailable || next.power > BenchmarkPower::Changed ||
+            next.tourScene >= kFilmTourSceneCount || next.tourScene < prev.tourScene ||
+            next.tourFramesDone < prev.tourFramesDone || next.tourFramesDone > total ||
+            next.tourWarmupCount > kFilmTourWarmupCount || next.tourMeasuredCount > kFilmTourMeasuredCount ||
+            next.tourFramesDone != next.tourScene * kFilmTourFramesPerScene + next.tourWarmupCount + next.tourMeasuredCount ||
+            (next.tourMeasuredCount && next.tourWarmupCount != kFilmTourWarmupCount)) return false;
+        for (const auto feature : next.evidence) if (feature > BenchmarkEvidence::Failed) return false;
+        if (next.outcome != ResultsOutcome::Completed) return true;
+        if (next.stage != BenchmarkStage::Finished || next.reason != BenchmarkReason::None ||
+            next.tourFramesDone != total || !std::isfinite(next.medianMs) || next.medianMs <= 0) return false;
+        for (size_t i = 0; i < kFilmTourSceneCount; ++i)
+            if (!std::isfinite(next.tourMediansMs[i]) || next.tourMediansMs[i] <= 0 ||
+                !std::isfinite(next.tourWorstMs[i]) || next.tourWorstMs[i] < next.tourMediansMs[i]) return false;
+        const auto score = filmTourGeometricMean(next.tourMediansMs);
+        return score && std::abs(next.medianMs - *score) <= *score * 1e-12;
+    }
+    if (next.mode == BenchmarkMode::RenderTest) {
+        if (next.mode != prev.mode || next.stage < prev.stage || next.stage > BenchmarkStage::Finished ||
+            prev.stage == BenchmarkStage::Finished || next.reason > BenchmarkReason::DlssInitFailed ||
+            next.outcome > ResultsOutcome::Unavailable || next.power > BenchmarkPower::Changed ||
+            next.tilesDone < prev.tilesDone || next.tilesDone > next.tilesTotal ||
+            next.tilesTotal > kResultsMaxRenderTiles ||
+            (prev.tilesTotal && next.tilesTotal != prev.tilesTotal)) return false;
+        for (const auto feature : next.evidence) if (feature > BenchmarkEvidence::Failed) return false;
+        if (next.outcome != ResultsOutcome::Completed) return true;
+        return next.stage == BenchmarkStage::Finished && next.reason == BenchmarkReason::None &&
+            next.tilesTotal && next.tilesDone == next.tilesTotal && next.samplesPerPixel && next.width && next.height &&
+            std::isfinite(next.renderSeconds) && next.renderSeconds > 0 &&
+            std::isfinite(next.gpuSeconds) && next.gpuSeconds >= 0 &&
+            std::isfinite(next.megaSamplesPerSecond) && next.megaSamplesPerSecond > 0;
+    }
     if (next.mode != prev.mode || next.stage < prev.stage || next.stage > BenchmarkStage::Finished ||
         prev.stage == BenchmarkStage::Finished || next.warmupCount < prev.warmupCount ||
         next.measuredCount < prev.measuredCount || next.warmupCount > kResultsWarmupCount ||
@@ -181,6 +227,7 @@ struct ResultsWorker::Shared {
     std::mutex mutex;
     ResultsWorkerState state = ResultsWorkerState::idle;
     BenchmarkSnapshot last{};
+    std::shared_ptr<const RenderTestImage> image;
     Clock::time_point absolute{}, stageLimit{}, frameLimit = (Clock::time_point::max)();
     Clock::time_point stopped{};
     Channel* channel = nullptr; // Published and detached under mutex; the supervisor owns the mapping.
@@ -228,15 +275,18 @@ struct ResultsWorker::Shared {
         if (next.stage != last.stage) {
             switch (next.stage) {
             case BenchmarkStage::Warming: stageLimit = now + warmingLimit; break;
-            case BenchmarkStage::Measuring: stageLimit = now + measuringLimit; break;
+            case BenchmarkStage::Measuring: stageLimit = now + (next.mode == BenchmarkMode::RenderTest ? 600s :
+                (next.mode == BenchmarkMode::FilmTour ? 300s : measuringLimit)); break;
             case BenchmarkStage::Finishing: stageLimit = now + finishingLimit; break;
             case BenchmarkStage::Finished: stageLimit = (std::min)(stageLimit, now + finishingLimit); break;
             default: break;
             }
         }
         if (next.stage == BenchmarkStage::Warming || next.stage == BenchmarkStage::Measuring) {
-            if (next.stage != last.stage || next.warmupCount != last.warmupCount || next.measuredCount != last.measuredCount)
-                frameLimit = now + frameProgressLimit;
+            if (next.mode == BenchmarkMode::RenderTest) frameLimit = (Clock::time_point::max)();
+            else if (next.stage != last.stage || next.warmupCount != last.warmupCount || next.measuredCount != last.measuredCount ||
+                     next.tourFramesDone != last.tourFramesDone)
+                frameLimit = now + (next.mode == BenchmarkMode::FilmTour ? 15s : frameProgressLimit);
         } else frameLimit = (Clock::time_point::max)();
         last = next;
         return true;
@@ -259,7 +309,10 @@ struct ResultsWorker::Shared {
         if (!section.value) return fail();
         mapping.channel = static_cast<Channel*>(MapViewOfFile(section.value, FILE_MAP_WRITE, 0, 0, sizeof(Channel)));
         if (!mapping.channel) return fail();
-        *mapping.channel = {protocol, permitted, request};
+        mapping.channel->version = protocol;
+        mapping.channel->permit = permitted;
+        mapping.channel->request = request;
+        mapping.channel->imageWidth = mapping.channel->imageHeight = mapping.channel->imageBytes = 0;
         HANDLE inherited[] = {section.value, write.value};
         Attributes attributes;
         if (!attributes.initialize(inherited, job.value)) return fail();
@@ -319,8 +372,24 @@ struct ResultsWorker::Shared {
                 const BOOL queried = GetExitCodeProcess(process.value, &code);
                 std::lock_guard lock(mutex);
                 if (checkLocked()) {
-                    if (queried && code == 0 && last.stage == BenchmarkStage::Finished) state = ResultsWorkerState::completed;
-                    else stopLocked(ResultsWorkerState::failed, BenchmarkReason::WorkerExited);
+                    if (queried && code == 0 && last.stage == BenchmarkStage::Finished) {
+                        if (last.mode == BenchmarkMode::RenderTest && last.outcome == ResultsOutcome::Completed) {
+                            const auto width = mapping.channel->imageWidth;
+                            const auto height = mapping.channel->imageHeight;
+                            const auto bytes = mapping.channel->imageBytes;
+                            if (width != last.width || height != last.height || bytes > sizeof(mapping.channel->image) ||
+                                !validRenderTestImageSize(width, height, bytes)) {
+                                stopLocked(ResultsWorkerState::failed, BenchmarkReason::WorkerExited);
+                                return;
+                            }
+                            auto result = std::make_shared<RenderTestImage>();
+                            result->width = width;
+                            result->height = height;
+                            result->rgba.assign(mapping.channel->image, mapping.channel->image + bytes);
+                            image = std::move(result);
+                        }
+                        state = ResultsWorkerState::completed;
+                    } else stopLocked(ResultsWorkerState::failed, BenchmarkReason::WorkerExited);
                 }
                 return;
             }
@@ -353,14 +422,15 @@ ResultsWorker::ResultsWorker() : shared_(std::make_shared<Shared>()) {}
 ResultsWorker::~ResultsWorker() { cancel(); }
 
 bool ResultsWorker::start(const BenchmarkRequest& request) {
-    if (request.mode > BenchmarkMode::DlssQuality) return false;
+    if (request.mode > BenchmarkMode::FilmTour) return false;
     {
         std::lock_guard lock(shared_->mutex);
         if (shared_->state != ResultsWorkerState::idle || workerActive.exchange(true)) return false;
         shared_->state = ResultsWorkerState::starting;
         shared_->last.mode = request.mode;
         auto start = Clock::now();
-        shared_->absolute = start + absoluteLimit;
+        // The render test may measure for 10 minutes after preparation; add the preparation budget.
+        shared_->absolute = start + (request.mode == BenchmarkMode::RenderTest ? preparationLimit + 600s + 30s : absoluteLimit);
         shared_->stageLimit = start + launchLimit;
     }
     try {
@@ -395,6 +465,10 @@ BenchmarkSnapshot ResultsWorker::snapshot() const {
     }
     return result;
 }
+std::shared_ptr<const RenderTestImage> ResultsWorker::image() const {
+    std::lock_guard lock(shared_->mutex);
+    return shared_->image;
+}
 
 int runResultsWorkerIfRequested(int argc, char** argv) {
     if (argc < 2 || std::string_view(argv[1]) != "--internal-results-worker") return -1;
@@ -405,7 +479,7 @@ int runResultsWorkerIfRequested(int argc, char** argv) {
     if (!IsProcessInJob(GetCurrentProcess(), nullptr, &inJob) || !inJob) return 2;
     Mapping mapping;
     mapping.channel = static_cast<Channel*>(MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, sizeof(Channel)));
-    if (!mapping.channel || mapping.channel->version != protocol || mapping.channel->request.mode > BenchmarkMode::DlssQuality) return 2;
+    if (!mapping.channel || mapping.channel->version != protocol || mapping.channel->request.mode > BenchmarkMode::FilmTour) return 2;
     // Cancel and workload admission are ordered by the same interprocess atomic. This also covers a
     // cancellation that happens inside CreateProcessW, before the supervisor gets a process handle.
     if (InterlockedCompareExchange(&mapping.channel->permit, admitted, permitted) != permitted) return 2;

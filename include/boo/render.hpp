@@ -359,6 +359,9 @@ public:
     // Exactly one canonical offscreen draw. Query data and feature evidence are consumed only after its fence.
     BenchmarkReason drawBenchmarkFrame(const FrameContext&, const ResultsSample&, BenchmarkSnapshot&, double& milliseconds);
 
+    // One tiled progressive sample, retired before returning its GPU duration.
+    BenchmarkReason drawRenderTestFrame(const FrameContext&, double& milliseconds);
+
     // Deterministic offscreen Passes 1-3 execution + CanvasClean RGBA8/RGB10 readback for headless regression testing.
     bool renderHeadlessCanvasForTest(
         const FrameContext& ctx,

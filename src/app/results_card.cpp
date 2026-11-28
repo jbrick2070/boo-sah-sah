@@ -40,6 +40,8 @@ ResultText resultsModeText(BenchmarkMode mode) {
     case BenchmarkMode::Raster: return T::Raster;
     case BenchmarkMode::PathTracing: return T::Path;
     case BenchmarkMode::DlssQuality: return T::Dlss;
+    case BenchmarkMode::RenderTest: return T::RenderTest;
+    case BenchmarkMode::FilmTour: return T::FilmTour;
     default: return T::Unknown;
     }
 }
@@ -56,6 +58,14 @@ std::wstring resultsComparisonLine(double runMs, double referenceMs) {
     const auto at = line.find(L"{n}");
     if (at != line.npos) line.replace(at, 3, std::format(L"{:.0f}", std::abs(difference)));
     return line;
+}
+
+std::wstring resultsComparisonForRun(const BenchmarkSnapshot& run) {
+    if (const auto* reference = resultsReferenceFor(run))
+        return run.mode == BenchmarkMode::RenderTest
+            ? resultsComparisonLine(run.renderSeconds, reference->snapshot.renderSeconds)
+            : resultsComparisonLine(run.medianMs, reference->snapshot.medianMs);
+    return {};
 }
 
 namespace {
@@ -178,6 +188,65 @@ std::vector<ResultCardRow> runRows(const ResultsDialogContext& context, const Be
         rows.push_back({std::move(label), {ResultCardCell{std::move(value), numeric}, ResultCardCell{L"—"}}});
     };
     const auto field = [&](T key, std::wstring value, bool numeric = false) { row(resultText(key), std::move(value), numeric); };
+    if (s.mode == BenchmarkMode::FilmTour) {
+        const bool complete = s.outcome == ResultsOutcome::Completed && s.stage == BenchmarkStage::Finished &&
+            s.reason == BenchmarkReason::None && s.tourFramesDone == kFilmTourSceneCount * (kFilmTourWarmupCount + kFilmTourMeasuredCount) &&
+            std::isfinite(s.medianMs) && s.medianMs > 0;
+        const auto absent = resultText(T::Unavailable);
+        field(T::TourScore, complete ? decimal(s.medianMs) : absent, complete);
+        constexpr std::array<T, kFilmTourSceneCount> scenes{T::TourDuskPool, T::TourSanctuary, T::TourVortex,
+            T::TourShanghai, T::TourEarth, T::TourBathroom};
+        for (size_t i = 0; i < scenes.size(); ++i) {
+            const bool valid = complete && std::isfinite(s.tourMediansMs[i]) && s.tourMediansMs[i] > 0 &&
+                std::isfinite(s.tourWorstMs[i]) && s.tourWorstMs[i] >= s.tourMediansMs[i];
+            row(std::wstring(resultText(scenes[i])) + L" · " + resultText(T::Typical),
+                valid ? decimal(s.tourMediansMs[i]) : absent, valid);
+            row(std::wstring(resultText(scenes[i])) + L" · " + resultText(T::Worst),
+                valid ? decimal(s.tourWorstMs[i]) : absent, valid);
+        }
+        field(T::Workload, std::wstring(resultText(T::FilmTour)) + L" · " + resultText(T::Raster) + L" · " + resultText(T::TourConditions));
+        field(T::Canvas, s.width && s.height ? std::format(L"{} × {}", s.width, s.height) : resultText(T::Unknown), s.width && s.height);
+        std::wstring status = resultText(outcomeText(s.outcome));
+        if (s.reason != BenchmarkReason::None && s.reason != BenchmarkReason::Cancelled)
+            status += std::wstring(L" · ") + resultText(resultsReasonText(s.reason));
+        field(T::Outcome, std::move(status));
+        row(L"GPU", chip(s.vendorId ? s.vendorId : context.vendorId, s.vendorId ? s.deviceId : context.deviceId));
+        row(L"CPU", cpuModel(context.hardware));
+        const auto v = s.driverVersion;
+        field(T::Driver, v ? std::format(L"{}.{}.{}.{}", v >> 48, (v >> 32) & 65535,
+                                       (v >> 16) & 65535, v & 65535) : resultText(T::Unknown), v != 0);
+        field(T::Build, std::wstring(build), true);
+        field(T::Power, resultText(powerText(s.power)));
+        return rows;
+    }
+    if (s.mode == BenchmarkMode::RenderTest) {
+        const bool score = s.outcome == ResultsOutcome::Completed && s.stage == BenchmarkStage::Finished &&
+            s.reason == BenchmarkReason::None && s.tilesTotal && s.tilesDone == s.tilesTotal &&
+            s.samplesPerPixel && s.width && s.height && std::isfinite(s.renderSeconds) && s.renderSeconds > 0 &&
+            std::isfinite(s.megaSamplesPerSecond) && s.megaSamplesPerSecond > 0;
+        const auto absent = resultText(T::Unavailable);
+        field(T::RenderTime, score ? decimal(s.renderSeconds) : absent, score);
+        field(T::RenderRate, score ? decimal(s.megaSamplesPerSecond) : absent, score);
+        field(T::Tiles, std::format(L"{} / {}", s.tilesDone, s.tilesTotal), true);
+        field(T::SamplesPerPixel, std::to_wstring(s.samplesPerPixel), true);
+        field(T::Canvas, s.width && s.height ? std::format(L"{} \u00d7 {}", s.width, s.height) : resultText(T::Unknown),
+              s.width && s.height);
+        field(T::RenderMode, resultText(s.renderPathTraced ? T::RenderPathRan : T::RenderRasterRan));
+        std::wstring status = resultText(outcomeText(s.outcome));
+        if (s.reason != BenchmarkReason::None && s.reason != BenchmarkReason::Cancelled)
+            status += std::wstring(L" \u00b7 ") + resultText(resultsReasonText(s.reason));
+        field(T::Outcome, std::move(status));
+        row(L"GPU", chip(s.vendorId ? s.vendorId : context.vendorId, s.vendorId ? s.deviceId : context.deviceId));
+        row(L"CPU", cpuModel(context.hardware));
+        row(L"NPU", npuModel(context.hardware));
+        const auto v = s.driverVersion;
+        field(T::Driver, v ? std::format(L"{}.{}.{}.{}", v >> 48, (v >> 32) & 65535,
+                                       (v >> 16) & 65535, v & 65535) : resultText(T::Unknown), v != 0);
+        field(T::Build, std::wstring(build), true);
+        field(T::Architecture, reference ? L"x64 / x64" : architecture());
+        field(T::Power, resultText(powerText(s.power)));
+        return rows;
+    }
     const auto observed = [&](BenchmarkFeature feature) { return s.evidence[static_cast<size_t>(feature)]; };
     const auto lighting = s.mode == BenchmarkMode::PathTracing ? BenchmarkEvidence::PathTracingGpu : BenchmarkEvidence::RasterGpu;
     const auto upscaling = s.mode == BenchmarkMode::DlssQuality ? BenchmarkEvidence::DlssGpu : BenchmarkEvidence::Off;
@@ -285,9 +354,10 @@ ResultCard makeResultsCard(const ResultsDialogContext& context, const BenchmarkS
     card.title = std::wstring(L"BOO SAH SAH · ") + resultText(T::Results);
     card.subtitle = resultText(T::Community);
     card.rtl = UiStrings::instance().rightToLeft();
-    card.headings = {resultText(T::Metric), resultText(T::ThisRun), resultText(T::Reference)};
+    card.headings = {resultText(T::Metric), resultText(T::ThisRun),
+                     resultText(T::Reference)};
     card.rows = runRows(context, s, BOO_WIDEN(BOO_RELEASE_VERSION), false, card.rtl);
-    card.note = resultText(T::LowerIsBetter);
+    card.note = s.mode == BenchmarkMode::RenderTest ? L"" : resultText(T::LowerIsBetter);
     if (const auto* ref = resultsReferenceFor(s)) {
         std::string_view version(ref->build);
         const std::wstring displayVersion(version.begin(), version.end());
@@ -300,7 +370,8 @@ ResultCard makeResultsCard(const ResultsDialogContext& context, const BenchmarkS
     } else {
         card.note += std::wstring(L" ") + resultText(T::NoReference);
     }
-    card.note += std::wstring(L" ") + resultText(T::ConditionsLatest);
+    if (s.mode != BenchmarkMode::RenderTest && s.mode != BenchmarkMode::FilmTour)
+        card.note += std::wstring(L" ") + resultText(T::ConditionsLatest);
     return card;
 }
 

@@ -2,6 +2,14 @@
 
 All notable milestones implemented in accordance with `docs/SPEC_v4.md`.
 
+## 2.2.0.0 — Watch the benchmark
+
+- **Render test**: one path-traced 1920 x 1080 frame of the orchid in the sanctuary builds up tile by tile from the centre (64 x 64 tiles, 24 samples per pixel), with a live counter. The score is render time and Msamples/s; the finished frame is shown in the results and **Save picture…** saves it at full resolution. GPUs without ray tracing run a supersampled raster version, scored separately. RTX 5080 reference: 23.3 s.
+- **Film tour**: six scenes from the film (dusk opening, sanctuary, particle vortex, Shanghai river, orbit, dawn bathroom), each warmed up and measured on its own, joined by short crossfades. The score is the geometric mean of the scene medians, with every scene in Details. RTX 5080 reference: 0.55 ms.
+- **A cleaner benchmark window** in a dark Windows 11 style: rounded corners and Mica, compact pages sized to their content, a description and rough length for each test, a real progress bar (it fills once from start to finish), standard-size buttons, Windows 11 radio choices and a dark Details table. The title now reads Benchmark.
+- The existing Raster, Path tracing and DLSS Quality tests and their references are unchanged.
+- New text in all 25 languages.
+
 ## 2.1.1.0 — A clearer benchmark window
 
 - **The results window shows the answer first**: typical and worst GPU frame time next to the RTX 5080 reference, a one-line comparison, and what ran (mode, render and output size, whether DLSS ran on the GPU). The full table is behind **Details**.

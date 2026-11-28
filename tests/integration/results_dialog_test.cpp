@@ -164,24 +164,33 @@ void run(HDESK desktop, const std::wstring& desktopName, const std::filesystem::
     };
     open();
     auto control = [&](int id) { return GetDlgItem(dialog, id); };
-    require(textOf(control(IDC_RESULTS_TITLE)) == L"Select a test", "Missing selector heading");
-    const auto reasons = textOf(control(IDC_RESULTS_BODY));
+    require(textOf(control(IDC_RESULTS_TITLE)) == L"Choose a test", "Missing selector heading");
+    const auto rasterDescription = textOf(control(IDC_RESULTS_RASTER_DESC));
+    const auto pathDescription = textOf(control(IDC_RESULTS_PT_DESC));
+    const auto dlssDescription = textOf(control(IDC_RESULTS_DLSS_DESC));
+    require(!rasterDescription.empty() && !pathDescription.empty() && !dlssDescription.empty() &&
+            !textOf(control(IDC_RESULTS_RENDER_DESC)).empty(), "Missing test descriptions");
+    // MapDialogRect reads the dialog's private data and must not be called on another process's dialog.
+    // A standard button is about 75 x 23 px at 96 DPI; allow up to twice the standard height.
+    RECT button{};
+    const UINT dpi = GetDpiForWindow(dialog) ? GetDpiForWindow(dialog) : 96u;
+    require(GetWindowRect(control(IDOK), &button) != FALSE, "Could not measure Run button");
+    require(button.right-button.left >= MulDiv(50, static_cast<int>(dpi), 96) &&
+            button.bottom-button.top <= MulDiv(46, static_cast<int>(dpi), 96),
+            ("Run button is not a compact standard-height button: " + std::to_string(button.right-button.left) + "x" +
+             std::to_string(button.bottom-button.top) + " at " + std::to_string(dpi) + " DPI").c_str());
     const bool raster = IsWindowEnabled(control(IDC_RESULTS_RASTER)) != FALSE;
     if (warp || !raster) {
         require(!IsWindowEnabled(control(IDC_RESULTS_RASTER)) && !IsWindowEnabled(control(IDC_RESULTS_PT)) &&
                 !IsWindowEnabled(control(IDC_RESULTS_DLSS)), "Software test controls accepted input");
-        require(reasons.find(L"Raster") != reasons.npos && reasons.find(L"Path tracing") != reasons.npos &&
-                reasons.find(L"DLSS") != reasons.npos, "Missing explanations for disabled options");
-        if (warp) require(reasons.find(L"requires a hardware GPU") != reasons.npos, "Wrong WARP reason");
-        require(focused(dialog) == control(IDC_RESULTS_BODY), "Keyboard cannot reach disabled-mode explanations");
-        key(focused(dialog), VK_TAB);
-        require(until(1s, [&] { return focused(dialog) == control(IDOK); }), "Tab from explanation did not reach View Results");
+        if (warp) require(rasterDescription.find(L"requires a hardware GPU") != rasterDescription.npos,
+                          "Wrong WARP reason");
+        require(focused(dialog) == control(IDOK), "Results button did not receive focus when no option is available");
         key(focused(dialog), VK_RETURN);
     } else {
         require(focused(dialog) == control(IDC_RESULTS_RASTER), "Enabled raster choice did not receive focus");
         key(focused(dialog), VK_TAB);
         require(until(1s, [&] { return focused(dialog) != control(IDC_RESULTS_RASTER); }), "Tab did not leave test choices");
-        if (!reasons.empty()) require(focused(dialog) == control(IDC_RESULTS_BODY), "Ineligible option reason is missing from tab order");
         for (int i=0; i<4 && focused(dialog)!=control(IDOK); ++i) {
             auto previous = focused(dialog);
             key(previous, VK_TAB);
@@ -191,6 +200,12 @@ void run(HDESK desktop, const std::wstring& desktopName, const std::filesystem::
         key(focused(dialog), VK_RETURN);
         require(until(2s, [&] { return textOf(control(IDCANCEL)) == L"Cancel" && focused(dialog) == control(IDCANCEL); }),
                 "Cancellation inaccessible on progress page");
+        wchar_t progressClass[32]{};
+        require(IsWindowVisible(control(IDC_RESULTS_PROGRESS)) &&
+                GetClassNameW(control(IDC_RESULTS_PROGRESS), progressClass, std::size(progressClass)) &&
+                std::wstring_view(progressClass) == PROGRESS_CLASSW &&
+                IsWindowVisible(control(IDC_RESULTS_STAGE)) && IsWindowVisible(control(IDC_RESULTS_ELAPSED)) &&
+                !IsWindowVisible(control(IDC_RESULTS_BODY)), "Compact progress controls missing");
         key(focused(dialog), VK_ESCAPE);
     }
     require(until(2s, [&] { return IsWindowVisible(control(IDC_RESULTS_DETAILS)); }),
@@ -277,6 +292,21 @@ void testResetSave(HDESK desktop, DWORD pid, HWND dialog, const std::wstring& ca
                 const auto inner = FindWindowExW(combo,nullptr,L"ComboBox",nullptr);
                 if (inner) edit = FindWindowExW(inner,nullptr,L"Edit",nullptr);
             }
+            if (!edit) {
+                // Windows 11 Save As: the file name is an Edit (1001) inside a plain ComboBox, with no
+                // ComboBoxEx32 (1148) around it. A toolbar also uses 1001, so match the class and parent too.
+                struct Find { HWND found{}; } f;
+                EnumChildWindows(picker, [](HWND h, LPARAM l) -> BOOL {
+                    wchar_t cls[32]{}, parentCls[32]{};
+                    if (GetDlgCtrlID(h) == 0x03e9 && IsWindowVisible(h) && GetClassNameW(h, cls, 32) &&
+                        std::wstring_view(cls) == L"Edit" && GetClassNameW(GetParent(h), parentCls, 32) &&
+                        std::wstring_view(parentCls) == L"ComboBox") {
+                        reinterpret_cast<Find*>(l)->found = h;
+                        return FALSE;
+                    }
+                    return TRUE; }, reinterpret_cast<LPARAM>(&f));
+                edit = f.found;
+            }
             wchar_t cls[32]{};
             return edit && GetClassNameW(edit,cls,32) && std::wstring_view(cls)==L"Edit";
         });
@@ -352,7 +382,7 @@ void testFixtureCard(HDESK desktop,std::wstring name,const std::filesystem::path
         return;
     }
     if (stalled) {
-        require(until(1s,[&]{return textOf(GetDlgItem(dialog,IDC_RESULTS_TITLE))==L"Finishing" ||
+        require(until(1s,[&]{return textOf(GetDlgItem(dialog,IDC_RESULTS_STAGE))==L"Finishing" ||
             textOf(GetDlgItem(dialog,IDCANCEL))==L"Close";}), "Failed teardown never reached viewer");
         if (textOf(GetDlgItem(dialog,IDCANCEL))!=L"Close") key(focused(dialog),VK_ESCAPE);
     }
@@ -386,6 +416,8 @@ void testFixtureCard(HDESK desktop,std::wstring name,const std::filesystem::path
 int wmain(int argc, wchar_t** argv) {
     const bool softwareOnly=argc==4 && std::wstring_view(argv[3])==L"--software-only";
     if (argc != 3 && !softwareOnly) return 2;
+    // Measure the viewer's windows in physical pixels, matching GetDpiForWindow.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     std::wstring name = L"BooResultsUi_" + std::to_wstring(GetCurrentProcessId());
     HDESK original = GetThreadDesktop(GetCurrentThreadId());
     HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);

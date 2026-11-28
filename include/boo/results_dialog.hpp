@@ -12,7 +12,8 @@ struct ResultsDialogContext {
     BenchmarkRequest adapter{}; // only the LUID is used; the user selects the mode
     uint32_t vendorId = 0, deviceId = 0;
     ResultsHostHardware hardware{};
-    std::array<BenchmarkReason, 3> availability{
+    std::array<BenchmarkReason, 5> availability{
+        BenchmarkReason::UnsupportedDevice, BenchmarkReason::UnsupportedDevice,
         BenchmarkReason::UnsupportedDevice, BenchmarkReason::UnsupportedDevice,
         BenchmarkReason::UnsupportedDevice};
     // A busy or unavailable viewer can open a card without starting a child.
